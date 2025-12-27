@@ -669,7 +669,9 @@ static int simulated_capture_thread(void *ctx) {
         if (cvbs_a) {
             atomic_fetch_add(&app->cvbs_busy_a, 1);
             int sys = atomic_load(&app->cvbs_system_a);
+            int dec = atomic_load(&app->cvbs_chroma_decoder_a);
             gui_cvbs_set_format(cvbs_a, sys);
+            gui_cvbs_set_chroma_decoder(cvbs_a, dec);
             gui_cvbs_process_buffer(cvbs_a, buf_a, SIM_BUFFER_SIZE);
             atomic_fetch_sub(&app->cvbs_busy_a, 1);
         }
@@ -677,7 +679,9 @@ static int simulated_capture_thread(void *ctx) {
         if (cvbs_b) {
             atomic_fetch_add(&app->cvbs_busy_b, 1);
             int sys = atomic_load(&app->cvbs_system_b);
+            int dec = atomic_load(&app->cvbs_chroma_decoder_b);
             gui_cvbs_set_format(cvbs_b, sys);
+            gui_cvbs_set_chroma_decoder(cvbs_b, dec);
             gui_cvbs_process_buffer(cvbs_b, buf_b, SIM_BUFFER_SIZE);
             atomic_fetch_sub(&app->cvbs_busy_b, 1);
         }

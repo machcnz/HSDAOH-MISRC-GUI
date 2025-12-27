@@ -265,6 +265,9 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
     // Initialize legacy state
     decoder->lines_since_vsync = 0;
 
+    // Default chroma decoder
+    decoder->chroma_decoder = CVBS_CHROMA_DECODER_MONO;
+
     // Initialize frame state
     decoder->state.format = CVBS_FORMAT_UNKNOWN;
     decoder->state.total_lines = 0;
@@ -1108,6 +1111,17 @@ const char *gui_cvbs_get_format_name(cvbs_decoder_t *decoder) {
         case CVBS_FORMAT_NTSC:  return "NTSC 720x486";
         case CVBS_FORMAT_SECAM: return "SECAM 720x576";
         default:                return "Detecting...";
+    }
+}
+
+void gui_cvbs_set_chroma_decoder(cvbs_decoder_t *decoder, int chroma_decoder)
+{
+    if (!decoder) return;
+
+    if (chroma_decoder == (int)CVBS_CHROMA_DECODER_SIMPLEPAL) {
+        decoder->chroma_decoder = CVBS_CHROMA_DECODER_SIMPLEPAL;
+    } else {
+        decoder->chroma_decoder = CVBS_CHROMA_DECODER_MONO;
     }
 }
 

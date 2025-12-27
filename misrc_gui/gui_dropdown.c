@@ -174,7 +174,9 @@ static void ensure_cvbs_enabled_for_channel(gui_app_t *app, int ch) {
     if (new_dec && gui_cvbs_init(new_dec)) {
         gui_cvbs_reset(new_dec);
         int sys = (ch == 0) ? atomic_load(&app->cvbs_system_a) : atomic_load(&app->cvbs_system_b);
+        int dec = (ch == 0) ? atomic_load(&app->cvbs_chroma_decoder_a) : atomic_load(&app->cvbs_chroma_decoder_b);
         gui_cvbs_set_format(new_dec, sys);
+        gui_cvbs_set_chroma_decoder(new_dec, dec);
         atomic_store(decp, new_dec);
     } else {
         if (new_dec) {

@@ -27,6 +27,12 @@ typedef enum {
     CVBS_FORMAT_SECAM
 } cvbs_format_t;
 
+// Chroma decoder selection
+typedef enum {
+    CVBS_CHROMA_DECODER_MONO = 0,     // luma-only (clean mono)
+    CVBS_CHROMA_DECODER_SIMPLEPAL = 1 // Simple PAL colour decode (WIP)
+} cvbs_chroma_decoder_t;
+
 // Frame dimensions
 #define CVBS_FRAME_WIDTH      720   // Standard horizontal resolution
 #define CVBS_PAL_HEIGHT       576   // PAL (D1) active lines
@@ -125,6 +131,9 @@ typedef struct cvbs_decoder {
     uint8_t *display_buffer;       // Buffer currently being displayed
     bool display_ready;            // Display buffer has valid data
 
+    // Chroma decoder selection
+    cvbs_chroma_decoder_t chroma_decoder;
+
     // GPU resources for video display
     Image frame_image;
     Texture2D frame_texture;
@@ -211,6 +220,9 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
 // Set video format manually (PAL/NTSC)
 // Uses cvbs_format_select_t from gui_app.h (CVBS_SELECT_PAL/CVBS_SELECT_NTSC)
 void gui_cvbs_set_format(cvbs_decoder_t *decoder, int format_select);
+
+// Set chroma decoder mode
+void gui_cvbs_set_chroma_decoder(cvbs_decoder_t *decoder, int chroma_decoder);
 
 //-----------------------------------------------------------------------------
 // Status

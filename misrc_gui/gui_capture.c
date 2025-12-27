@@ -350,6 +350,14 @@ void gui_app_init(gui_app_t *app) {
     app->cvbs_a = NULL;
     app->cvbs_b = NULL;
 
+    // Default CVBS settings
+    // Start in NTSC to match the simulated test signal; user can switch to PAL/SECAM in UI.
+    atomic_store(&app->cvbs_system_a, 1);
+    atomic_store(&app->cvbs_system_b, 1);
+    // Default to mono-clean (luma-only)
+    atomic_store(&app->cvbs_chroma_decoder_a, 0);
+    atomic_store(&app->cvbs_chroma_decoder_b, 0);
+
     // Initialize capture ringbuffers
     if (!s_rb_initialized) {
         int r = rb_init(&s_capture_rb, "gui_capture", BUFFER_TOTAL_SIZE);

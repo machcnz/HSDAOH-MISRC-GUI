@@ -21,8 +21,14 @@
 //-----------------------------------------------------------------------------
 
 typedef struct {
-    Rectangle button_rect;
-    Rectangle options_rect[3];  // PAL, NTSC, SECAM
+    // System selector
+    Rectangle sys_button_rect;
+    Rectangle sys_options_rect[3];  // PAL, NTSC, SECAM
+
+    // Decoder selector
+    Rectangle dec_button_rect;
+    Rectangle dec_options_rect[2];  // Mono, SimplePAL
+
     bool is_visible;
 } cvbs_overlay_hitbox_t;
 
@@ -224,82 +230,128 @@ static void render_fft_panel(gui_app_t *app, int channel,
 // CVBS Panel Rendering
 //-----------------------------------------------------------------------------
 
-// Render the CVBS system selector overlay in the top-right corner of the panel
+// Render the CVBS system+decoder selector overlay in the top-right corner of the panel.
 // Uses the same style as sidebar dropdowns (FONT_SIZE_DROPDOWN_OPT, COLOR_BUTTON, etc.)
 static void render_cvbs_system_overlay(gui_app_t *app, int channel,
                                         float panel_x, float panel_y, float panel_w) {
     int sys = (channel == 0) ? atomic_load(&app->cvbs_system_a) : atomic_load(&app->cvbs_system_b);
     const char *sys_name = (sys == 0) ? "PAL" : (sys == 2) ? "SECAM" : "NTSC";
 
+    int dec = (channel == 0) ? atomic_load(&app->cvbs_chroma_decoder_a) : atomic_load(&app->cvbs_chroma_decoder_b);
+    const char *dec_name = (dec == 1) ? "SimplePAL" : "Mono";
+
     // Button dimensions matching sidebar style (65x18 with corner radius 3)
     float btn_w = 65;
     float btn_h = 18;
-    float btn_x = panel_x + panel_w - btn_w - 8;
-    float btn_y = panel_y + 8;
 
-    // Store hit box for click detection
-    s_cvbs_overlay[channel].button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
+    // Top-right: [Dec] [Sys]
+    float sys_x = panel_x + panel_w - btn_w - 8;
+    float btn_y = panel_y + 8;
+    float dec_x = sys_x - btn_w - 6;
+
+    // Store hit boxes for click detection
+    s_cvbs_overlay[channel].sys_button_rect = (Rectangle){sys_x, btn_y, btn_w, btn_h};
+    s_cvbs_overlay[channel].dec_button_rect = (Rectangle){dec_x, btn_y, btn_w, btn_h};
     s_cvbs_overlay[channel].is_visible = true;
 
-    // Draw dropdown button (matching sidebar style)
-    bool is_open = gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel);
-    Color btn_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
-
-    DrawRectangleRounded((Rectangle){btn_x, btn_y, btn_w, btn_h}, 0.15f, 4, btn_bg);
-
-    // Draw text centered, leaving room for arrow
-    int text_w = gui_text_measure(sys_name, FONT_SIZE_DROPDOWN_OPT);
-    float arrow_w = 8;  // Space for arrow
-    float total_w = text_w + arrow_w + 4;  // text + gap + arrow
-    float text_x = btn_x + (btn_w - total_w) / 2;
     float text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
-    gui_text_draw(sys_name, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
-    // Draw small triangle arrow indicator
+    // Decoder button
+    bool dec_open = gui_dropdown_is_open(DROPDOWN_CVBS_DECODER, channel);
+    Color dec_bg = dec_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    DrawRectangleRounded((Rectangle){dec_x, btn_y, btn_w, btn_h}, 0.15f, 4, dec_bg);
+
+    int dec_text_w = gui_text_measure(dec_name, FONT_SIZE_DROPDOWN_OPT);
+    float arrow_w = 8;
+    float total_w = dec_text_w + arrow_w + 4;
+    float dec_text_x = dec_x + (btn_w - total_w) / 2;
+    gui_text_draw(dec_name, dec_text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
     float arrow_size = 5.0f;
-    float arrow_x = text_x + text_w + 6;
+    float dec_arrow_x = dec_text_x + dec_text_w + 6;
     float arrow_cy = btn_y + btn_h / 2;
-    if (is_open) {
-        // Up arrow (triangle pointing up)
-        Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
-        Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
-        Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
+    if (dec_open) {
+        Vector2 top = { dec_arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
+        Vector2 left = { dec_arrow_x, arrow_cy + arrow_size/2 };
+        Vector2 right = { dec_arrow_x + arrow_size, arrow_cy + arrow_size/2 };
         DrawTriangle(top, left, right, COLOR_TEXT);
     } else {
-        // Down arrow (triangle pointing down)
-        Vector2 bottom = { arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
-        Vector2 left = { arrow_x, arrow_cy - arrow_size/2 };
-        Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
+        Vector2 bottom = { dec_arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
+        Vector2 left = { dec_arrow_x, arrow_cy - arrow_size/2 };
+        Vector2 right = { dec_arrow_x + arrow_size, arrow_cy - arrow_size/2 };
         DrawTriangle(bottom, right, left, COLOR_TEXT);
     }
 
-    // Draw dropdown options if open
-    if (is_open) {
+    // System button
+    bool sys_open = gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel);
+    Color sys_bg = sys_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    DrawRectangleRounded((Rectangle){sys_x, btn_y, btn_w, btn_h}, 0.15f, 4, sys_bg);
+
+    int sys_text_w = gui_text_measure(sys_name, FONT_SIZE_DROPDOWN_OPT);
+    float sys_total_w = sys_text_w + arrow_w + 4;
+    float sys_text_x = sys_x + (btn_w - sys_total_w) / 2;
+    gui_text_draw(sys_name, sys_text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    float sys_arrow_x = sys_text_x + sys_text_w + 6;
+    if (sys_open) {
+        Vector2 top = { sys_arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
+        Vector2 left = { sys_arrow_x, arrow_cy + arrow_size/2 };
+        Vector2 right = { sys_arrow_x + arrow_size, arrow_cy + arrow_size/2 };
+        DrawTriangle(top, left, right, COLOR_TEXT);
+    } else {
+        Vector2 bottom = { sys_arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
+        Vector2 left = { sys_arrow_x, arrow_cy - arrow_size/2 };
+        Vector2 right = { sys_arrow_x + arrow_size, arrow_cy - arrow_size/2 };
+        DrawTriangle(bottom, right, left, COLOR_TEXT);
+    }
+
+    // Decoder dropdown options
+    if (dec_open) {
         float opt_y = btn_y + btn_h;
-        const char *options[] = {"PAL", "NTSC", "SECAM"};
-        int sys_values[] = {0, 1, 2};  // PAL=0, NTSC=1, SECAM=2
-        float opt_h = 20;  // Option height matching sidebar
+        const char *options[] = {"Mono", "SimplePAL"};
+        int dec_values[] = {0, 1};
+        float opt_h = 20;
 
-        // Background for dropdown container
-        DrawRectangleRounded((Rectangle){btn_x, opt_y, btn_w, opt_h * 3}, 0.1f, 4, COLOR_PANEL_BG);
+        DrawRectangleRounded((Rectangle){dec_x, opt_y, btn_w, opt_h * 2}, 0.1f, 4, COLOR_PANEL_BG);
 
-        for (int i = 0; i < 3; i++) {
-            Rectangle opt_rect = {btn_x, opt_y + i * opt_h, btn_w, opt_h};
-            s_cvbs_overlay[channel].options_rect[i] = opt_rect;
+        for (int i = 0; i < 2; i++) {
+            Rectangle opt_rect = {dec_x, opt_y + i * opt_h, btn_w, opt_h};
+            s_cvbs_overlay[channel].dec_options_rect[i] = opt_rect;
 
-            bool is_selected = (sys == sys_values[i]);
-
-            // Check hover
+            bool is_selected = (dec == dec_values[i]);
             Vector2 mouse = GetMousePosition();
             bool hover = CheckCollisionPointRec(mouse, opt_rect);
-
-            // Use gui_dropdown_option_color for consistent styling
             Color opt_bg = gui_dropdown_option_color(is_selected, hover);
             DrawRectangleRec(opt_rect, opt_bg);
 
-            // Center text in option using app font
             int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
-            float opt_text_x = btn_x + btn_w/2 - opt_text_w/2;
+            float opt_text_x = dec_x + btn_w/2 - opt_text_w/2;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+            gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
+
+    // System dropdown options
+    if (sys_open) {
+        float opt_y = btn_y + btn_h;
+        const char *options[] = {"PAL", "NTSC", "SECAM"};
+        int sys_values[] = {0, 1, 2};
+        float opt_h = 20;
+
+        DrawRectangleRounded((Rectangle){sys_x, opt_y, btn_w, opt_h * 3}, 0.1f, 4, COLOR_PANEL_BG);
+
+        for (int i = 0; i < 3; i++) {
+            Rectangle opt_rect = {sys_x, opt_y + i * opt_h, btn_w, opt_h};
+            s_cvbs_overlay[channel].sys_options_rect[i] = opt_rect;
+
+            bool is_selected = (sys == sys_values[i]);
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+            Color opt_bg = gui_dropdown_option_color(is_selected, hover);
+            DrawRectangleRec(opt_rect, opt_bg);
+
+            int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
+            float opt_text_x = sys_x + btn_w/2 - opt_text_w/2;
             float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
             gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
         }
@@ -466,17 +518,36 @@ bool panel_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_
     if (channel < 0 || channel > 1) return false;
     if (!s_cvbs_overlay[channel].is_visible) return false;
 
-    // Check button click - toggle dropdown
-    if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].button_rect)) {
+    // Decoder button click
+    if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].dec_button_rect)) {
+        gui_dropdown_toggle(DROPDOWN_CVBS_DECODER, channel);
+        return true;
+    }
+
+    // System button click
+    if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].sys_button_rect)) {
         gui_dropdown_toggle(DROPDOWN_CVBS_SYSTEM, channel);
         return true;
     }
 
-    // Check option clicks if dropdown is open
+    // Decoder option clicks
+    if (gui_dropdown_is_open(DROPDOWN_CVBS_DECODER, channel)) {
+        int dec_values[] = {0, 1};  // Mono, SimplePAL
+        for (int i = 0; i < 2; i++) {
+            if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].dec_options_rect[i])) {
+                if (channel == 0) atomic_store(&app->cvbs_chroma_decoder_a, dec_values[i]);
+                else atomic_store(&app->cvbs_chroma_decoder_b, dec_values[i]);
+                gui_dropdown_close_all();
+                return true;
+            }
+        }
+    }
+
+    // System option clicks
     if (gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel)) {
         int sys_values[] = {0, 1, 2};  // PAL, NTSC, SECAM
         for (int i = 0; i < 3; i++) {
-            if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].options_rect[i])) {
+            if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].sys_options_rect[i])) {
                 if (channel == 0) atomic_store(&app->cvbs_system_a, sys_values[i]);
                 else atomic_store(&app->cvbs_system_b, sys_values[i]);
                 gui_dropdown_close_all();

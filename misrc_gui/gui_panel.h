@@ -81,7 +81,7 @@ void panel_config_set_split(channel_panel_config_t *config, bool split);
 // CVBS Panel Overlay Interaction
 //-----------------------------------------------------------------------------
 
-// Handle click on CVBS panel overlay (system selector dropdown)
+// Handle click on CVBS panel overlay (system + decoder selector dropdowns)
 // Returns true if click was handled, false otherwise
 bool panel_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos);
 

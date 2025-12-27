@@ -26,7 +26,8 @@ typedef struct gui_app gui_app_t;
 #define DROPDOWN_LAYOUT       "Layout"
 #define DROPDOWN_LEFT_VIEW    "LeftView"
 #define DROPDOWN_RIGHT_VIEW   "RightView"
-#define DROPDOWN_CVBS_SYSTEM  "CvbsSystem"
+#define DROPDOWN_CVBS_SYSTEM   "CvbsSystem"
+#define DROPDOWN_CVBS_DECODER  "CvbsDecoder"
 
 //-----------------------------------------------------------------------------
 // State Management

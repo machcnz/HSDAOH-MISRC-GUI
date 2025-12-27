@@ -309,6 +309,11 @@ typedef struct gui_app {
     atomic_int cvbs_system_a;
     atomic_int cvbs_system_b;
 
+    // User-selected CVBS chroma decoder per channel (applied when CVBS is enabled)
+    // 0 = Mono (clean luma), 1 = SimplePAL
+    atomic_int cvbs_chroma_decoder_a;
+    atomic_int cvbs_chroma_decoder_b;
+
 } gui_app_t;
 
 // Application lifecycle
