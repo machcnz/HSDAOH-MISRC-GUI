@@ -84,4 +84,8 @@ rb_event_t *gui_extract_get_data_event(void);
 // Returns NULL if extraction is not initialized
 rb_event_t *gui_extract_get_space_event(void);
 
+// Get the "record space available" event (file writers signal this after consuming from record ringbuffer)
+// Returns NULL if extraction is not initialized
+rb_event_t *gui_extract_get_record_space_event(void);
+
 #endif // GUI_EXTRACT_H

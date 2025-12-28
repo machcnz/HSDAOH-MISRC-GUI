@@ -15,6 +15,7 @@
 #include "gui_capture.h"
 
 #include "../misrc_common/ringbuffer.h"
+#include "../misrc_common/rb_event.h"
 #include "../misrc_common/flac_writer.h"
 #include "../misrc_common/threading.h"
 
@@ -122,6 +123,9 @@ static int flac_writer_thread(void *ctx) {
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
     void *buf;
 
+    // Get record space event for signaling
+    rb_event_t *record_space_event = gui_extract_get_record_space_event();
+
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
@@ -152,6 +156,11 @@ static int flac_writer_thread(void *ctx) {
 
         rb_read_finished(wctx->rb, len);
 
+        // Signal that space is now available (for extraction thread waiting on full buffer)
+        if (record_space_event) {
+            rb_event_signal(record_space_event);
+        }
+
         if (s_recording_app) {
             atomic_fetch_add(&s_recording_app->recording_bytes, len);
             if (wctx->channel == 0) {
@@ -172,6 +181,9 @@ static int raw_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
     size_t len = BUFFER_READ_SIZE * bps;
+
+    // Get record space event for signaling
+    rb_event_t *record_space_event = gui_extract_get_record_space_event();
 
     fprintf(stderr, "[RAW] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
@@ -197,6 +209,11 @@ static int raw_writer_thread(void *ctx) {
 
         size_t written = fwrite(buf, 1, len, wctx->file);
         rb_read_finished(wctx->rb, len);
+
+        // Signal that space is now available (for extraction thread waiting on full buffer)
+        if (record_space_event) {
+            rb_event_signal(record_space_event);
+        }
 
         if (s_recording_app) {
             atomic_fetch_add(&s_recording_app->recording_bytes, written);

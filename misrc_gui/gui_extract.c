@@ -67,6 +67,13 @@ static rb_event_t s_data_event;       // Signaled when new data is available in 
 static rb_event_t s_space_event;      // Signaled when space becomes available in ringbuffer
 static bool s_events_initialized = false;
 
+// Event signaling for record ringbuffers (extraction thread waits, file writers signal)
+static rb_event_t s_record_space_event;  // Signaled when record buffer space becomes available
+static bool s_record_events_initialized = false;
+
+// Display throttling - update at ~60fps instead of every buffer
+#define DISPLAY_UPDATE_INTERVAL_MS 16  // ~60fps
+
 // Extraction thread - runs continuously from capture start to stop
 // Always updates display/stats, conditionally writes to record ringbuffers
 static int extraction_thread(void *ctx) {
@@ -74,6 +81,9 @@ static int extraction_thread(void *ctx) {
     size_t read_size = BUFFER_READ_SIZE * 4;  // 4 bytes per sample pair
     size_t clip[2] = {0, 0};
     uint16_t peak[2] = {0, 0};
+
+    // Display throttling state
+    uint64_t last_display_update_ms = 0;
 
     fprintf(stderr, "[EXTRACT] Continuous extraction thread started\n");
 
@@ -92,14 +102,14 @@ static int extraction_thread(void *ctx) {
             }
             // Wait on event instead of polling (with timeout for exit check)
             if (s_events_initialized) {
-                rb_event_wait_timeout(&s_data_event, 100);
+                rb_event_wait_timeout(&s_data_event, 20);  // Reduced from 100ms for faster exit
             } else {
                 thrd_sleep_ms(1);
             }
             continue;
         }
 
-        // Extract samples
+        // Extract samples (always - this is the core work)
         s_extract_fn((uint32_t*)buf, BUFFER_READ_SIZE, clip, s_buf_aux, s_buf_a, s_buf_b, peak);
 
         // Mark capture buffer as consumed
@@ -110,11 +120,8 @@ static int extraction_thread(void *ctx) {
             rb_event_signal(&s_space_event);
         }
 
-        // Always update stats and display
-        gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
-        gui_oscilloscope_update_display(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
-
-        // CVBS decode (if enabled per-channel)
+        // CVBS decode must process every buffer to maintain video timing
+        // (cannot be throttled - decoder tracks line/frame sync)
         cvbs_decoder_t *cvbs_a = atomic_load(&s_extract_app->cvbs_a);
         if (cvbs_a) {
             atomic_fetch_add(&s_extract_app->cvbs_busy_a, 1);
@@ -132,6 +139,18 @@ static int extraction_thread(void *ctx) {
             atomic_fetch_sub(&s_extract_app->cvbs_busy_b, 1);
         }
 
+        // Throttle display/stats updates to ~60fps to reduce CPU usage
+        // (oscilloscope and stats don't need every sample)
+        uint64_t now_ms = get_time_ms();
+        if (now_ms - last_display_update_ms >= DISPLAY_UPDATE_INTERVAL_MS) {
+            last_display_update_ms = now_ms;
+
+            // Update stats and display
+            gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
+            gui_oscilloscope_update_display(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
+        }
+
+        // Sample counters always updated (cheap atomic ops)
         atomic_fetch_add(&s_extract_app->total_samples, BUFFER_READ_SIZE);
         atomic_fetch_add(&s_extract_app->samples_a, BUFFER_READ_SIZE);
         atomic_fetch_add(&s_extract_app->samples_b, BUFFER_READ_SIZE);
@@ -156,7 +175,12 @@ static int extraction_thread(void *ctx) {
                     if (atomic_load(&do_exit)) {
                         goto exit_thread;
                     }
-                    thrd_sleep_ms(1);
+                    // Wait on event instead of polling (file writers signal when space available)
+                    if (s_record_events_initialized) {
+                        rb_event_wait_timeout(&s_record_space_event, 10);
+                    } else {
+                        thrd_sleep_ms(1);
+                    }
                 }
 
                 // Channel A
@@ -218,7 +242,12 @@ static int extraction_thread(void *ctx) {
                     if (atomic_load(&do_exit)) {
                         goto exit_thread;
                     }
-                    thrd_sleep_ms(1);
+                    // Wait on event instead of polling (file writers signal when space available)
+                    if (s_record_events_initialized) {
+                        rb_event_wait_timeout(&s_record_space_event, 10);
+                    } else {
+                        thrd_sleep_ms(1);
+                    }
                 }
 
                 if (bits_a == 8) {
@@ -292,6 +321,16 @@ void gui_extract_init(void) {
         }
     }
 
+    // Initialize record buffer space event (for event-based backpressure during recording)
+    if (!s_record_events_initialized) {
+        if (rb_event_init(&s_record_space_event) == 0) {
+            s_record_events_initialized = true;
+            fprintf(stderr, "[EXTRACT] Record buffer event initialized\n");
+        } else {
+            fprintf(stderr, "[EXTRACT] Warning: Failed to initialize record event, falling back to polling\n");
+        }
+    }
+
     s_initialized = true;
 }
 
@@ -311,6 +350,12 @@ void gui_extract_cleanup(void) {
         rb_event_destroy(&s_data_event);
         rb_event_destroy(&s_space_event);
         s_events_initialized = false;
+    }
+
+    // Destroy record buffer event
+    if (s_record_events_initialized) {
+        rb_event_destroy(&s_record_space_event);
+        s_record_events_initialized = false;
     }
 
     // Free extraction buffers
@@ -512,4 +557,9 @@ rb_event_t *gui_extract_get_data_event(void) {
 rb_event_t *gui_extract_get_space_event(void) {
     if (!s_events_initialized) return NULL;
     return &s_space_event;
+}
+
+rb_event_t *gui_extract_get_record_space_event(void) {
+    if (!s_record_events_initialized) return NULL;
+    return &s_record_space_event;
 }
