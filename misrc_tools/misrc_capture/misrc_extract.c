@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 
-#include "common/buffer.h"
+#include "../common/buffer.h"
 
 #ifndef _WIN32
 	#include <getopt.h>
@@ -36,7 +36,7 @@
 	#if defined(__MINGW32__)
 		#include <getopt.h>
 	#else
-		#include "getopt/getopt.h"
+		#include "../getopt/getopt.h"
 	#endif
 	#define PERF_MEASURE 0
 #endif
@@ -46,8 +46,8 @@
 #include <time.h>
 #endif
 
-#include "version.h"
-#include "common/extract.h"
+#include "../version.h"
+#include "../common/extract.h"
 
 #define BUFFER_SIZE 65536*32
 

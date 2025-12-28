@@ -47,8 +47,8 @@
 #endif
 #include <time.h>
 
-#include "common/buffer.h"
-#include "common/threading.h"
+#include "../common/buffer.h"
+#include "../common/threading.h"
 
 #ifndef _WIN32
 	#if defined(__APPLE__) || defined(__MACH__)
@@ -70,7 +70,7 @@
 	#if defined(__MINGW32__)
 		#include <getopt.h>
 	#else
-		#include "getopt/getopt.h"
+		#include "../getopt/getopt.h"
 	#endif
 	#define F_OK 0
 	#define access _access
@@ -101,14 +101,14 @@ static const char* const _FLAC_StreamEncoderSetNumThreadsStatusString[] = {
 
 #include "simple_capture/simple_capture.h"
 
-#include "version.h"
-#include "common/ringbuffer.h"
-#include "common/flac_writer.h"
-#include "common/frame_parser.h"
-#include "common/device_enum.h"
-#include "common/extract.h"
-#include "common/wave.h"
-#include "common/file_utils.h"
+#include "../version.h"
+#include "../common/ringbuffer.h"
+#include "../common/flac_writer.h"
+#include "../common/frame_parser.h"
+#include "../common/device_enum.h"
+#include "../common/extract.h"
+#include "../common/wave.h"
+#include "../common/file_utils.h"
 
 #if LIBFLAC_ENABLED == 1 && defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT >= 14
 #include "numcores.h"

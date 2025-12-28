@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include <hsdaoh.h>
-#include "../misrc_tools/simple_capture/simple_capture.h"
+#include "../misrc_capture/simple_capture/simple_capture.h"
 
 /*-----------------------------------------------------------------------------
  * Device List Management

@@ -25,13 +25,13 @@ ldflags_capture = [
 ]
 
 sources_extract = [
-  'misrc_extract.c',
+  'misrc_capture/misrc_extract.c',
   'common/extract.c',
   version_target
 ]
 
 sources_capture = [
-  'misrc_capture.c',
+  'misrc_capture/misrc_capture.c',
   'common/extract.c',
   'common/ringbuffer.c',
   'common/rb_event.c',
@@ -146,17 +146,17 @@ if host_system == 'windows' or host_system == 'cygwin'
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
   ldflags_capture += [ '-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lonecore', '-static' ]
-  sources_capture += 'simple_capture/simple_capture_mediafoundation.c'
+  sources_capture += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
   if host_cpu_family == 'aarch64'
     ldflags_capture += [ '-lwinpthread' ]
   endif
 elif host_system == 'linux'
-  sources_capture += 'simple_capture/simple_capture_v4l2.c'
+  sources_capture += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
   ldflags_capture += [ '-lm' ]
 elif host_system == 'darwin'
   add_languages('objc')
   ldflags_capture += ['-Wl,-framework,Cocoa', '-Wl,-framework,AVFoundation', '-Wl,-framework,CoreMedia', '-Wl,-framework,CoreVideo', '-Wl,-framework,IOKit', '-Wl,-framework,CoreFoundation', '-Wl,-framework,Security']
-  sources_capture += 'simple_capture/simple_capture_avfoundation.m'
+  sources_capture += 'misrc_capture/simple_capture/simple_capture_avfoundation.m'
 endif
 
 executable('misrc_extract',
@@ -245,15 +245,15 @@ if raylib_dep.found()
     # Need mincore for VirtualAlloc2/MapViewOfFile3 used by ringbuffer
     gui_ldflags += ['-lmincore']
     # simple_capture for device enumeration
-    sources_gui += 'simple_capture/simple_capture_mediafoundation.c'
+    sources_gui += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
     gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32']
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
-    sources_gui += 'simple_capture/simple_capture_v4l2.c'
+    sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
   elif host_system == 'darwin'
     gui_ldflags += ['-Wl,-framework,OpenGL', '-Wl,-framework,Cocoa', '-Wl,-framework,IOKit', '-Wl,-framework,CoreAudio', '-Wl,-framework,CoreVideo']
     gui_ldflags += ['-Wl,-framework,AVFoundation', '-Wl,-framework,CoreMedia', '-Wl,-framework,Security']
-    sources_gui += 'simple_capture/simple_capture_avfoundation.m'
+    sources_gui += 'misrc_capture/simple_capture/simple_capture_avfoundation.m'
   endif
 
   executable('misrc_gui',
