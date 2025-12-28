@@ -19,6 +19,9 @@
 #ifndef EXTRACT_H
 #define EXTRACT_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 typedef void (*conv_function_t)(void*,size_t,size_t*,uint8_t*,void*,void*,uint16_t*);
 typedef void (*conv_16to32_t)(int16_t*,int32_t*,size_t);
 typedef void (*conv_16to8_t)(int16_t*,int8_t*,size_t);

@@ -11,8 +11,11 @@ warnings = [
   '-Wshadow',
 ]
 
-cflags = [
-  warnings
+cflags = warnings + [
+  # Ensure POSIX timing APIs (clock_gettime/nanosleep) are declared on glibc
+  '-D_POSIX_C_SOURCE=200809L',
+  # glibc default feature set (needed for endian helpers like le16toh)
+  '-D_DEFAULT_SOURCE',
 ]
 
 ldflags = [
@@ -42,6 +45,15 @@ sources_capture = [
 ]
 
 debug_build = get_option('buildtype').startswith('debug')
+
+if not debug_build
+  # Extra performance flags
+  cflags += [
+    '-O3',
+    '-funroll-loops',
+    '-ftree-vectorize',
+  ]
+endif
 
 host_cpu_family = host_machine.cpu_family()
 

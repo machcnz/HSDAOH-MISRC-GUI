@@ -24,6 +24,7 @@
 #ifndef RINGBUFFER_H
 #define RINGBUFFER_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
 

@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #if defined(__linux__)
+	#include <time.h>
 	#include <linux/videodev2.h>
 	typedef uint32_t sc_codec_t;
 	#define SC_CODEC_GREY  V4L2_PIX_FMT_GREY
