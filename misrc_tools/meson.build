@@ -26,21 +26,21 @@ ldflags_capture = [
 
 sources_extract = [
   'misrc_extract.c',
-  '../misrc_common/extract.c',
+  'common/extract.c',
   version_target
 ]
 
 sources_capture = [
   'misrc_capture.c',
-  '../misrc_common/extract.c',
-  '../misrc_common/ringbuffer.c',
-  '../misrc_common/rb_event.c',
-  '../misrc_common/flac_writer.c',
-  '../misrc_common/frame_parser.c',
-  '../misrc_common/capture_handler.c',
-  '../misrc_common/device_enum.c',
-  '../misrc_common/file_utils.c',
-  '../misrc_common/ringbuffer_writer.c',
+  'common/extract.c',
+  'common/ringbuffer.c',
+  'common/rb_event.c',
+  'common/buffer_manager.c',
+  'common/flac_writer.c',
+  'common/frame_parser.c',
+  'common/device_enum.c',
+  'common/file_utils.c',
+  'common/ringbuffer_writer.c',
   version_target
 ]
 
@@ -84,7 +84,7 @@ if host_cpu_family == 'x86_64'
   endif
 
   nasm_sources = [
-    '../misrc_common/extract.asm',
+    'common/extract.asm',
   ]
 
   nasm = find_program('nasm')
@@ -178,35 +178,43 @@ raylib_dep = dependency('raylib', required: false)
 
 if raylib_dep.found()
   sources_gui = [
-    '../misrc_gui/misrc_gui.c',
-    '../misrc_gui/gui_ui.c',
-    '../misrc_gui/gui_oscilloscope.c',
-    '../misrc_gui/gui_phosphor_rt.c',
-    '../misrc_gui/gui_fft.c',
-    '../misrc_gui/gui_dropdown.c',
-    '../misrc_gui/gui_popup.c',
-    '../misrc_gui/gui_trigger.c',
-    '../misrc_gui/gui_capture.c',
-    '../misrc_gui/gui_record.c',
-    '../misrc_gui/gui_extract.c',
-    '../misrc_gui/gui_simulated.c',
-    '../misrc_gui/gui_playback.c',
-    '../misrc_gui/gui_panel.c',
-    '../misrc_gui/gui_text.c',
-    '../misrc_gui/gui_vu_meter.c',
-    '../misrc_gui/gui_cvbs.c',
-    '../misrc_gui/gui_settings.c',
-    '../misrc_gui/gui_audio.c',
-    '../misrc_gui/clay_renderer_raylib.c',
-    '../misrc_common/extract.c',
-    '../misrc_common/ringbuffer.c',
-    '../misrc_common/rb_event.c',
-    '../misrc_common/flac_writer.c',
-    '../misrc_common/frame_parser.c',
-    '../misrc_common/capture_handler.c',
-    '../misrc_common/device_enum.c',
-    '../misrc_common/file_utils.c',
-    '../misrc_common/ringbuffer_writer.c',
+    # Core
+    'misrc_gui/core/misrc_gui.c',
+    'misrc_gui/core/gui_settings.c',
+    # Input
+    'misrc_gui/input/gui_capture.c',
+    'misrc_gui/input/gui_simulated.c',
+    'misrc_gui/input/gui_playback.c',
+    # Processing
+    'misrc_gui/processing/gui_extract.c',
+    'misrc_gui/processing/gui_display_thread.c',
+    # Signal
+    'misrc_gui/signal/gui_trigger.c',
+    'misrc_gui/signal/gui_cvbs.c',
+    # Visualization
+    'misrc_gui/visualization/gui_oscilloscope.c',
+    'misrc_gui/visualization/gui_phosphor_rt.c',
+    'misrc_gui/visualization/gui_fft.c',
+    'misrc_gui/visualization/gui_panel.c',
+    'misrc_gui/visualization/gui_text.c',
+    'misrc_gui/visualization/gui_vu_meter.c',
+    # UI
+    'misrc_gui/ui/gui_ui.c',
+    'misrc_gui/ui/gui_dropdown.c',
+    'misrc_gui/ui/gui_popup.c',
+    'misrc_gui/ui/clay_renderer_raylib.c',
+    # Output
+    'misrc_gui/output/gui_record.c',
+    'misrc_gui/output/gui_audio.c',
+    'common/extract.c',
+    'common/ringbuffer.c',
+    'common/rb_event.c',
+    'common/buffer_manager.c',
+    'common/flac_writer.c',
+    'common/frame_parser.c',
+    'common/device_enum.c',
+    'common/file_utils.c',
+    'common/ringbuffer_writer.c',
     version_target
   ]
 

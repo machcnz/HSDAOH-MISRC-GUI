@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 
-#include "../misrc_common/buffer.h"
+#include "common/buffer.h"
 
 #ifndef _WIN32
 	#include <getopt.h>
@@ -47,7 +47,7 @@
 #endif
 
 #include "version.h"
-#include "../misrc_common/extract.h"
+#include "common/extract.h"
 
 #define BUFFER_SIZE 65536*32
 

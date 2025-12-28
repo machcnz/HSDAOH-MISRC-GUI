@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
-#include "../../misrc_common/extract.h"
+#include "../common/extract.h"
 
 #define BUFSIZE ((2<<19)*1024)
 
