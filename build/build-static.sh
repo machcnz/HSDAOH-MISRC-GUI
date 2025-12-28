@@ -137,8 +137,9 @@ make install
 cd ../
 
 # Download Clay (header-only library)
-#https://raw.githubusercontent.com/nicbarker/clay/refs/heads/main/clay.h
-#https://raw.githubusercontent.com/nicbarker/clay/refs/tags/v0.14/clay.h
+# todo just include in src?
+# https://raw.githubusercontent.com/nicbarker/clay/refs/heads/main/clay.h
+# https://raw.githubusercontent.com/nicbarker/clay/refs/tags/v0.14/clay.h
 curl -L --silent -o "clay.h" "https://raw.githubusercontent.com/nicbarker/clay/refs/heads/main/clay.h"
 mkdir -p "${WORKSPACE}/include"
 cp clay.h "${WORKSPACE}/include/"
