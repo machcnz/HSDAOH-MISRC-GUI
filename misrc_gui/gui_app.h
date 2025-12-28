@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include "raylib.h"
 
 // Forward declarations

@@ -9,6 +9,7 @@
 #define GUI_TEXT_H
 
 #include "gui_app.h"
+#include <stddef.h>
 #include "raylib.h"
 
 //-----------------------------------------------------------------------------

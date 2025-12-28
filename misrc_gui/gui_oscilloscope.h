@@ -8,6 +8,8 @@
 #ifndef GUI_OSCILLOSCOPE_H
 #define GUI_OSCILLOSCOPE_H
 
+#include <stddef.h>
+#include <sys/types.h>
 #include "gui_app.h"
 #include "raylib.h"
 
