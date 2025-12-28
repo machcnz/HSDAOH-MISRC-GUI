@@ -575,10 +575,14 @@ static int playback_thread_func(void *ctx_ptr) {
         if (speed != PLAYBACK_SPEED_MAX) {
             float multiplier = speed_multipliers[speed];
             if (multiplier > 0) {
-                // Calculate delay based on samples output and speed
-                // At 40kHz, 65536 samples = 1.6384 seconds of real-time audio
-                // We want to output in ~2ms chunks to match simulated mode
-                uint32_t delay_ms = (uint32_t)(PLAYBACK_UPDATE_INTERVAL_MS / multiplier);
+                // Calculate delay based on actual audio duration
+                // Note: FLAC metadata reports 40kHz but actual capture rate is 40MSPS
+                // The FLAC sample rate is a quirk of the recording format
+                // At 40MSPS: samples / 40000000 = seconds, samples / 40000 = milliseconds
+                float real_time_ms = (float)samples_to_output / 40000.0f;
+                // Original 40kHz calculation (if FLAC sample rate were accurate):
+                // float real_time_ms = (float)samples_to_output / 40.0f;
+                uint32_t delay_ms = (uint32_t)(real_time_ms / multiplier);
                 if (delay_ms > 0) {
                     thrd_sleep_ms(delay_ms);
                 }
