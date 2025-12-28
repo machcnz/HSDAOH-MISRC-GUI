@@ -462,46 +462,40 @@ static int playback_thread_func(void *ctx_ptr) {
         size_t avail_b = ctx->decode_available_b - ctx->decode_pos_b;
         size_t samples_to_output = RAW_BUFFER_SAMPLES;
 
-        // Use minimum of what's available, or check for EOF
-        bool eof_a = (ctx->decoder_a == NULL) || (avail_a == 0 &&
+        // Check for EOF on each channel independently and loop each one
+#if LIBFLAC_ENABLED == 1
+        bool eof_a = (ctx->decoder_a != NULL) && (avail_a == 0 &&
                       FLAC__stream_decoder_get_state(ctx->decoder_a) == FLAC__STREAM_DECODER_END_OF_STREAM);
-        bool eof_b = (ctx->decoder_b == NULL) || (avail_b == 0 &&
+        bool eof_b = (ctx->decoder_b != NULL) && (avail_b == 0 &&
                       FLAC__stream_decoder_get_state(ctx->decoder_b) == FLAC__STREAM_DECODER_END_OF_STREAM);
 
-        // Both channels at EOF?
-        if ((ctx->decoder_a && ctx->decoder_b && eof_a && eof_b) ||
-            (ctx->decoder_a && !ctx->decoder_b && eof_a) ||
-            (!ctx->decoder_a && ctx->decoder_b && eof_b)) {
-
-            if (atomic_load(&ctx->loop_enabled)) {
-                // Loop back to beginning
-                fprintf(stderr, "[PLAYBACK] Looping back to start\n");
-#if LIBFLAC_ENABLED == 1
-                if (ctx->decoder_a) {
-                    FLAC__stream_decoder_seek_absolute(ctx->decoder_a, 0);
-                    ctx->decode_available_a = 0;
-                    ctx->decode_pos_a = 0;
-                }
-                if (ctx->decoder_b) {
-                    FLAC__stream_decoder_seek_absolute(ctx->decoder_b, 0);
-                    ctx->decode_available_b = 0;
-                    ctx->decode_pos_b = 0;
-                }
-#endif
-                atomic_store(&ctx->current_sample, 0);
-                continue;
-            } else {
-                fprintf(stderr, "[PLAYBACK] End of file reached\n");
-                atomic_store(&ctx->state, PLAYBACK_STATE_EOF);
-                break;
-            }
+        // Loop channel A independently
+        if (eof_a) {
+            fprintf(stderr, "[PLAYBACK] Channel A EOF, looping\n");
+            FLAC__stream_decoder_seek_absolute(ctx->decoder_a, 0);
+            ctx->decode_available_a = 0;
+            ctx->decode_pos_a = 0;
         }
+
+        // Loop channel B independently
+        if (eof_b) {
+            fprintf(stderr, "[PLAYBACK] Channel B EOF, looping\n");
+            FLAC__stream_decoder_seek_absolute(ctx->decoder_b, 0);
+            ctx->decode_available_b = 0;
+            ctx->decode_pos_b = 0;
+        }
+
+        // If either channel just looped, continue to refill buffers
+        if (eof_a || eof_b) {
+            continue;
+        }
+#endif
 
         // Limit output to available samples
-        if (ctx->decoder_a && avail_a < samples_to_output && !eof_a) {
+        if (ctx->decoder_a && avail_a < samples_to_output) {
             samples_to_output = avail_a;
         }
-        if (ctx->decoder_b && avail_b < samples_to_output && !eof_b) {
+        if (ctx->decoder_b && avail_b < samples_to_output) {
             samples_to_output = avail_b;
         }
 
@@ -746,7 +740,7 @@ int gui_playback_start(gui_app_t *app, const char *file_a, const char *file_b) {
     // Initialize playback state
     atomic_store(&s_playback.state, PLAYBACK_STATE_PLAYING);
     atomic_store(&s_playback.speed, PLAYBACK_SPEED_1X);
-    atomic_store(&s_playback.loop_enabled, false);
+    atomic_store(&s_playback.loop_enabled, true);  // Loop by default
     atomic_store(&s_playback.seek_requested, false);
     atomic_store(&s_playback.current_sample, 0);
     atomic_store(&s_playback.running, true);
