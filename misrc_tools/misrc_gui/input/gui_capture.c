@@ -26,6 +26,7 @@
 #include "../../common/threading.h"
 #include "../../common/frame_parser.h"
 #include "../../common/device_enum.h"
+#include "../../common/buffer_manager.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,8 +45,7 @@
 #define BUFFER_AUDIO_TOTAL_SIZE (65536 * 256)
 
 // Ringbuffers for capture data
-static ringbuffer_t s_capture_rb;
-static bool s_rb_initialized = false;
+// Note: RF capture now uses buffer manager (BUF_CAPTURE_RF), audio still uses legacy ringbuffer
 static ringbuffer_t s_capture_audio_rb;
 static bool s_audio_rb_initialized = false;
 
@@ -554,9 +554,10 @@ int gui_app_start_capture(gui_app_t *app) {
         return gui_playback_start(app, file_a, file_b);
     }
 
-    if (!s_rb_initialized) {
-        fprintf(stderr, "[GUI] Ringbuffer not initialized\n");
-        gui_app_set_status(app, "Ringbuffer not initialized");
+    // Ensure capture buffer is initialized via buffer manager
+    if (bufmgr_ensure_init(&app->buffers, BUF_CAPTURE_RF) != 0) {
+        fprintf(stderr, "[GUI] Failed to initialize capture ringbuffer\n");
+        gui_app_set_status(app, "Failed to initialize capture buffer");
         return -1;
     }
 
@@ -586,7 +587,8 @@ int gui_app_start_capture(gui_app_t *app) {
     // Reset callback counter and capture handler state
     s_callback_count = 0;
     capture_handler_init(&s_capture_handler);
-    s_capture_handler.rb_rf = &s_capture_rb;
+    // Note: rb_rf is no longer used - capture callback uses buffer manager directly
+    s_capture_handler.rb_rf = NULL;
     s_capture_handler.rb_audio = s_audio_rb_initialized ? &s_capture_audio_rb : NULL;
     s_capture_handler.capture_rf = true;
 
