@@ -120,4 +120,21 @@ void gui_fft_render(fft_state_t *state, float x, float y,
                     float width, float height, float display_sample_rate,
                     Color color, Font *fonts);
 
+//-----------------------------------------------------------------------------
+// FFT Panel Rendering (for panel system integration)
+//-----------------------------------------------------------------------------
+
+// Render FFT as a panel, handling state lookup and unavailability messages.
+// This is the high-level entry point for the panel dispatch system.
+// Parameters:
+//   app: Application state
+//   channel: Channel number (0 or 1)
+//   x, y: Panel position
+//   w, h: Panel dimensions
+//   state: Per-panel FFT state (or NULL to use app's FFT state)
+//   color: Channel color (currently unused)
+void gui_fft_render_panel(struct gui_app *app, int channel,
+                          float x, float y, float w, float h,
+                          void *state, Color color);
+
 #endif // GUI_FFT_H

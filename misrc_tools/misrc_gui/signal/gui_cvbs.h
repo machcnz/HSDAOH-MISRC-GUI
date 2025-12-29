@@ -222,4 +222,29 @@ cvbs_format_t gui_cvbs_get_format(cvbs_decoder_t *decoder);
 // Get format name string
 const char *gui_cvbs_get_format_name(cvbs_decoder_t *decoder);
 
+//-----------------------------------------------------------------------------
+// CVBS Panel Rendering (for panel system integration)
+//-----------------------------------------------------------------------------
+
+// Render CVBS as a panel, including system selector overlay.
+// This is the high-level entry point for the panel dispatch system.
+// Parameters:
+//   app: Application state
+//   channel: Channel number (0 or 1)
+//   x, y: Panel position
+//   w, h: Panel dimensions
+//   state: Per-panel state (currently unused, reserved for future)
+//   color: Channel color (currently unused)
+void gui_cvbs_render_panel(struct gui_app *app, int channel,
+                           float x, float y, float w, float h,
+                           void *state, Color color);
+
+// Handle click events on the CVBS overlay (system selector dropdown).
+// Returns true if the click was handled by the overlay.
+// Parameters:
+//   app: Application state
+//   channel: Channel number (0 or 1)
+//   mouse_pos: Mouse position at click
+bool gui_cvbs_overlay_handle_click(struct gui_app *app, int channel, Vector2 mouse_pos);
+
 #endif // GUI_CVBS_H

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdatomic.h>
 
 // Define M_PI if not available (Windows compatibility)
 #ifndef M_PI
@@ -574,4 +575,51 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     (void)color;
     (void)fonts;
 #endif
+}
+
+//-----------------------------------------------------------------------------
+// FFT Panel Rendering (for panel system integration)
+//-----------------------------------------------------------------------------
+
+void gui_fft_render_panel(gui_app_t *app, int channel,
+                          float x, float y, float w, float h,
+                          void *state, Color color) {
+
+    fft_state_t *fft = (fft_state_t*)state;
+
+    // If no state provided, try to use the app's FFT state (for backward compat)
+    if (!fft) {
+        fft = (channel == 0) ? app->fft_a : app->fft_b;
+    }
+
+    if (!fft || !fft->initialized) {
+        // FFT not available - show message
+        const char *text = gui_fft_available() ? "FFT Initializing..." : "FFT Not Available";
+        int text_width = MeasureText(text, FONT_SIZE_OSC_MSG);
+        DrawText(text, (int)(x + w/2 - text_width/2), (int)(y + h/2 - 12),
+                 FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
+        return;
+    }
+
+    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+
+    // Get display samples
+    waveform_sample_t *samples;
+    size_t samples_available;
+    if (channel == 0) {
+        samples = app->display_samples_a;
+        samples_available = app->display_samples_available_a;
+    } else {
+        samples = app->display_samples_b;
+        samples_available = app->display_samples_available_b;
+    }
+
+    // Calculate display sample rate
+    uint32_t sr = atomic_load(&app->sample_rate);
+    float display_sample_rate = (trig->zoom_scale > 0 && sr > 0) ?
+                                (float)sr / trig->zoom_scale : 0;
+
+    // Process and render FFT
+    gui_fft_process_display(fft, samples, samples_available, display_sample_rate);
+    gui_fft_render(fft, x, y, w, h, display_sample_rate, color, app->fonts);
 }

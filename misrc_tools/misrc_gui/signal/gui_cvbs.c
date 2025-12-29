@@ -1142,3 +1142,153 @@ void gui_cvbs_set_format(cvbs_decoder_t *decoder, int format_select) {
     }
 }
 
+//-----------------------------------------------------------------------------
+// CVBS Panel Rendering (for panel system integration)
+//-----------------------------------------------------------------------------
+
+// Forward declaration needed for dropdown API (from gui_dropdown.h)
+#include "../ui/gui_dropdown.h"
+#include "../ui/gui_ui.h"
+
+// Hit box state for overlay click detection (per channel)
+typedef struct {
+    Rectangle button_rect;
+    Rectangle options_rect[3];  // PAL, NTSC, SECAM
+    bool is_visible;
+} cvbs_overlay_hitbox_t;
+
+static cvbs_overlay_hitbox_t s_cvbs_overlay[2];  // One per channel
+
+// Render the CVBS system selector overlay in the top-right corner of the panel
+// Uses the same style as sidebar dropdowns (FONT_SIZE_DROPDOWN_OPT, COLOR_BUTTON, etc.)
+static void render_cvbs_system_overlay(gui_app_t *app, int channel,
+                                        float panel_x, float panel_y, float panel_w) {
+    int sys = (channel == 0) ? atomic_load(&app->cvbs_system_a) : atomic_load(&app->cvbs_system_b);
+    const char *sys_name = (sys == 0) ? "PAL" : (sys == 2) ? "SECAM" : "NTSC";
+
+    // Button dimensions matching sidebar style (65x18 with corner radius 3)
+    float btn_w = 65;
+    float btn_h = 18;
+    float btn_x = panel_x + panel_w - btn_w - 8;
+    float btn_y = panel_y + 8;
+
+    // Store hit box for click detection
+    s_cvbs_overlay[channel].button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
+    s_cvbs_overlay[channel].is_visible = true;
+
+    // Draw dropdown button (matching sidebar style)
+    bool is_open = gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel);
+    Color btn_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+
+    DrawRectangleRounded((Rectangle){btn_x, btn_y, btn_w, btn_h}, 0.15f, 4, btn_bg);
+
+    // Draw text centered, leaving room for arrow
+    int text_w = gui_text_measure(sys_name, FONT_SIZE_DROPDOWN_OPT);
+    float arrow_w = 8;  // Space for arrow
+    float total_w = text_w + arrow_w + 4;  // text + gap + arrow
+    float text_x = btn_x + (btn_w - total_w) / 2;
+    float text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+    gui_text_draw(sys_name, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // Draw small triangle arrow indicator
+    float arrow_size = 5.0f;
+    float arrow_x = text_x + text_w + 6;
+    float arrow_cy = btn_y + btn_h / 2;
+    if (is_open) {
+        // Up arrow (triangle pointing up)
+        Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
+        Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
+        Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
+        DrawTriangle(top, left, right, COLOR_TEXT);
+    } else {
+        // Down arrow (triangle pointing down)
+        Vector2 bottom = { arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
+        Vector2 left = { arrow_x, arrow_cy - arrow_size/2 };
+        Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
+        DrawTriangle(bottom, right, left, COLOR_TEXT);
+    }
+
+    // Draw dropdown options if open
+    if (is_open) {
+        float opt_y = btn_y + btn_h;
+        const char *options[] = {"PAL", "NTSC", "SECAM"};
+        int sys_values[] = {0, 1, 2};  // PAL=0, NTSC=1, SECAM=2
+        float opt_h = 20;  // Option height matching sidebar
+
+        // Background for dropdown container
+        DrawRectangleRounded((Rectangle){btn_x, opt_y, btn_w, opt_h * 3}, 0.1f, 4, COLOR_PANEL_BG);
+
+        for (int i = 0; i < 3; i++) {
+            Rectangle opt_rect = {btn_x, opt_y + i * opt_h, btn_w, opt_h};
+            s_cvbs_overlay[channel].options_rect[i] = opt_rect;
+
+            bool is_selected = (sys == sys_values[i]);
+
+            // Check hover
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+
+            // Use gui_dropdown_option_color for consistent styling
+            Color opt_bg = gui_dropdown_option_color(is_selected, hover);
+            DrawRectangleRec(opt_rect, opt_bg);
+
+            // Center text in option using app font
+            int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
+            float opt_text_x = btn_x + btn_w/2 - opt_text_w/2;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+            gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
+}
+
+void gui_cvbs_render_panel(gui_app_t *app, int channel,
+                           float x, float y, float w, float h,
+                           void *state, Color color) {
+    (void)state;
+    (void)color;
+
+    // Reset overlay visibility at start (will be set if decoder is active)
+    s_cvbs_overlay[channel].is_visible = false;
+
+    cvbs_decoder_t *dec = (channel == 0) ? atomic_load(&app->cvbs_a) : atomic_load(&app->cvbs_b);
+    if (!dec) {
+        const char *text = "CVBS disabled";
+        int text_width = MeasureText(text, FONT_SIZE_OSC_MSG);
+        DrawText(text, (int)(x + w/2 - text_width/2), (int)(y + h/2 - 12),
+                 FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
+        return;
+    }
+
+    // Render decoded video frame (grayscale)
+    gui_cvbs_render_frame(dec, x, y, w, h);
+
+    // Render system selector overlay in top-right corner
+    render_cvbs_system_overlay(app, channel, x, y, w);
+}
+
+bool gui_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
+    if (channel < 0 || channel > 1) return false;
+    if (!s_cvbs_overlay[channel].is_visible) return false;
+
+    // Check button click - toggle dropdown
+    if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].button_rect)) {
+        gui_dropdown_toggle(DROPDOWN_CVBS_SYSTEM, channel);
+        return true;
+    }
+
+    // Check option clicks if dropdown is open
+    if (gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel)) {
+        int sys_values[] = {0, 1, 2};  // PAL, NTSC, SECAM
+        for (int i = 0; i < 3; i++) {
+            if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].options_rect[i])) {
+                if (channel == 0) atomic_store(&app->cvbs_system_a, sys_values[i]);
+                else atomic_store(&app->cvbs_system_b, sys_values[i]);
+                gui_dropdown_close_all();
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
