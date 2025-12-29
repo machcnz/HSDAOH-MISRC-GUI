@@ -163,27 +163,6 @@ static bool handle_layout_dropdown(gui_app_t *app, int ch) {
     return clicked;
 }
 
-static void ensure_cvbs_enabled_for_channel(gui_app_t *app, int ch) {
-    if (!app) return;
-
-    _Atomic(cvbs_decoder_t *) *decp = (ch == 0) ? &app->cvbs_a : &app->cvbs_b;
-    cvbs_decoder_t *cur = atomic_load(decp);
-    if (cur) return;
-
-    cvbs_decoder_t *new_dec = (cvbs_decoder_t*)calloc(1, sizeof(cvbs_decoder_t));
-    if (new_dec && gui_cvbs_init(new_dec)) {
-        gui_cvbs_reset(new_dec);
-        int sys = (ch == 0) ? atomic_load(&app->cvbs_system_a) : atomic_load(&app->cvbs_system_b);
-        gui_cvbs_set_format(new_dec, sys);
-        atomic_store(decp, new_dec);
-    } else {
-        if (new_dec) {
-            gui_cvbs_cleanup(new_dec);
-            free(new_dec);
-        }
-    }
-}
-
 // Handle left view selection for a channel
 static bool handle_left_view_dropdown(gui_app_t *app, int ch) {
     bool clicked = false;
@@ -197,9 +176,6 @@ static bool handle_left_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("LeftViewOpt", ch * 10 + vt))) {
-                if ((panel_view_type_t)vt == PANEL_VIEW_CVBS) {
-                    ensure_cvbs_enabled_for_channel(app, ch);
-                }
                 panel_config_set_left_view(config, (panel_view_type_t)vt);
                 gui_dropdown_close_all();
                 clicked = true;
@@ -226,9 +202,6 @@ static bool handle_right_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("RightViewOpt", ch * 10 + vt))) {
-                if ((panel_view_type_t)vt == PANEL_VIEW_CVBS) {
-                    ensure_cvbs_enabled_for_channel(app, ch);
-                }
                 panel_config_set_right_view(config, (panel_view_type_t)vt);
                 gui_dropdown_close_all();
                 clicked = true;
@@ -257,7 +230,7 @@ bool gui_dropdown_handle_click(gui_app_t *app) {
         dropdown_clicked = true;
     }
 
-    // Per-channel dropdowns
+    // Per-channel dropdowns (toolbar controls)
     for (int ch = 0; ch < 2; ch++) {
         if (handle_trigger_mode_dropdown(app, ch)) {
             dropdown_clicked = true;
@@ -271,14 +244,12 @@ bool gui_dropdown_handle_click(gui_app_t *app) {
         if (handle_right_view_dropdown(app, ch)) {
             dropdown_clicked = true;
         }
-        // CVBS system dropdown is now handled via panel overlay
-        if (panel_cvbs_overlay_handle_click(app, ch, mouse)) {
-            dropdown_clicked = true;
-        }
-        // Histogram bins dropdown is handled via panel overlay
-        if (panel_histogram_overlay_handle_click(app, ch, mouse)) {
-            dropdown_clicked = true;
-        }
+    }
+
+    // Panel overlay clicks (histogram bins, CVBS system, etc.)
+    // Uses vtable dispatch with fallback to legacy handlers
+    if (!dropdown_clicked && panel_handle_all_clicks(app, mouse)) {
+        dropdown_clicked = true;
     }
 
     // Close all dropdowns if clicked elsewhere

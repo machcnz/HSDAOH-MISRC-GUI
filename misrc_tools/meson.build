@@ -200,6 +200,7 @@ if raylib_dep.found()
     'misrc_gui/visualization/gui_histogram_panel.c',
     'misrc_gui/visualization/gui_text.c',
     'misrc_gui/visualization/gui_vu_meter.c',
+    'misrc_gui/visualization/panel_registry.c',
     # UI
     'misrc_gui/ui/gui_ui.c',
     'misrc_gui/ui/gui_dropdown.c',

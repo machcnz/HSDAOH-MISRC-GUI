@@ -90,10 +90,16 @@ static bool fft_resize(fft_state_t *state, int new_size) {
         free(state->window);
         state->window = NULL;
     }
-    if (state->magnitude) {
-        free(state->magnitude);
-        state->magnitude = NULL;
+    // Free double-buffered magnitude arrays
+    if (state->magnitude_front) {
+        free(state->magnitude_front);
+        state->magnitude_front = NULL;
     }
+    if (state->magnitude_back) {
+        free(state->magnitude_back);
+        state->magnitude_back = NULL;
+    }
+    state->magnitude = NULL;  // Was alias to front
     if (state->peak_hold) {
         free(state->peak_hold);
         state->peak_hold = NULL;
@@ -145,21 +151,28 @@ static bool fft_resize(fft_state_t *state, int new_size) {
         state->window[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (new_size - 1)));
     }
 
-    // Allocate magnitude buffer
-    state->magnitude = (float *)malloc(sizeof(float) * new_bins);
-    if (!state->magnitude) {
-        fprintf(stderr, "[FFT] Failed to allocate magnitude buffer (%d bins)\n", new_bins);
+    // Allocate double-buffered magnitude arrays
+    state->magnitude_front = (float *)malloc(sizeof(float) * new_bins);
+    state->magnitude_back = (float *)malloc(sizeof(float) * new_bins);
+    if (!state->magnitude_front || !state->magnitude_back) {
+        fprintf(stderr, "[FFT] Failed to allocate magnitude buffers (%d bins)\n", new_bins);
         fftwf_destroy_plan((fftwf_plan)state->fftw_plan);
         fftwf_free(state->fftw_input);
         fftwf_free(state->fftw_output);
         free(state->window);
+        free(state->magnitude_front);
+        free(state->magnitude_back);
         state->fftw_plan = NULL;
         state->fftw_input = NULL;
         state->fftw_output = NULL;
         state->window = NULL;
+        state->magnitude_front = NULL;
+        state->magnitude_back = NULL;
         return false;
     }
-    memset(state->magnitude, 0, sizeof(float) * new_bins);
+    memset(state->magnitude_front, 0, sizeof(float) * new_bins);
+    memset(state->magnitude_back, 0, sizeof(float) * new_bins);
+    state->magnitude = state->magnitude_front;  // Alias for compatibility
 
     // Allocate peak-hold buffer for stable peak detection
     state->peak_hold = (float *)malloc(sizeof(float) * new_bins);
@@ -169,11 +182,14 @@ static bool fft_resize(fft_state_t *state, int new_size) {
         fftwf_free(state->fftw_input);
         fftwf_free(state->fftw_output);
         free(state->window);
-        free(state->magnitude);
+        free(state->magnitude_front);
+        free(state->magnitude_back);
         state->fftw_plan = NULL;
         state->fftw_input = NULL;
         state->fftw_output = NULL;
         state->window = NULL;
+        state->magnitude_front = NULL;
+        state->magnitude_back = NULL;
         state->magnitude = NULL;
         return false;
     }
@@ -199,6 +215,10 @@ bool gui_fft_init(fft_state_t *state) {
     memset(state, 0, sizeof(fft_state_t));
 
 #if LIBFFTW_ENABLED
+    // Initialize atomic variables
+    atomic_init(&state->magnitude_ready, 0);
+    atomic_init(&state->sample_rate, 0);
+
     // Initialize with minimum size - will be resized on first process call
     if (!fft_resize(state, FFT_SIZE_MIN)) {
         return false;
@@ -229,10 +249,14 @@ void gui_fft_clear(fft_state_t *state) {
     if (!state || !state->initialized) return;
 
 #if LIBFFTW_ENABLED
-    // Clear magnitude buffer
-    if (state->magnitude && state->fft_bins > 0) {
-        memset(state->magnitude, 0, sizeof(float) * state->fft_bins);
+    // Clear both magnitude buffers
+    if (state->magnitude_front && state->fft_bins > 0) {
+        memset(state->magnitude_front, 0, sizeof(float) * state->fft_bins);
     }
+    if (state->magnitude_back && state->fft_bins > 0) {
+        memset(state->magnitude_back, 0, sizeof(float) * state->fft_bins);
+    }
+    atomic_store(&state->magnitude_ready, 0);
 
     // Clear peak-hold buffer
     if (state->peak_hold && state->fft_bins > 0) {
@@ -276,10 +300,16 @@ void gui_fft_cleanup(fft_state_t *state) {
         state->window = NULL;
     }
 
-    if (state->magnitude) {
-        free(state->magnitude);
-        state->magnitude = NULL;
+    // Free double-buffered magnitude arrays
+    if (state->magnitude_front) {
+        free(state->magnitude_front);
+        state->magnitude_front = NULL;
     }
+    if (state->magnitude_back) {
+        free(state->magnitude_back);
+        state->magnitude_back = NULL;
+    }
+    state->magnitude = NULL;
 
     if (state->peak_hold) {
         free(state->peak_hold);
@@ -293,15 +323,16 @@ void gui_fft_cleanup(fft_state_t *state) {
 }
 
 //-----------------------------------------------------------------------------
-// FFT Processing - Compute FFT from display samples
+// FFT Processing - Compute FFT from raw ADC samples (display thread)
 //-----------------------------------------------------------------------------
 
-void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *samples,
-                             size_t count, float display_sample_rate) {
+void gui_fft_process_raw(fft_state_t *state, const int16_t *samples,
+                         size_t count, uint32_t sample_rate) {
 #if LIBFFTW_ENABLED
     if (!state || !state->initialized || !samples) return;
 
-    (void)display_sample_rate; // Used only for frequency axis in render
+    // Store sample rate for render thread (atomic)
+    atomic_store(&state->sample_rate, sample_rate);
 
     // Need minimum samples
     if (count < FFT_SIZE_MIN) return;
@@ -311,7 +342,7 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
     if (target_size > FFT_SIZE_MAX) target_size = FFT_SIZE_MAX;
     if (target_size < FFT_SIZE_MIN) target_size = FFT_SIZE_MIN;
 
-    // Resize if needed
+    // Resize if needed (note: not thread-safe, but resize only happens rarely)
     if (target_size != state->fft_size) {
         if (!fft_resize(state, target_size)) {
             return;  // Resize failed
@@ -321,18 +352,18 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
     int fft_size = state->fft_size;
     int fft_bins = state->fft_bins;
 
-    // Use all available samples (up to fft_size, but typically count < fft_size due to zero-padding)
+    // Use all available samples (up to fft_size)
     size_t samples_to_use = (count > (size_t)fft_size) ? (size_t)fft_size : count;
 
     // Calculate DC offset (mean of actual samples) to remove from signal
-    float dc_offset = 0.0f;
+    // Use int32 accumulator to avoid overflow
+    int64_t dc_sum = 0;
     for (size_t i = 0; i < samples_to_use; i++) {
-        dc_offset += samples[i].value;
+        dc_sum += samples[i];
     }
-    dc_offset /= (float)samples_to_use;
+    float dc_offset = (float)dc_sum / (float)samples_to_use;
 
     // Zero-pad symmetrically: place windowed data in center of FFT buffer
-    // This preserves phase characteristics better than one-sided padding
     int pad_total = fft_size - (int)samples_to_use;
     int pad_left = pad_total / 2;
     int pad_right = pad_total - pad_left;
@@ -343,9 +374,12 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
     }
 
     // Apply Hanning window to actual sample data and place in center
+    // Normalize int16 samples to -1.0 to +1.0 range
+    const float scale = 1.0f / 32768.0f;
     for (size_t i = 0; i < samples_to_use; i++) {
         float window_val = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)(samples_to_use - 1)));
-        state->fftw_input[pad_left + (int)i] = (samples[i].value - dc_offset) * window_val;
+        float sample_val = ((float)samples[i] - dc_offset) * scale;
+        state->fftw_input[pad_left + (int)i] = sample_val * window_val;
     }
 
     // Zero-pad right side
@@ -356,8 +390,11 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
     // Execute FFT
     fftwf_execute((fftwf_plan)state->fftw_plan);
 
-    // Compute magnitude in dB, then normalize to 0-1, then apply EMA smoothing
+    // Compute magnitude in dB, then normalize to 0-1
+    // Write to back buffer (display thread owns this)
     fftwf_complex *output = (fftwf_complex *)state->fftw_output;
+    float *back = state->magnitude_back;
+
     for (int j = 0; j < fft_bins; j++) {
         float real = output[j][0];
         float imag = output[j][1];
@@ -374,19 +411,45 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
         if (db > FFT_DB_MAX) db = FFT_DB_MAX;
 
         // Convert dB to normalized intensity (0-1)
-        float current = (db - FFT_DB_MIN) / (FFT_DB_MAX - FFT_DB_MIN);
-
-        // Apply EMA smoothing: smoothed = alpha * previous + (1 - alpha) * current
-        float previous = state->magnitude[j];
-        state->magnitude[j] = FFT_EMA_ALPHA * previous + (1.0f - FFT_EMA_ALPHA) * current;
+        back[j] = (db - FFT_DB_MIN) / (FFT_DB_MAX - FFT_DB_MIN);
     }
 
-    state->data_ready = true;
+    // Signal that new data is ready for the render thread
+    atomic_store(&state->magnitude_ready, 1);
 #else
     (void)state;
     (void)samples;
     (void)count;
-    (void)display_sample_rate;
+    (void)sample_rate;
+#endif
+}
+
+//-----------------------------------------------------------------------------
+// FFT Buffer Swap - Copy back buffer to front (render thread)
+//-----------------------------------------------------------------------------
+
+void gui_fft_swap_buffers(fft_state_t *state) {
+#if LIBFFTW_ENABLED
+    if (!state || !state->initialized) return;
+
+    // Check if new data is available
+    if (atomic_exchange(&state->magnitude_ready, 0)) {
+        // Copy back buffer to front buffer
+        // Apply EMA smoothing during copy for temporal smoothing
+        int fft_bins = state->fft_bins;
+        float *front = state->magnitude_front;
+        float *back = state->magnitude_back;
+
+        for (int j = 0; j < fft_bins; j++) {
+            float previous = front[j];
+            float current = back[j];
+            front[j] = FFT_EMA_ALPHA * previous + (1.0f - FFT_EMA_ALPHA) * current;
+        }
+
+        state->data_ready = true;
+    }
+#else
+    (void)state;
 #endif
 }
 
@@ -399,12 +462,12 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
 #define FFT_GRID_MAX_DIVISIONS 12    // Maximum number of frequency divisions
 
 // Peak detection settings
-#define FFT_PEAK_SEARCH_RADIUS_PX 50   // Pixels around mouse to search for peaks
+#define FFT_PEAK_SEARCH_RADIUS_PX 10   // Pixels around mouse to search for peaks
 #define FFT_PEAK_MIN_PROMINENCE 0.02f  // Minimum prominence (0-1) to qualify as a peak
 #define FFT_PEAK_MAX_CANDIDATES 32     // Maximum peaks to consider when finding closest
 #define FFT_PEAK_MAX_DISPLAY 1         // Maximum peaks to display near mouse
 #define FFT_PEAK_HOLD_DECAY 0.99f     // Per-frame decay for peak hold (closer to 1 = slower decay)
-#define FFT_PEAK_LABEL_EMA_ALPHA 0.15f // EMA smoothing for label position (lower = smoother)
+#define FFT_PEAK_LABEL_EMA_ALPHA 0.5f // EMA smoothing for label position (lower = smoother)
 
 // Peak info structure for rendering
 typedef struct {
@@ -543,12 +606,14 @@ static int fft_measure_text(Font *fonts, const char *text, int fontSize) {
 }
 
 void gui_fft_render(fft_state_t *state, float x, float y,
-                    float width, float height, float display_sample_rate,
-                    Color color, Font *fonts) {
+                    float width, float height, Color color, Font *fonts) {
 #if LIBFFTW_ENABLED
     if (!state || !state->initialized) return;
 
     (void)color; // Not used currently
+
+    // Get sample rate from atomic (set by display thread)
+    uint32_t sample_rate = atomic_load(&state->sample_rate);
 
     int rt_width = (int)width;
     int rt_height = (int)height;
@@ -631,8 +696,8 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     }
 
     // Draw vertical frequency grid lines with 1-2-5 snapping (matching oscilloscope time grid logic)
-    if (display_sample_rate > 0) {
-        float nyquist = display_sample_rate / 2.0f;
+    if (sample_rate > 0) {
+        float nyquist = (float)sample_rate / 2.0f;
 
         // Calculate frequency per pixel
         float freq_per_pixel = nyquist / width;
@@ -696,12 +761,12 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     }
 
     // Peak detection on mouse hover - show closest peak to mouse
-    if (state->peak_hold && state->data_ready && state->fft_bins > 1 && display_sample_rate > 0) {
+    if (state->peak_hold && state->data_ready && state->fft_bins > 1 && sample_rate > 0) {
         Vector2 mouse = GetMousePosition();
         Rectangle fft_rect = {x, y, width, height};
 
         if (CheckCollisionPointRec(mouse, fft_rect)) {
-            float nyquist = display_sample_rate / 2.0f;
+            float nyquist = (float)sample_rate / 2.0f;
             int fft_bins = state->fft_bins;
 
             // IMPORTANT: The FFT is drawn to phosphor texture using rt_width, and the
@@ -853,55 +918,127 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     (void)y;
     (void)width;
     (void)height;
-    (void)display_sample_rate;
     (void)color;
     (void)fonts;
 #endif
 }
 
+// NOTE: Legacy gui_fft_render_panel() has been removed.
+// All rendering now uses fft_vtable_render() via vtable dispatch.
+
+//=============================================================================
+// Panel Interface (vtable) Implementation
+//=============================================================================
+
+// FFT panel state is just the base fft_state_t
+// Processing happens in display thread, rendering in render thread
+
 //-----------------------------------------------------------------------------
-// FFT Panel Rendering (for panel system integration)
+// Lifecycle Functions
 //-----------------------------------------------------------------------------
 
-void gui_fft_render_panel(gui_app_t *app, int channel,
-                          float x, float y, float w, float h,
-                          void *state, Color color) {
+static void *fft_vtable_create(void) {
+#if LIBFFTW_ENABLED
+    fft_state_t *state = calloc(1, sizeof(fft_state_t));
+    if (!state) return NULL;
 
-    fft_state_t *fft = (fft_state_t*)state;
-
-    // If no state provided, try to use the app's FFT state (for backward compat)
-    if (!fft) {
-        fft = (channel == 0) ? app->fft_a : app->fft_b;
+    if (!gui_fft_init(state)) {
+        free(state);
+        return NULL;
     }
 
-    if (!fft || !fft->initialized) {
-        // FFT not available - show message
+    return state;
+#else
+    return NULL;
+#endif
+}
+
+static void fft_vtable_destroy(void *state_ptr) {
+    if (!state_ptr) return;
+    fft_state_t *state = (fft_state_t *)state_ptr;
+    gui_fft_cleanup(state);
+    free(state);
+}
+
+static void fft_vtable_clear(void *state_ptr) {
+    if (!state_ptr) return;
+    fft_state_t *state = (fft_state_t *)state_ptr;
+    gui_fft_clear(state);
+}
+
+//-----------------------------------------------------------------------------
+// Processing Function (called from display thread with raw ADC samples)
+//-----------------------------------------------------------------------------
+
+static void fft_vtable_process(void *state_ptr, const int16_t *samples, size_t count, uint32_t sample_rate) {
+    if (!state_ptr || !samples || count == 0) return;
+    fft_state_t *state = (fft_state_t *)state_ptr;
+
+    // Process raw ADC samples and compute FFT
+    gui_fft_process_raw(state, samples, count, sample_rate);
+}
+
+//-----------------------------------------------------------------------------
+// Rendering Functions
+//-----------------------------------------------------------------------------
+
+static void fft_vtable_render(void *state_ptr, gui_app_t *app, int channel,
+                              Rectangle bounds, Color channel_color) {
+    (void)channel;  // FFT uses sample_rate from state, not channel-specific
+
+    if (!state_ptr || !app) return;
+
+    fft_state_t *fft = (fft_state_t *)state_ptr;
+
+    if (!fft->initialized) {
         const char *text = gui_fft_available() ? "FFT Initializing..." : "FFT Not Available";
         int text_width = MeasureText(text, FONT_SIZE_OSC_MSG);
-        DrawText(text, (int)(x + w/2 - text_width/2), (int)(y + h/2 - 12),
+        DrawText(text, (int)(bounds.x + bounds.width/2 - text_width/2),
+                 (int)(bounds.y + bounds.height/2 - 12),
                  FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
         return;
     }
 
-    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+    // Swap buffers to get latest FFT data from display thread
+    gui_fft_swap_buffers(fft);
 
-    // Get display samples
-    waveform_sample_t *samples;
-    size_t samples_available;
-    if (channel == 0) {
-        samples = app->display_samples_a;
-        samples_available = app->display_samples_available_a;
-    } else {
-        samples = app->display_samples_b;
-        samples_available = app->display_samples_available_b;
-    }
+    // Render FFT (sample_rate is read atomically inside gui_fft_render)
+    gui_fft_render(fft, bounds.x, bounds.y, bounds.width, bounds.height,
+                   channel_color, app->fonts);
+}
 
-    // Calculate display sample rate
-    uint32_t sr = atomic_load(&app->sample_rate);
-    float display_sample_rate = (trig->zoom_scale > 0 && sr > 0) ?
-                                (float)sr / trig->zoom_scale : 0;
+//-----------------------------------------------------------------------------
+// Vtable Definition
+//-----------------------------------------------------------------------------
 
-    // Process and render FFT
-    gui_fft_process_display(fft, samples, samples_available, display_sample_rate);
-    gui_fft_render(fft, x, y, w, h, display_sample_rate, color, app->fonts);
+static const panel_vtable_t s_fft_vtable = {
+    .name = "FFT",
+
+    // Lifecycle
+    .create = fft_vtable_create,
+    .destroy = fft_vtable_destroy,
+    .clear = fft_vtable_clear,
+
+    // Processing (no-op for FFT - uses display samples in render)
+    .process = fft_vtable_process,
+
+    // Rendering
+    .render = fft_vtable_render,
+    .render_overlay = NULL,  // No overlay for FFT
+
+    // Interaction
+    .handle_click = NULL,
+    .handle_scroll = NULL,
+
+    // Menus
+    .get_menu_count = NULL,
+    .get_menu = NULL,
+};
+
+//-----------------------------------------------------------------------------
+// Registration
+//-----------------------------------------------------------------------------
+
+void gui_fft_panel_register(void) {
+    panel_register(PANEL_VIEW_FFT, &s_fft_vtable);
 }

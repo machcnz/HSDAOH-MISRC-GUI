@@ -1,8 +1,11 @@
 /*
  * MISRC GUI - FFT Line Spectrum Display with GPU Phosphor Persistence
  *
- * Computes FFT of resampled display waveform and displays as a line-based spectrum
+ * Computes FFT of raw ADC samples in the display thread and renders spectrum
  * using GPU-accelerated phosphor persistence (same as oscilloscope phosphor).
+ *
+ * Thread safety: Display thread writes to back buffer, render thread reads front.
+ * Double-buffering ensures lock-free operation between threads.
  *
  * Requires FFTW3 single-precision library (fftw3f).
  */
@@ -14,11 +17,21 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 // Include gui_app.h for waveform_sample_t definition
 // (it's an anonymous struct so can't be forward-declared)
 #include "../core/gui_app.h"
 #include "gui_phosphor_rt.h"
+#include "panel_interface.h"
+
+//-----------------------------------------------------------------------------
+// Panel Interface Registration
+//-----------------------------------------------------------------------------
+
+// Register the FFT panel vtable with the panel registry.
+// Call this once at startup.
+void gui_fft_panel_register(void);
 
 //-----------------------------------------------------------------------------
 // FFT Configuration Constants
@@ -29,7 +42,7 @@
 #define FFT_SIZE_MAX          4096   // Maximum FFT size (must be <= DISPLAY_BUFFER_SIZE)
 
 // dB range for magnitude normalization
-#define FFT_DB_MIN           -100.0f   // Minimum dB (bottom of display)
+#define FFT_DB_MIN           -120.0f   // Minimum dB (bottom of display)
 #define FFT_DB_MAX             0.0f   // Maximum dB (top of display)
 
 #define FFT_DECAY_RATE        0.6f   // Per-frame decay (higher = slower fade)
@@ -55,8 +68,14 @@ typedef struct fft_state {
     // Hanning window coefficients (precomputed for current size)
     float *window;             // fft_size floats
 
-    // Current FFT magnitude output (normalized 0-1)
-    float *magnitude;          // fft_bins floats, latest FFT result normalized
+    // Double-buffered magnitude output for thread safety
+    // Display thread writes to back buffer, render thread reads from front
+    float *magnitude_front;    // fft_bins floats, read by render thread
+    float *magnitude_back;     // fft_bins floats, written by display thread
+    atomic_int magnitude_ready; // 1 when back buffer has new data to swap
+
+    // Legacy magnitude pointer (points to front buffer for compatibility)
+    float *magnitude;          // Alias to magnitude_front
 
     // Peak-hold magnitude for stable peak detection (max-hold with decay)
     float *peak_hold;          // fft_bins floats, decayed peak envelope
@@ -64,7 +83,10 @@ typedef struct fft_state {
     // GPU phosphor render texture (shared module)
     phosphor_rt_t phosphor;    // Reusable phosphor persistence effect
 
-    // Indicates new FFT data is available for rendering
+    // Sample rate for frequency axis (set by display thread, read by render)
+    atomic_uint sample_rate;   // Raw ADC sample rate in Hz
+
+    // Indicates FFT data is available for rendering
     bool data_ready;
 
     // Initialization state
@@ -99,51 +121,39 @@ void gui_fft_clear(fft_state_t *state);
 void gui_fft_cleanup(fft_state_t *state);
 
 //-----------------------------------------------------------------------------
-// FFT Processing (called from render thread with display samples)
+// FFT Processing (called from display thread with raw ADC samples)
 //-----------------------------------------------------------------------------
 
-// Compute FFT from resampled display waveform samples
-// Called each frame with the current display buffer
+// Compute FFT from raw ADC samples (called from display thread)
+// Writes results to back buffer for thread-safe transfer to render thread.
 // Parameters:
 //   state: FFT state structure
-//   samples: Resampled waveform samples (from display buffer)
+//   samples: Raw ADC samples (int16_t, signed)
 //   count: Number of samples available
-//   display_sample_rate: Effective sample rate of display data (pixels/sec)
-void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *samples,
-                             size_t count, float display_sample_rate);
+//   sample_rate: ADC sample rate in Hz (for frequency axis calculation)
+void gui_fft_process_raw(fft_state_t *state, const int16_t *samples,
+                         size_t count, uint32_t sample_rate);
+
+// Swap buffers if new data available (called from render thread before rendering)
+// Copies back buffer to front buffer if magnitude_ready flag is set.
+void gui_fft_swap_buffers(fft_state_t *state);
 
 //-----------------------------------------------------------------------------
 // FFT Rendering (called from main/render thread)
 //-----------------------------------------------------------------------------
 
 // Render FFT spectrum with GPU phosphor persistence
-// Uses same shader system as oscilloscope phosphor
+// Uses same shader system as oscilloscope phosphor.
+// Call gui_fft_swap_buffers() before this to get latest data.
 // Parameters:
 //   state: FFT state structure
 //   x, y: Screen position
 //   width, height: Display size
-//   display_sample_rate: Effective sample rate of display data (for freq axis)
 //   color: Line color for spectrum
 //   fonts: Font array (index 0 = Inter, index 1 = Space Mono), NULL for default
 void gui_fft_render(fft_state_t *state, float x, float y,
-                    float width, float height, float display_sample_rate,
-                    Color color, Font *fonts);
+                    float width, float height, Color color, Font *fonts);
 
-//-----------------------------------------------------------------------------
-// FFT Panel Rendering (for panel system integration)
-//-----------------------------------------------------------------------------
-
-// Render FFT as a panel, handling state lookup and unavailability messages.
-// This is the high-level entry point for the panel dispatch system.
-// Parameters:
-//   app: Application state
-//   channel: Channel number (0 or 1)
-//   x, y: Panel position
-//   w, h: Panel dimensions
-//   state: Per-panel FFT state (or NULL to use app's FFT state)
-//   color: Channel color (currently unused)
-void gui_fft_render_panel(struct gui_app *app, int channel,
-                          float x, float y, float w, float h,
-                          void *state, Color color);
+// NOTE: Legacy gui_fft_render_panel() removed - rendering uses vtable dispatch.
 
 #endif // GUI_FFT_H

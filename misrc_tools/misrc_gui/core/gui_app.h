@@ -11,9 +11,7 @@
 // Forward declarations
 typedef struct hsdaoh_dev hsdaoh_dev_t;
 typedef struct sc_handle sc_handle_t;
-typedef struct fft_state fft_state_t;
 typedef struct phosphor_rt phosphor_rt_t;
-typedef struct cvbs_decoder cvbs_decoder_t;
 typedef struct display_thread display_thread_t;
 
 //-----------------------------------------------------------------------------
@@ -35,8 +33,10 @@ typedef struct channel_panel_config {
     bool split;                    // false = single panel, true = split view
     panel_view_type_t left_view;   // View for left panel (or only panel if not split)
     panel_view_type_t right_view;  // View for right panel (only used if split)
-    void *left_state;              // View-specific state (e.g., fft_state_t*)
+    void *left_state;              // View-specific state (created via panel_create_view_state)
     void *right_state;             // View-specific state for right panel
+    Rectangle left_bounds;         // Cached bounds from last render (for click handling)
+    Rectangle right_bounds;        // Cached bounds for right panel
 } channel_panel_config_t;
 
 // Display buffer size (samples per channel for oscilloscope)
@@ -298,27 +298,10 @@ typedef struct gui_app {
     phosphor_rt_t *phosphor_a;         // Phosphor render texture for channel A
     phosphor_rt_t *phosphor_b;         // Phosphor render texture for channel B
 
-    // FFT state for split mode (waterfall/spectrogram display)
-    fft_state_t *fft_a;                // FFT state for channel A (NULL if not in split mode)
-    fft_state_t *fft_b;                // FFT state for channel B (NULL if not in split mode)
-
-    // Panel configuration (new panel abstraction system)
+    // Panel configuration (per-channel, each panel owns its state)
+    // FFT state is now owned by panel_config_*.left_state or right_state
+    // CVBS decoder state is also owned by panel's left_state or right_state
     channel_panel_config_t panel_config_a, panel_config_b;
-
-    // CVBS decoder state (allocated on demand when CVBS mode is selected)
-    _Atomic(cvbs_decoder_t *) cvbs_a;
-    _Atomic(cvbs_decoder_t *) cvbs_b;
-
-    // CVBS lifetime safety: background threads may still be processing when UI disables CVBS.
-    // We detach (cvbs_* -> NULL) immediately, then free once busy count reaches 0.
-    atomic_uint cvbs_busy_a;
-    atomic_uint cvbs_busy_b;
-    _Atomic(cvbs_decoder_t *) cvbs_pending_free_a;
-    _Atomic(cvbs_decoder_t *) cvbs_pending_free_b;
-
-    // User-selected CVBS system per channel: 0=PAL, 1=NTSC, 2=SECAM
-    atomic_int cvbs_system_a;
-    atomic_int cvbs_system_b;
 
 } gui_app_t;
 

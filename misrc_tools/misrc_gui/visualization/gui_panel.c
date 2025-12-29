@@ -7,6 +7,7 @@
  */
 
 #include "gui_panel.h"
+#include "panel_interface.h"
 #include "../core/gui_app.h"
 #include "gui_oscilloscope.h"
 #include "gui_fft.h"
@@ -68,9 +69,14 @@ void* panel_create_view_state(panel_view_type_t type) {
             }
             return NULL;
         }
-        case PANEL_VIEW_CVBS:
-            // CVBS decoder state is stored on gui_app_t (app->cvbs_a/b)
+        case PANEL_VIEW_CVBS: {
+            // Use vtable factory to create CVBS decoder state
+            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
+            if (vtable && vtable->create) {
+                return vtable->create();
+            }
             return NULL;
+        }
         case PANEL_VIEW_HISTOGRAM: {
             histogram_state_t *hist = malloc(sizeof(histogram_state_t));
             if (hist) {
@@ -100,9 +106,14 @@ void panel_destroy_view_state(panel_view_type_t type, void *state) {
             free(fft);
             break;
         }
-        case PANEL_VIEW_CVBS:
-            // No per-panel state
+        case PANEL_VIEW_CVBS: {
+            // Use vtable destroy to cleanup CVBS decoder state
+            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
+            if (vtable && vtable->destroy) {
+                vtable->destroy(state);
+            }
             break;
+        }
         case PANEL_VIEW_HISTOGRAM: {
             histogram_state_t *hist = (histogram_state_t*)state;
             histogram_cleanup(hist);
@@ -126,9 +137,14 @@ void panel_clear_view_state(panel_view_type_t type, void *state) {
             gui_fft_clear(fft);
             break;
         }
-        case PANEL_VIEW_CVBS:
-            // No per-panel state
+        case PANEL_VIEW_CVBS: {
+            // Use vtable clear to reset CVBS decoder state
+            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
+            if (vtable && vtable->clear) {
+                vtable->clear(state);
+            }
             break;
+        }
         case PANEL_VIEW_HISTOGRAM:
             histogram_clear((histogram_state_t*)state);
             break;
@@ -137,138 +153,76 @@ void panel_clear_view_state(panel_view_type_t type, void *state) {
     }
 }
 
-//-----------------------------------------------------------------------------
-// Panel Render Functions
-//-----------------------------------------------------------------------------
-
-// Forward declaration of internal render functions
-static void render_waveform_line_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color);
-static void render_waveform_phosphor_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color);
-static void render_fft_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color);
-static void render_cvbs_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color);
-static void render_histogram_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color);
-
-// Render function table
-static panel_render_fn s_render_fns[] = {
-    [PANEL_VIEW_WAVEFORM_LINE] = render_waveform_line_panel,
-    [PANEL_VIEW_WAVEFORM_PHOSPHOR] = render_waveform_phosphor_panel,
-    [PANEL_VIEW_FFT] = render_fft_panel,
-    [PANEL_VIEW_CVBS] = render_cvbs_panel,
-    [PANEL_VIEW_HISTOGRAM] = render_histogram_panel,
-};
-
-panel_render_fn panel_get_render_fn(panel_view_type_t type) {
-    if (type < PANEL_VIEW_COUNT) return s_render_fns[type];
-    return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Waveform Panel Rendering (Line Mode) - Thin wrapper for panel dispatch
-//-----------------------------------------------------------------------------
-
-static void render_waveform_line_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color) {
-    (void)state;  // Line mode doesn't use per-panel state
-    render_waveform_line(app, channel, x, y, w, h, color);
-}
-
-//-----------------------------------------------------------------------------
-// Waveform Panel Rendering (Phosphor Mode) - Thin wrapper for panel dispatch
-//-----------------------------------------------------------------------------
-
-static void render_waveform_phosphor_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color) {
-    (void)state;  // Uses shared phosphor from app
-    render_waveform_phosphor(app, channel, x, y, w, h, color);
-}
-
-//-----------------------------------------------------------------------------
-// FFT Panel Rendering - Delegates to gui_fft module
-//-----------------------------------------------------------------------------
-
-static void render_fft_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color) {
-    gui_fft_render_panel(app, channel, x, y, w, h, state, color);
-}
-
-//-----------------------------------------------------------------------------
-// CVBS Panel Rendering - Delegates to gui_cvbs module
-//-----------------------------------------------------------------------------
-
-static void render_cvbs_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color) {
-    gui_cvbs_render_panel(app, channel, x, y, w, h, state, color);
-}
-
-//-----------------------------------------------------------------------------
-// Histogram Panel Rendering - Delegates to gui_histogram_panel module
-//-----------------------------------------------------------------------------
-
-static void render_histogram_panel(gui_app_t *app, int channel,
-    float x, float y, float w, float h, void *state, Color color) {
-    gui_histogram_render_panel(app, channel, x, y, w, h, state, color);
-}
+// NOTE: Legacy panel_render_fn and s_render_fns[] have been removed.
+// All panel rendering now uses vtable dispatch via panel_get_vtable().
 
 //-----------------------------------------------------------------------------
 // Channel Panel Rendering (Main Entry Point)
 //-----------------------------------------------------------------------------
 
+// Helper: Render a single panel using vtable dispatch
+static void render_single_panel(gui_app_t *app, int channel,
+                                 panel_view_type_t type, void *state,
+                                 Rectangle bounds, Color color) {
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+
+    if (vtable && vtable->render) {
+        vtable->render(state, app, channel, bounds, color);
+
+        // Render overlay if present
+        if (vtable->render_overlay) {
+            vtable->render_overlay(state, bounds);
+        }
+    } else {
+        // No vtable - draw placeholder
+        DrawRectangleRec(bounds, (Color){20, 20, 20, 255});
+        DrawRectangleLinesEx(bounds, 1, (Color){60, 60, 60, 255});
+        const char *name = panel_view_type_name(type);
+        int w = MeasureText(name, 14);
+        DrawText(name, (int)(bounds.x + bounds.width/2 - w/2),
+                 (int)(bounds.y + bounds.height/2 - 7), 14, COLOR_TEXT_DIM);
+    }
+}
+
 void render_channel_panels(gui_app_t *app, int channel,
                            float x, float y, float width, float height,
                            Color channel_color) {
 
-    // Access the inline struct from gui_app_t (uses int for view types)
-    bool split;
-    panel_view_type_t left_view, right_view;
-    void *left_state, *right_state;
+    // Get the config for this channel
+    channel_panel_config_t *config = (channel == 0)
+        ? &app->panel_config_a
+        : &app->panel_config_b;
 
-    if (channel == 0) {
-        split = app->panel_config_a.split;
-        left_view = (panel_view_type_t)app->panel_config_a.left_view;
-        right_view = (panel_view_type_t)app->panel_config_a.right_view;
-        left_state = app->panel_config_a.left_state;
-        right_state = app->panel_config_a.right_state;
-    } else {
-        split = app->panel_config_b.split;
-        left_view = (panel_view_type_t)app->panel_config_b.left_view;
-        right_view = (panel_view_type_t)app->panel_config_b.right_view;
-        left_state = app->panel_config_b.left_state;
-        right_state = app->panel_config_b.right_state;
-    }
-
-    if (!split) {
+    if (!config->split) {
         // Single panel - render at full width
-        panel_render_fn fn = panel_get_render_fn(left_view);
-        if (fn) {
-            fn(app, channel, x, y, width, height, left_state, channel_color);
-        }
+        Rectangle bounds = {x, y, width, height};
+        config->left_bounds = bounds;
+        config->right_bounds = (Rectangle){0, 0, 0, 0};
+
+        render_single_panel(app, channel, config->left_view,
+                           config->left_state, bounds, channel_color);
     } else {
         // Split panels - divide width between left and right
         float half_width = width / 2.0f;
         float divider_x = x + half_width;
 
+        // Cache bounds for click handling
+        Rectangle left_bounds = {x, y, half_width - 1, height};
+        Rectangle right_bounds = {divider_x + 2, y, half_width - 3, height};
+        config->left_bounds = left_bounds;
+        config->right_bounds = right_bounds;
+
         // Left panel
-        panel_render_fn left_fn = panel_get_render_fn(left_view);
-        if (left_fn) {
-            left_fn(app, channel, x, y, half_width - 1, height,
-                   left_state, channel_color);
-        }
+        render_single_panel(app, channel, config->left_view,
+                           config->left_state, left_bounds, channel_color);
 
         // Divider line
         DrawLineEx((Vector2){divider_x, y}, (Vector2){divider_x, y + height},
                    2.0f, COLOR_GRID_MAJOR);
 
         // Right panel
-        panel_render_fn right_fn = panel_get_render_fn(right_view);
-        if (right_fn) {
-            right_fn(app, channel, divider_x + 2, y, half_width - 3, height,
-                    right_state, channel_color);
-        }
+        render_single_panel(app, channel, config->right_view,
+                           config->right_state, right_bounds, channel_color);
     }
 }
 
@@ -343,13 +297,51 @@ void panel_config_set_split(channel_panel_config_t *config, bool split) {
 }
 
 //-----------------------------------------------------------------------------
-// Panel Overlay Interaction - Delegates to respective modules
+// Unified Panel Click Handling
 //-----------------------------------------------------------------------------
 
-bool panel_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
-    return gui_cvbs_overlay_handle_click(app, channel, mouse_pos);
+// Helper: Try vtable click handler for a panel
+static bool try_panel_click(gui_app_t *app, int channel, panel_view_type_t type,
+                            void *state, Rectangle bounds, Vector2 mouse_pos) {
+    // First check if click is within bounds
+    if (!CheckCollisionPointRec(mouse_pos, bounds)) {
+        return false;
+    }
+
+    // Try vtable handler
+    // Note: state may be NULL for panels like CVBS that store state on gui_app_t
+    // Individual handlers must check for NULL state if they need it
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+    if (vtable && vtable->handle_click) {
+        return vtable->handle_click(state, app, channel, mouse_pos, bounds);
+    }
+
+    return false;
 }
 
-bool panel_histogram_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
-    return gui_histogram_overlay_handle_click(app, channel, mouse_pos);
+bool panel_handle_all_clicks(gui_app_t *app, Vector2 mouse_pos) {
+    if (!app) return false;
+
+    // Process both channels
+    for (int ch = 0; ch < 2; ch++) {
+        channel_panel_config_t *config = (ch == 0)
+            ? &app->panel_config_a
+            : &app->panel_config_b;
+
+        // Try left panel
+        if (try_panel_click(app, ch, config->left_view, config->left_state,
+                            config->left_bounds, mouse_pos)) {
+            return true;
+        }
+
+        // Try right panel if in split mode
+        if (config->split) {
+            if (try_panel_click(app, ch, config->right_view, config->right_state,
+                                config->right_bounds, mouse_pos)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }

@@ -178,17 +178,24 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
         return false;
     }
 
-    // Allocate display buffer (double buffering)
-    decoder->display_buffer = (uint8_t *)calloc(CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT, 1);
-    if (!decoder->display_buffer) {
+    // Allocate double-buffered display buffers for thread safety
+    // Display thread writes to back buffer, render thread reads from front
+    decoder->display_front = (uint8_t *)calloc(CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT, 1);
+    decoder->display_back = (uint8_t *)calloc(CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT, 1);
+    if (!decoder->display_front || !decoder->display_back) {
         free(decoder->field_buffer[0]);
         free(decoder->field_buffer[1]);
         free(decoder->frame_buffer);
+        free(decoder->display_front);
+        free(decoder->display_back);
         decoder->field_buffer[0] = NULL;
         decoder->field_buffer[1] = NULL;
         decoder->frame_buffer = NULL;
+        decoder->display_front = NULL;
+        decoder->display_back = NULL;
         return false;
     }
+    atomic_init(&decoder->display_ready, 0);
 
     // Create raylib Image for video display (RGBA format at full-frame resolution)
     // Allocate our own pixel buffer so we control the memory
@@ -197,11 +204,13 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
         free(decoder->field_buffer[0]);
         free(decoder->field_buffer[1]);
         free(decoder->frame_buffer);
-        free(decoder->display_buffer);
+        free(decoder->display_front);
+        free(decoder->display_back);
         decoder->field_buffer[0] = NULL;
         decoder->field_buffer[1] = NULL;
         decoder->frame_buffer = NULL;
-        decoder->display_buffer = NULL;
+        decoder->display_front = NULL;
+        decoder->display_back = NULL;
         return false;
     }
     decoder->frame_image.data = frame_pixels;
@@ -217,12 +226,14 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
         free(decoder->field_buffer[0]);
         free(decoder->field_buffer[1]);
         free(decoder->frame_buffer);
-        free(decoder->display_buffer);
+        free(decoder->display_front);
+        free(decoder->display_back);
         free(decoder->frame_image.data);
         decoder->field_buffer[0] = NULL;
         decoder->field_buffer[1] = NULL;
         decoder->frame_buffer = NULL;
-        decoder->display_buffer = NULL;
+        decoder->display_front = NULL;
+        decoder->display_back = NULL;
         decoder->frame_image.data = NULL;
         return false;
     }
@@ -295,13 +306,15 @@ void gui_cvbs_cleanup(cvbs_decoder_t *decoder) {
     free(decoder->field_buffer[0]);
     free(decoder->field_buffer[1]);
     free(decoder->frame_buffer);
-    free(decoder->display_buffer);
+    free(decoder->display_front);
+    free(decoder->display_back);
     free(decoder->line_buffer);
 
     decoder->field_buffer[0] = NULL;
     decoder->field_buffer[1] = NULL;
     decoder->frame_buffer = NULL;
-    decoder->display_buffer = NULL;
+    decoder->display_front = NULL;
+    decoder->display_back = NULL;
     decoder->line_buffer = NULL;
 }
 
@@ -321,9 +334,14 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
     if (decoder->frame_buffer) {
         memset(decoder->frame_buffer, 0, CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT);
     }
-    if (decoder->display_buffer) {
-        memset(decoder->display_buffer, 0, CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT);
+    // Clear both display buffers
+    if (decoder->display_front) {
+        memset(decoder->display_front, 0, CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT);
     }
+    if (decoder->display_back) {
+        memset(decoder->display_back, 0, CVBS_FRAME_WIDTH * CVBS_MAX_HEIGHT);
+    }
+    atomic_store(&decoder->display_ready, 0);
 
     // Reset line buffer
     decoder->line_buffer_count = 0;
@@ -379,7 +397,7 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
     decoder->state.current_field = 0;
     decoder->state.in_vsync = false;
     decoder->state.frame_complete = false;
-    decoder->display_ready = false;
+    // Note: display_ready already cleared atomically above
 
     // Reset statistics
     decoder->sync_errors = 0;
@@ -746,13 +764,14 @@ static void complete_field_pll(cvbs_decoder_t *decoder) {
     // Bob mode is used until both fields are available, then weave takes over
     deinterlace_fields(decoder);
 
-    // Copy deinterlaced frame to display buffer
+    // Copy deinterlaced frame to back buffer (display thread writes here)
     int frame_h = decoder->frame_height;
     if (frame_h > CVBS_MAX_HEIGHT) frame_h = CVBS_MAX_HEIGHT;
 
-    memcpy(decoder->display_buffer, decoder->frame_buffer,
+    memcpy(decoder->display_back, decoder->frame_buffer,
            (size_t)CVBS_FRAME_WIDTH * (size_t)frame_h);
-    decoder->display_ready = true;
+    // Signal that new frame is ready for the render thread
+    atomic_store(&decoder->display_ready, 1);
     decoder->state.frame_complete = true;
     decoder->state.frames_decoded++;
     decoder->debug.fields_decoded++;
@@ -1018,9 +1037,24 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
 // Rendering
 //-----------------------------------------------------------------------------
 
+// Swap buffers if new frame available (called from render thread before rendering)
+// Copies back buffer to front buffer if display_ready flag is set.
+void gui_cvbs_swap_buffers(cvbs_decoder_t *decoder) {
+    if (!decoder) return;
+
+    // Check if new frame is available
+    if (atomic_exchange(&decoder->display_ready, 0)) {
+        // Copy back buffer to front buffer
+        int frame_h = decoder->frame_height;
+        if (frame_h > CVBS_MAX_HEIGHT) frame_h = CVBS_MAX_HEIGHT;
+        memcpy(decoder->display_front, decoder->display_back,
+               (size_t)CVBS_FRAME_WIDTH * (size_t)frame_h);
+    }
+}
+
 void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
                             float x, float y, float width, float height) {
-    if (!decoder || !decoder->display_ready) {
+    if (!decoder || !decoder->display_front) {
         // No frame available - draw placeholder
         DrawRectangle((int)x, (int)y, (int)width, (int)height, (Color){20, 20, 30, 255});
         DrawText("No Signal", (int)(x + width/2 - 40), (int)(y + height/2 - 10),
@@ -1041,7 +1075,8 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
 
     // Convert grayscale to RGBA for the image
     // Use 32-bit writes instead of per-component Color struct assignment
-    uint8_t *gray_src = decoder->display_buffer;
+    // Read from front buffer (thread-safe, updated by gui_cvbs_swap_buffers)
+    uint8_t *gray_src = decoder->display_front;
     uint32_t *rgba_dst = (uint32_t *)decoder->frame_image.data;
     int total_pixels = field_h * CVBS_FRAME_WIDTH;
 
@@ -1150,20 +1185,14 @@ void gui_cvbs_set_format(cvbs_decoder_t *decoder, int format_select) {
 #include "../ui/gui_dropdown.h"
 #include "../ui/gui_ui.h"
 
-// Hit box state for overlay click detection (per channel)
-typedef struct {
-    Rectangle button_rect;
-    Rectangle options_rect[3];  // PAL, NTSC, SECAM
-    bool is_visible;
-} cvbs_overlay_hitbox_t;
-
-static cvbs_overlay_hitbox_t s_cvbs_overlay[2];  // One per channel
-
 // Render the CVBS system selector overlay in the top-right corner of the panel
 // Uses the same style as sidebar dropdowns (FONT_SIZE_DROPDOWN_OPT, COLOR_BUTTON, etc.)
-static void render_cvbs_system_overlay(gui_app_t *app, int channel,
+// Overlay hitbox state is stored in decoder->overlay for click detection
+static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
                                         float panel_x, float panel_y, float panel_w) {
-    int sys = (channel == 0) ? atomic_load(&app->cvbs_system_a) : atomic_load(&app->cvbs_system_b);
+    if (!decoder) return;
+
+    int sys = decoder->overlay.selected_system;
     const char *sys_name = (sys == 0) ? "PAL" : (sys == 2) ? "SECAM" : "NTSC";
 
     // Button dimensions matching sidebar style (65x18 with corner radius 3)
@@ -1172,12 +1201,12 @@ static void render_cvbs_system_overlay(gui_app_t *app, int channel,
     float btn_x = panel_x + panel_w - btn_w - 8;
     float btn_y = panel_y + 8;
 
-    // Store hit box for click detection
-    s_cvbs_overlay[channel].button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
-    s_cvbs_overlay[channel].is_visible = true;
+    // Store hit box for click detection in decoder state
+    decoder->overlay.button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
+    decoder->overlay.is_visible = true;
 
     // Draw dropdown button (matching sidebar style)
-    bool is_open = gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel);
+    bool is_open = decoder->overlay.dropdown_open;
     Color btn_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
 
     DrawRectangleRounded((Rectangle){btn_x, btn_y, btn_w, btn_h}, 0.15f, 4, btn_bg);
@@ -1220,7 +1249,7 @@ static void render_cvbs_system_overlay(gui_app_t *app, int channel,
 
         for (int i = 0; i < 3; i++) {
             Rectangle opt_rect = {btn_x, opt_y + i * opt_h, btn_w, opt_h};
-            s_cvbs_overlay[channel].options_rect[i] = opt_rect;
+            decoder->overlay.options_rect[i] = opt_rect;
 
             bool is_selected = (sys == sys_values[i]);
 
@@ -1241,54 +1270,165 @@ static void render_cvbs_system_overlay(gui_app_t *app, int channel,
     }
 }
 
-void gui_cvbs_render_panel(gui_app_t *app, int channel,
-                           float x, float y, float w, float h,
-                           void *state, Color color) {
-    (void)state;
-    (void)color;
+// NOTE: Legacy gui_cvbs_render_panel() and gui_cvbs_overlay_handle_click() have been removed.
+// All rendering and click handling now uses vtable dispatch.
 
-    // Reset overlay visibility at start (will be set if decoder is active)
-    s_cvbs_overlay[channel].is_visible = false;
+//=============================================================================
+// Panel Interface (vtable) Implementation
+//=============================================================================
 
-    cvbs_decoder_t *dec = (channel == 0) ? atomic_load(&app->cvbs_a) : atomic_load(&app->cvbs_b);
-    if (!dec) {
-        const char *text = "CVBS disabled";
-        int text_width = MeasureText(text, FONT_SIZE_OSC_MSG);
-        DrawText(text, (int)(x + w/2 - text_width/2), (int)(y + h/2 - 12),
-                 FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
+// Each CVBS panel owns its own cvbs_decoder_t instance via the panel's
+// left_state or right_state pointer. Processing happens in the display thread
+// via cvbs_vtable_process(), rendering in the main thread via cvbs_vtable_render().
+
+//-----------------------------------------------------------------------------
+// Lifecycle Functions
+//-----------------------------------------------------------------------------
+
+static void *cvbs_vtable_create(void) {
+    cvbs_decoder_t *decoder = calloc(1, sizeof(cvbs_decoder_t));
+    if (!decoder) return NULL;
+
+    if (!gui_cvbs_init(decoder)) {
+        free(decoder);
+        return NULL;
+    }
+
+    // Default to NTSC (matches original simulated test signal)
+    decoder->overlay.selected_system = 1;  // 0=PAL, 1=NTSC, 2=SECAM
+    gui_cvbs_set_format(decoder, 1);
+
+    return decoder;
+}
+
+static void cvbs_vtable_destroy(void *state) {
+    if (!state) return;
+    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    gui_cvbs_cleanup(decoder);
+    free(decoder);
+}
+
+static void cvbs_vtable_clear(void *state) {
+    if (!state) return;
+    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    gui_cvbs_reset(decoder);
+}
+
+//-----------------------------------------------------------------------------
+// Processing Function (called from display thread)
+//-----------------------------------------------------------------------------
+
+static void cvbs_vtable_process(void *state, const int16_t *samples, size_t count, uint32_t sample_rate) {
+    (void)sample_rate;  // CVBS uses its own sample rate detection
+    if (!state || !samples || count == 0) return;
+    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    gui_cvbs_process_buffer(decoder, samples, count);
+}
+
+//-----------------------------------------------------------------------------
+// Rendering Functions
+//-----------------------------------------------------------------------------
+
+static void cvbs_vtable_render(void *state, gui_app_t *app, int channel,
+                                Rectangle bounds, Color channel_color) {
+    (void)app;
+    (void)channel;
+    (void)channel_color;
+
+    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+
+    if (!decoder) {
+        // No decoder state - show message
+        const char *msg = "CVBS Not Available";
+        int w = MeasureText(msg, 12);
+        DrawRectangleRec(bounds, (Color){20, 20, 20, 255});
+        DrawText(msg, (int)(bounds.x + bounds.width/2 - w/2),
+                 (int)(bounds.y + bounds.height/2 - 6), 12, (Color){150, 150, 150, 255});
         return;
     }
 
-    // Render decoded video frame (grayscale)
-    gui_cvbs_render_frame(dec, x, y, w, h);
+    // Swap buffers to get latest frame from display thread
+    gui_cvbs_swap_buffers(decoder);
 
-    // Render system selector overlay in top-right corner
-    render_cvbs_system_overlay(app, channel, x, y, w);
+    // Render the decoded frame
+    gui_cvbs_render_frame(decoder, bounds.x, bounds.y, bounds.width, bounds.height);
+
+    // Render the system selector overlay (uses decoder->overlay for state)
+    render_cvbs_system_overlay(decoder, bounds.x, bounds.y, bounds.width);
 }
 
-bool gui_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
-    if (channel < 0 || channel > 1) return false;
-    if (!s_cvbs_overlay[channel].is_visible) return false;
+//-----------------------------------------------------------------------------
+// Interaction Functions
+//-----------------------------------------------------------------------------
+
+static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
+                                      Vector2 mouse_pos, Rectangle bounds) {
+    (void)app;
+    (void)channel;
+    (void)bounds;
+
+    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    if (!decoder) return false;
+    if (!decoder->overlay.is_visible) return false;
 
     // Check button click - toggle dropdown
-    if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].button_rect)) {
-        gui_dropdown_toggle(DROPDOWN_CVBS_SYSTEM, channel);
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.button_rect)) {
+        decoder->overlay.dropdown_open = !decoder->overlay.dropdown_open;
         return true;
     }
 
     // Check option clicks if dropdown is open
-    if (gui_dropdown_is_open(DROPDOWN_CVBS_SYSTEM, channel)) {
+    if (decoder->overlay.dropdown_open) {
         int sys_values[] = {0, 1, 2};  // PAL, NTSC, SECAM
         for (int i = 0; i < 3; i++) {
-            if (CheckCollisionPointRec(mouse_pos, s_cvbs_overlay[channel].options_rect[i])) {
-                if (channel == 0) atomic_store(&app->cvbs_system_a, sys_values[i]);
-                else atomic_store(&app->cvbs_system_b, sys_values[i]);
-                gui_dropdown_close_all();
+            if (CheckCollisionPointRec(mouse_pos, decoder->overlay.options_rect[i])) {
+                decoder->overlay.selected_system = sys_values[i];
+                // Apply the format change to the decoder
+                gui_cvbs_set_format(decoder, sys_values[i]);
+                decoder->overlay.dropdown_open = false;
                 return true;
             }
         }
+        // Click outside dropdown closes it
+        decoder->overlay.dropdown_open = false;
     }
 
     return false;
+}
+
+//-----------------------------------------------------------------------------
+// Vtable Definition
+//-----------------------------------------------------------------------------
+
+static const panel_vtable_t s_cvbs_vtable = {
+    .name = "CVBS",
+
+    // Lifecycle
+    .create = cvbs_vtable_create,
+    .destroy = cvbs_vtable_destroy,
+    .clear = cvbs_vtable_clear,
+
+    // Processing
+    .process = cvbs_vtable_process,
+
+    // Rendering
+    .render = cvbs_vtable_render,
+    .render_overlay = NULL,  // Overlay is rendered in cvbs_vtable_render
+
+    // Interaction
+    .handle_click = cvbs_vtable_handle_click,
+    .handle_scroll = NULL,
+
+    // Menus (TODO: implement panel-owned system selector)
+    .get_menu_count = NULL,
+    .get_menu = NULL,
+};
+
+//-----------------------------------------------------------------------------
+// Registration
+//-----------------------------------------------------------------------------
+
+void gui_cvbs_panel_register(void) {
+    panel_register(PANEL_VIEW_CVBS, &s_cvbs_vtable);
 }
 

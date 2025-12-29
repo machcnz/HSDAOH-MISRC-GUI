@@ -828,3 +828,107 @@ void gui_oscilloscope_update_display(gui_app_t *app, const int16_t *buf_a,
         app->display_samples_available_b = count_b;
     }
 }
+
+//=============================================================================
+// Panel Interface (vtable) Implementation
+//=============================================================================
+
+// Note: Waveform panels use shared state from gui_app_t (phosphor, trigger,
+// display samples). The vtable lifecycle functions are no-ops because the
+// actual state is managed at the app level, not per-panel.
+//
+// The render function receives display_samples from the caller, but also
+// needs access to app state for grids, triggers, phosphor, etc.
+// This is a limitation of the current vtable interface.
+
+//-----------------------------------------------------------------------------
+// Waveform Line Panel Vtable
+//-----------------------------------------------------------------------------
+
+static void *waveform_line_create(void) {
+    // No per-panel state needed - uses shared app state
+    return NULL;
+}
+
+static void waveform_line_destroy(void *state) {
+    (void)state;
+}
+
+static void waveform_line_clear(void *state) {
+    (void)state;
+}
+
+static void waveform_line_render(void *state, gui_app_t *app, int channel,
+                                  Rectangle bounds, Color channel_color) {
+    (void)state;
+
+    if (!app) return;
+
+    // Delegate to existing render function
+    render_waveform_line(app, channel, bounds.x, bounds.y,
+                         bounds.width, bounds.height, channel_color);
+}
+
+static const panel_vtable_t s_waveform_line_vtable = {
+    .name = "Line",
+    .create = waveform_line_create,
+    .destroy = waveform_line_destroy,
+    .clear = waveform_line_clear,
+    .process = NULL,  // Waveform uses resampled display samples
+    .render = waveform_line_render,
+    .render_overlay = NULL,
+    .handle_click = NULL,  // Handled by handle_oscilloscope_interaction()
+    .handle_scroll = NULL,
+    .get_menu_count = NULL,
+    .get_menu = NULL,
+};
+
+void gui_waveform_line_panel_register(void) {
+    panel_register(PANEL_VIEW_WAVEFORM_LINE, &s_waveform_line_vtable);
+}
+
+//-----------------------------------------------------------------------------
+// Waveform Phosphor Panel Vtable
+//-----------------------------------------------------------------------------
+
+static void *waveform_phosphor_create(void) {
+    // No per-panel state - uses shared app->phosphor_a/b
+    return NULL;
+}
+
+static void waveform_phosphor_destroy(void *state) {
+    (void)state;
+}
+
+static void waveform_phosphor_clear(void *state) {
+    (void)state;
+}
+
+static void waveform_phosphor_render(void *state, gui_app_t *app, int channel,
+                                      Rectangle bounds, Color channel_color) {
+    (void)state;
+
+    if (!app) return;
+
+    // Delegate to existing render function
+    render_waveform_phosphor(app, channel, bounds.x, bounds.y,
+                             bounds.width, bounds.height, channel_color);
+}
+
+static const panel_vtable_t s_waveform_phosphor_vtable = {
+    .name = "Phosphor",
+    .create = waveform_phosphor_create,
+    .destroy = waveform_phosphor_destroy,
+    .clear = waveform_phosphor_clear,
+    .process = NULL,
+    .render = waveform_phosphor_render,
+    .render_overlay = NULL,
+    .handle_click = NULL,
+    .handle_scroll = NULL,
+    .get_menu_count = NULL,
+    .get_menu = NULL,
+};
+
+void gui_waveform_phosphor_panel_register(void) {
+    panel_register(PANEL_VIEW_WAVEFORM_PHOSPHOR, &s_waveform_phosphor_vtable);
+}

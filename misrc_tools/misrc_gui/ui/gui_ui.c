@@ -72,28 +72,6 @@ static CustomLayoutElement s_osc_b_element;
 static CustomLayoutElement s_vu_a_element;
 static CustomLayoutElement s_vu_b_element;
 
-static void gui_cvbs_try_free_pending(gui_app_t *app) {
-    if (!app) return;
-
-    cvbs_decoder_t *pending_a = atomic_load(&app->cvbs_pending_free_a);
-    if (pending_a && atomic_load(&app->cvbs_busy_a) == 0) {
-        pending_a = atomic_exchange(&app->cvbs_pending_free_a, NULL);
-        if (pending_a) {
-            gui_cvbs_cleanup(pending_a);
-            free(pending_a);
-        }
-    }
-
-    cvbs_decoder_t *pending_b = atomic_load(&app->cvbs_pending_free_b);
-    if (pending_b && atomic_load(&app->cvbs_busy_b) == 0) {
-        pending_b = atomic_exchange(&app->cvbs_pending_free_b, NULL);
-        if (pending_b) {
-            gui_cvbs_cleanup(pending_b);
-            free(pending_b);
-        }
-    }
-}
-
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
     if (!app->settings_panel_open) return;
@@ -1353,9 +1331,6 @@ void gui_render_layout(gui_app_t *app) {
 void gui_handle_interactions(gui_app_t *app) {
     // Reset click consumed flag at start of each frame
     s_ui_consumed_click = false;
-
-    // Free any CVBS decoders that were disabled while background threads were still using them
-    gui_cvbs_try_free_pending(app);
 
     // Handle popup interactions first (modal behavior)
     if (gui_popup_handle_interactions()) {

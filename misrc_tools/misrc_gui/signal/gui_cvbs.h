@@ -10,10 +10,20 @@
 
 #include "../core/gui_app.h"
 #include "gui_trigger.h"
+#include "../visualization/panel_interface.h"
 #include "raylib.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+
+//-----------------------------------------------------------------------------
+// Panel Interface Registration
+//-----------------------------------------------------------------------------
+
+// Register the CVBS panel vtable with the panel registry.
+// Call this once at startup.
+void gui_cvbs_panel_register(void);
 
 //-----------------------------------------------------------------------------
 // Video Format Constants
@@ -121,9 +131,11 @@ typedef struct cvbs_decoder {
     int frame_width;               // Always CVBS_FRAME_WIDTH (720)
     int frame_height;              // Full frame height (576 PAL, 486 NTSC)
 
-    // Double buffering for display
-    uint8_t *display_buffer;       // Buffer currently being displayed
-    bool display_ready;            // Display buffer has valid data
+    // Double buffering for thread-safe display
+    // Display thread writes to back buffer, render thread reads from front
+    uint8_t *display_front;        // Front buffer - read by render thread
+    uint8_t *display_back;         // Back buffer - written by display thread
+    atomic_int display_ready;      // 1 when back buffer has new frame to swap
 
     // GPU resources for video display
     Image frame_image;
@@ -170,6 +182,15 @@ typedef struct cvbs_decoder {
         int last_half_line_count;      // Half-line count from last V-sync
         int log_counter;               // Per-instance debug log counter
     } debug;
+
+    // UI overlay state (for system selector dropdown)
+    struct {
+        Rectangle button_rect;         // Hit box for system selector button
+        Rectangle options_rect[3];     // Hit boxes for PAL, NTSC, SECAM options
+        bool is_visible;               // Whether overlay was rendered (for click detection)
+        bool dropdown_open;            // Whether dropdown is currently open
+        int selected_system;           // Currently selected system (0=PAL, 1=NTSC, 2=SECAM)
+    } overlay;
 } cvbs_decoder_t;
 
 //-----------------------------------------------------------------------------
@@ -199,8 +220,13 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
 // Rendering
 //-----------------------------------------------------------------------------
 
+// Swap buffers if new frame available (called from render thread before rendering)
+// Copies back buffer to front buffer if display_ready flag is set.
+void gui_cvbs_swap_buffers(cvbs_decoder_t *decoder);
+
 // Render the decoded video frame
 // Scales to fit within the given rectangle while maintaining aspect ratio
+// Call gui_cvbs_swap_buffers() before this to get latest frame.
 void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
                             float x, float y, float width, float height);
 
@@ -221,30 +247,5 @@ cvbs_format_t gui_cvbs_get_format(cvbs_decoder_t *decoder);
 
 // Get format name string
 const char *gui_cvbs_get_format_name(cvbs_decoder_t *decoder);
-
-//-----------------------------------------------------------------------------
-// CVBS Panel Rendering (for panel system integration)
-//-----------------------------------------------------------------------------
-
-// Render CVBS as a panel, including system selector overlay.
-// This is the high-level entry point for the panel dispatch system.
-// Parameters:
-//   app: Application state
-//   channel: Channel number (0 or 1)
-//   x, y: Panel position
-//   w, h: Panel dimensions
-//   state: Per-panel state (currently unused, reserved for future)
-//   color: Channel color (currently unused)
-void gui_cvbs_render_panel(struct gui_app *app, int channel,
-                           float x, float y, float w, float h,
-                           void *state, Color color);
-
-// Handle click events on the CVBS overlay (system selector dropdown).
-// Returns true if the click was handled by the overlay.
-// Parameters:
-//   app: Application state
-//   channel: Channel number (0 or 1)
-//   mouse_pos: Mouse position at click
-bool gui_cvbs_overlay_handle_click(struct gui_app *app, int channel, Vector2 mouse_pos);
 
 #endif // GUI_CVBS_H

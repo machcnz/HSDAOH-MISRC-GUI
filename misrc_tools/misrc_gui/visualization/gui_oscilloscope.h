@@ -11,6 +11,17 @@
 #include "../core/gui_app.h"
 #include "raylib.h"
 #include <sys/types.h>
+#include "panel_interface.h"
+
+//-----------------------------------------------------------------------------
+// Panel Interface Registration
+//-----------------------------------------------------------------------------
+
+// Register the waveform line panel vtable with the panel registry.
+void gui_waveform_line_panel_register(void);
+
+// Register the waveform phosphor panel vtable with the panel registry.
+void gui_waveform_phosphor_panel_register(void);
 
 //-----------------------------------------------------------------------------
 // Oscilloscope Phosphor Parameters

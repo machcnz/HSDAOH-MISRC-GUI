@@ -9,6 +9,7 @@
 #include "../signal/gui_cvbs.h"
 #include "../visualization/gui_histogram_panel.h"
 #include "../visualization/gui_oscilloscope.h"
+#include "../visualization/panel_interface.h"
 #include "../../common/buffer_manager.h"
 #include "../../common/buffer.h"
 #include "../../common/threading.h"
@@ -48,27 +49,11 @@ static int display_thread_func(void *ctx) {
         const int16_t *samples_a = (const int16_t *)buf;
         const int16_t *samples_b = (const int16_t *)((uint8_t *)buf + DISPLAY_CHANNEL_SIZE);
 
-        /* CVBS decoding (can be slow - doesn't affect recording!) */
-        cvbs_decoder_t *cvbs_a = atomic_load(&app->cvbs_a);
-        if (cvbs_a) {
-            atomic_fetch_add(&app->cvbs_busy_a, 1);
-            int sys = atomic_load(&app->cvbs_system_a);
-            gui_cvbs_set_format(cvbs_a, sys);
-            gui_cvbs_process_buffer(cvbs_a, samples_a, DISPLAY_FRAME_SAMPLES);
-            atomic_fetch_sub(&app->cvbs_busy_a, 1);
-        }
-
-        cvbs_decoder_t *cvbs_b = atomic_load(&app->cvbs_b);
-        if (cvbs_b) {
-            atomic_fetch_add(&app->cvbs_busy_b, 1);
-            int sys = atomic_load(&app->cvbs_system_b);
-            gui_cvbs_set_format(cvbs_b, sys);
-            gui_cvbs_process_buffer(cvbs_b, samples_b, DISPLAY_FRAME_SAMPLES);
-            atomic_fetch_sub(&app->cvbs_busy_b, 1);
-        }
-
-        /* Histogram processing */
-        gui_histogram_panel_process_all(app, samples_a, samples_b, DISPLAY_FRAME_SAMPLES);
+        /* Process all panels via unified vtable dispatch
+         * This handles histogram, FFT, CVBS, and any other panel types that process raw samples.
+         */
+        uint32_t sample_rate = atomic_load(&app->sample_rate);
+        panel_process_all(app, samples_a, samples_b, DISPLAY_FRAME_SAMPLES, sample_rate);
 
         /* Copy samples to output buffer for render thread */
         memcpy(dt->samples.samples_a, samples_a, DISPLAY_CHANNEL_SIZE);

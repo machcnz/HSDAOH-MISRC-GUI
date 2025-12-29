@@ -13,19 +13,6 @@
 #include "../core/gui_app.h"  // For panel_view_type_t and channel_panel_config_t
 
 //-----------------------------------------------------------------------------
-// Panel Render Function Type
-//-----------------------------------------------------------------------------
-
-// Render function signature for panel views
-typedef void (*panel_render_fn)(
-    gui_app_t *app,
-    int channel,
-    float x, float y, float width, float height,
-    void *view_state,
-    Color channel_color
-);
-
-//-----------------------------------------------------------------------------
 // Panel System API
 //-----------------------------------------------------------------------------
 
@@ -34,9 +21,6 @@ const char* panel_view_type_name(panel_view_type_t type);
 
 // Check if a view type is available (e.g., FFT requires FFTW)
 bool panel_view_type_available(panel_view_type_t type);
-
-// Get render function for a view type
-panel_render_fn panel_get_render_fn(panel_view_type_t type);
 
 // Create view-specific state for a panel (e.g., fft_state_t for FFT)
 // Returns NULL if no state is needed or on failure
@@ -78,15 +62,12 @@ void panel_config_set_right_view(channel_panel_config_t *config, panel_view_type
 void panel_config_set_split(channel_panel_config_t *config, bool split);
 
 //-----------------------------------------------------------------------------
-// Panel Overlay Interaction
+// Unified Panel Click Handling
 //-----------------------------------------------------------------------------
 
-// Handle click on CVBS panel overlay (system selector dropdown)
-// Returns true if click was handled, false otherwise
-bool panel_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos);
-
-// Handle click on histogram panel overlay (bins selector dropdown)
-// Returns true if click was handled, false otherwise
-bool panel_histogram_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos);
+// Handle click events for all panel overlays using vtable dispatch.
+// Iterates through both channels' panel configs and checks for clicks.
+// Returns true if any panel consumed the click.
+bool panel_handle_all_clicks(gui_app_t *app, Vector2 mouse_pos);
 
 #endif // GUI_PANEL_H

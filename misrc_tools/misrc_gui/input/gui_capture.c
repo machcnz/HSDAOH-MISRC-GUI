@@ -15,6 +15,8 @@
 #include "gui_simulated.h"
 #include "gui_playback.h"
 #include "../visualization/gui_panel.h"
+#include "../visualization/panel_interface.h"
+#include "../visualization/gui_histogram_panel.h"
 #include "../signal/gui_cvbs.h"
 #include "../processing/gui_display_thread.h"
 
@@ -219,6 +221,15 @@ void gui_capture_callback(void *data_info_ptr) {
 
 // Initialize application
 void gui_app_init(gui_app_t *app) {
+    // Initialize panel registry and register all panel types
+    // This must happen before any panel state is created
+    panel_registry_init();
+    gui_waveform_line_panel_register();
+    gui_waveform_phosphor_panel_register();
+    gui_fft_panel_register();
+    gui_cvbs_panel_register();
+    gui_histogram_panel_register();
+
     // Initialize per-channel display buffers
     memset(app->display_samples_a, 0, sizeof(app->display_samples_a));
     memset(app->display_samples_b, 0, sizeof(app->display_samples_b));
@@ -294,10 +305,6 @@ void gui_app_init(gui_app_t *app) {
         memcpy(app->phosphor_b->config.channel_color, PHOSPHOR_CHANNEL_COLOR_B, sizeof(float) * 3);
     }
 
-    // Initialize FFT state pointers (allocated on demand when split mode is selected)
-    app->fft_a = NULL;
-    app->fft_b = NULL;
-
     // Initialize panel configuration (new panel abstraction system)
     app->panel_config_a.split = true;
     app->panel_config_a.left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
@@ -310,10 +317,6 @@ void gui_app_init(gui_app_t *app) {
     app->panel_config_b.right_view = PANEL_VIEW_FFT;
     app->panel_config_b.left_state = NULL;
     app->panel_config_b.right_state = panel_create_view_state(PANEL_VIEW_FFT);
-
-    // CVBS decoders (allocated on demand)
-    app->cvbs_a = NULL;
-    app->cvbs_b = NULL;
 
     // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
     // by buffer manager automatically on first use
@@ -332,10 +335,6 @@ void gui_app_init(gui_app_t *app) {
     s_capture_handler.capture_audio = want_audio;
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
-
-    // Default CVBS system selection
-    atomic_store(&app->cvbs_system_a, 1); // NTSC default (matches simulated test signal)
-    atomic_store(&app->cvbs_system_b, 1);
 
     // Initialize centralized buffer manager
     if (bufmgr_init(&app->buffers) != 0) {
@@ -379,43 +378,12 @@ void gui_app_cleanup(gui_app_t *app) {
         app->phosphor_b = NULL;
     }
 
-    // Cleanup FFT state
-    if (app->fft_a) {
-        gui_fft_cleanup(app->fft_a);
-        free(app->fft_a);
-        app->fft_a = NULL;
-    }
-    if (app->fft_b) {
-        gui_fft_cleanup(app->fft_b);
-        free(app->fft_b);
-        app->fft_b = NULL;
-    }
+    // Note: CVBS decoders are now owned by panel state (left_state/right_state)
+    // and cleaned up via panel_config_cleanup() below
 
-    // Cleanup CVBS decoders (also free any deferred frees)
-    {
-        cvbs_decoder_t *dec = atomic_exchange(&app->cvbs_a, NULL);
-        if (dec) {
-            gui_cvbs_cleanup(dec);
-            free(dec);
-        }
-        dec = atomic_exchange(&app->cvbs_pending_free_a, NULL);
-        if (dec) {
-            gui_cvbs_cleanup(dec);
-            free(dec);
-        }
-    }
-    {
-        cvbs_decoder_t *dec = atomic_exchange(&app->cvbs_b, NULL);
-        if (dec) {
-            gui_cvbs_cleanup(dec);
-            free(dec);
-        }
-        dec = atomic_exchange(&app->cvbs_pending_free_b, NULL);
-        if (dec) {
-            gui_cvbs_cleanup(dec);
-            free(dec);
-        }
-    }
+    // Cleanup panel configurations (includes FFT, CVBS, histogram state)
+    panel_config_cleanup(&app->panel_config_a);
+    panel_config_cleanup(&app->panel_config_b);
 
     // Cleanup oscilloscope resources (static state and resamplers)
     gui_oscilloscope_cleanup_resamplers(app);
