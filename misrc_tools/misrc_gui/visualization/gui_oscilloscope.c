@@ -231,6 +231,9 @@ static void draw_trigger_markers(float x, float y, float w, float h,
                                   channel_trigger_t *trig, float amplitude_scale, Color color) {
     if (!trig->enabled) return;
 
+    // Skip drawing trigger markers in CVBS mode (level is auto-detected)
+    if (trig->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) return;
+
     float center_y = y + h / 2.0f;
     float scale = (h / 2.0f) * amplitude_scale;
 
@@ -773,13 +776,20 @@ static bool waveform_handle_click(void *state, struct gui_app *app, int channel,
         return false;
     }
 
+    // Get trigger for this channel
+    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+
+    // Don't allow trigger level drag in CVBS mode (level is auto-detected)
+    if (trig->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) {
+        return false;
+    }
+
     // Start dragging on mouse press
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         s_vtable_dragging_channel = channel;
         s_vtable_drag_bounds = bounds;
 
         // Enable trigger when starting to drag
-        channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
         trig->enabled = true;
 
         return true;
