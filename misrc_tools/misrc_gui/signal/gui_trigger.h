@@ -27,6 +27,10 @@
 #define CVBS_VSYNC_MIN_WIDTH  800    // Minimum V-sync broad pulse (~20µs)
 #define CVBS_VSYNC_MAX_WIDTH  1200   // Maximum V-sync broad pulse (~30µs)
 
+// Histogram-based level detection
+#define CVBS_HIST_BINS        256    // Number of histogram bins for level detection
+#define CVBS_HIST_MIN_PEAK    0.005f // Minimum peak height (0.5% of samples)
+
 // Line timing at 40 MSPS
 #define CVBS_PAL_LINE_SAMPLES   2560  // 64µs PAL line
 #define CVBS_NTSC_LINE_SAMPLES  2540  // 63.5µs NTSC line
@@ -69,35 +73,25 @@ ssize_t trigger_find_falling_edge(const int16_t *buf, size_t count,
 // CVBS Sync Detection
 //-----------------------------------------------------------------------------
 
-// Find CVBS H-sync trigger point (rising edge at end of sync pulse)
-// Uses adaptive threshold based on signal min/max
+// Find first CVBS H-sync trigger point (rising edge at end of sync pulse)
+// Uses histogram-based level detection to find sync tip and blanking levels
 // Returns sample index of sync end, or -1 if not found
 ssize_t trigger_find_cvbs_hsync(const int16_t *buf, size_t count,
                                  size_t min_index);
 
-// Find CVBS H-sync with pre-analyzed levels (more efficient for repeated calls)
-ssize_t trigger_find_cvbs_hsync_with_levels(const int16_t *buf, size_t count,
-                                             size_t min_index,
-                                             const cvbs_levels_t *levels);
-
-// Find CVBS V-sync (broad pulse detection for frame sync)
-// Returns sample index of V-sync start, or -1 if not found
-ssize_t trigger_find_cvbs_vsync(const int16_t *buf, size_t count,
-                                 size_t min_index,
-                                 const cvbs_levels_t *levels);
+// Find all CVBS H-sync positions in buffer
+// Writes sync end positions to out_positions array (up to max_count)
+// Returns number of hsyncs found, or -1 on error
+// Uses histogram-based level detection internally
+ssize_t trigger_find_all_cvbs_hsyncs(const int16_t *buf, size_t count,
+                                      size_t *out_positions, size_t max_count);
 
 //-----------------------------------------------------------------------------
 // Main Trigger Dispatch
 //-----------------------------------------------------------------------------
 
-// Find trigger point based on channel configuration
-// Dispatches to appropriate trigger function based on mode
-// Uses trigger_mode_t enum from gui_app.h
-ssize_t trigger_find(const int16_t *buf, size_t count,
-                     int16_t level, trigger_mode_t mode,
-                     bool enabled, size_t min_index);
-
-// Convenience wrapper that takes channel_trigger_t pointer
+// Find trigger point based on mode and config
+// Returns sample index of trigger, or -1 if not found
 ssize_t trigger_find_from_config(const int16_t *buf, size_t count,
                                   const channel_trigger_t *trig, size_t min_index);
 
