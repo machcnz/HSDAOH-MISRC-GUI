@@ -275,6 +275,10 @@ bool gui_dropdown_handle_click(gui_app_t *app) {
         if (panel_cvbs_overlay_handle_click(app, ch, mouse)) {
             dropdown_clicked = true;
         }
+        // Histogram bins dropdown is handled via panel overlay
+        if (panel_histogram_overlay_handle_click(app, ch, mouse)) {
+            dropdown_clicked = true;
+        }
     }
 
     // Close all dropdowns if clicked elsewhere

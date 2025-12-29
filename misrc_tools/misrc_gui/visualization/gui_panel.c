@@ -10,7 +10,9 @@
 #include "../core/gui_app.h"
 #include "gui_oscilloscope.h"
 #include "gui_fft.h"
+#include "gui_histogram_panel.h"
 #include "../signal/gui_cvbs.h"
+#include "../signal/gui_histogram.h"
 #include "../ui/gui_ui.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,7 @@ static const char* s_view_names[] = {
     [PANEL_VIEW_WAVEFORM_PHOSPHOR] = "Phosphor",
     [PANEL_VIEW_FFT] = "FFT",
     [PANEL_VIEW_CVBS] = "CVBS",
+    [PANEL_VIEW_HISTOGRAM] = "Histogram",
 };
 
 const char* panel_view_type_name(panel_view_type_t type) {
@@ -36,6 +39,7 @@ bool panel_view_type_available(panel_view_type_t type) {
         case PANEL_VIEW_WAVEFORM_LINE:
         case PANEL_VIEW_WAVEFORM_PHOSPHOR:
         case PANEL_VIEW_CVBS:
+        case PANEL_VIEW_HISTOGRAM:
             return true;
         case PANEL_VIEW_FFT:
             return gui_fft_available();
@@ -67,6 +71,16 @@ void* panel_create_view_state(panel_view_type_t type) {
         case PANEL_VIEW_CVBS:
             // CVBS decoder state is stored on gui_app_t (app->cvbs_a/b)
             return NULL;
+        case PANEL_VIEW_HISTOGRAM: {
+            histogram_state_t *hist = malloc(sizeof(histogram_state_t));
+            if (hist) {
+                if (histogram_init(hist, HISTOGRAM_DEFAULT_NUM_BINS)) {
+                    return hist;
+                }
+                free(hist);
+            }
+            return NULL;
+        }
         default:
             return NULL;
     }
@@ -89,6 +103,12 @@ void panel_destroy_view_state(panel_view_type_t type, void *state) {
         case PANEL_VIEW_CVBS:
             // No per-panel state
             break;
+        case PANEL_VIEW_HISTOGRAM: {
+            histogram_state_t *hist = (histogram_state_t*)state;
+            histogram_cleanup(hist);
+            free(hist);
+            break;
+        }
         default:
             break;
     }
@@ -109,6 +129,9 @@ void panel_clear_view_state(panel_view_type_t type, void *state) {
         case PANEL_VIEW_CVBS:
             // No per-panel state
             break;
+        case PANEL_VIEW_HISTOGRAM:
+            histogram_clear((histogram_state_t*)state);
+            break;
         default:
             break;
     }
@@ -127,6 +150,8 @@ static void render_fft_panel(gui_app_t *app, int channel,
     float x, float y, float w, float h, void *state, Color color);
 static void render_cvbs_panel(gui_app_t *app, int channel,
     float x, float y, float w, float h, void *state, Color color);
+static void render_histogram_panel(gui_app_t *app, int channel,
+    float x, float y, float w, float h, void *state, Color color);
 
 // Render function table
 static panel_render_fn s_render_fns[] = {
@@ -134,6 +159,7 @@ static panel_render_fn s_render_fns[] = {
     [PANEL_VIEW_WAVEFORM_PHOSPHOR] = render_waveform_phosphor_panel,
     [PANEL_VIEW_FFT] = render_fft_panel,
     [PANEL_VIEW_CVBS] = render_cvbs_panel,
+    [PANEL_VIEW_HISTOGRAM] = render_histogram_panel,
 };
 
 panel_render_fn panel_get_render_fn(panel_view_type_t type) {
@@ -177,6 +203,15 @@ static void render_fft_panel(gui_app_t *app, int channel,
 static void render_cvbs_panel(gui_app_t *app, int channel,
     float x, float y, float w, float h, void *state, Color color) {
     gui_cvbs_render_panel(app, channel, x, y, w, h, state, color);
+}
+
+//-----------------------------------------------------------------------------
+// Histogram Panel Rendering - Delegates to gui_histogram_panel module
+//-----------------------------------------------------------------------------
+
+static void render_histogram_panel(gui_app_t *app, int channel,
+    float x, float y, float w, float h, void *state, Color color) {
+    gui_histogram_render_panel(app, channel, x, y, w, h, state, color);
 }
 
 //-----------------------------------------------------------------------------
@@ -308,9 +343,13 @@ void panel_config_set_split(channel_panel_config_t *config, bool split) {
 }
 
 //-----------------------------------------------------------------------------
-// CVBS Panel Overlay Interaction - Delegates to gui_cvbs module
+// Panel Overlay Interaction - Delegates to respective modules
 //-----------------------------------------------------------------------------
 
 bool panel_cvbs_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
     return gui_cvbs_overlay_handle_click(app, channel, mouse_pos);
+}
+
+bool panel_histogram_overlay_handle_click(gui_app_t *app, int channel, Vector2 mouse_pos) {
+    return gui_histogram_overlay_handle_click(app, channel, mouse_pos);
 }

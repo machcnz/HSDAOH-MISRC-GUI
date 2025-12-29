@@ -21,12 +21,13 @@ typedef struct gui_app gui_app_t;
 // Dropdown Identifiers
 //-----------------------------------------------------------------------------
 
-#define DROPDOWN_DEVICE       "Device"
-#define DROPDOWN_TRIGGER_MODE "TriggerMode"
-#define DROPDOWN_LAYOUT       "Layout"
-#define DROPDOWN_LEFT_VIEW    "LeftView"
-#define DROPDOWN_RIGHT_VIEW   "RightView"
-#define DROPDOWN_CVBS_SYSTEM  "CvbsSystem"
+#define DROPDOWN_DEVICE         "Device"
+#define DROPDOWN_TRIGGER_MODE   "TriggerMode"
+#define DROPDOWN_LAYOUT         "Layout"
+#define DROPDOWN_LEFT_VIEW      "LeftView"
+#define DROPDOWN_RIGHT_VIEW     "RightView"
+#define DROPDOWN_CVBS_SYSTEM    "CvbsSystem"
+#define DROPDOWN_HISTOGRAM_BINS "HistogramBins"
 
 //-----------------------------------------------------------------------------
 // State Management

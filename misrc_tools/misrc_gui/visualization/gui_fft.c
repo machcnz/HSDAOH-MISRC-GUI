@@ -94,6 +94,10 @@ static bool fft_resize(fft_state_t *state, int new_size) {
         free(state->magnitude);
         state->magnitude = NULL;
     }
+    if (state->peak_hold) {
+        free(state->peak_hold);
+        state->peak_hold = NULL;
+    }
 
     // Allocate new buffers
     state->fftw_input = (float *)fftwf_malloc(sizeof(float) * new_size);
@@ -157,6 +161,24 @@ static bool fft_resize(fft_state_t *state, int new_size) {
     }
     memset(state->magnitude, 0, sizeof(float) * new_bins);
 
+    // Allocate peak-hold buffer for stable peak detection
+    state->peak_hold = (float *)malloc(sizeof(float) * new_bins);
+    if (!state->peak_hold) {
+        fprintf(stderr, "[FFT] Failed to allocate peak_hold buffer (%d bins)\n", new_bins);
+        fftwf_destroy_plan((fftwf_plan)state->fftw_plan);
+        fftwf_free(state->fftw_input);
+        fftwf_free(state->fftw_output);
+        free(state->window);
+        free(state->magnitude);
+        state->fftw_plan = NULL;
+        state->fftw_input = NULL;
+        state->fftw_output = NULL;
+        state->window = NULL;
+        state->magnitude = NULL;
+        return false;
+    }
+    memset(state->peak_hold, 0, sizeof(float) * new_bins);
+
     state->fft_size = new_size;
     state->fft_bins = new_bins;
     state->allocated_size = new_size;
@@ -212,8 +234,19 @@ void gui_fft_clear(fft_state_t *state) {
         memset(state->magnitude, 0, sizeof(float) * state->fft_bins);
     }
 
+    // Clear peak-hold buffer
+    if (state->peak_hold && state->fft_bins > 0) {
+        memset(state->peak_hold, 0, sizeof(float) * state->fft_bins);
+    }
+
     // Clear phosphor render textures
     phosphor_rt_clear(&state->phosphor);
+
+    // Reset peak label smoothing state
+    state->peak_label_active = false;
+    state->peak_label_x = 0.0f;
+    state->peak_label_y = 0.0f;
+    state->peak_label_bin = 0;
 
     state->data_ready = false;
 #endif
@@ -246,6 +279,11 @@ void gui_fft_cleanup(fft_state_t *state) {
     if (state->magnitude) {
         free(state->magnitude);
         state->magnitude = NULL;
+    }
+
+    if (state->peak_hold) {
+        free(state->peak_hold);
+        state->peak_hold = NULL;
     }
 
     phosphor_rt_cleanup(&state->phosphor);
@@ -359,6 +397,90 @@ void gui_fft_process_display(fft_state_t *state, const waveform_sample_t *sample
 // Grid settings for FFT (matching oscilloscope style)
 #define FFT_GRID_MIN_SPACING_PX 80   // Minimum pixels between frequency grid lines
 #define FFT_GRID_MAX_DIVISIONS 12    // Maximum number of frequency divisions
+
+// Peak detection settings
+#define FFT_PEAK_SEARCH_RADIUS_PX 50   // Pixels around mouse to search for peaks
+#define FFT_PEAK_MIN_PROMINENCE 0.02f  // Minimum prominence (0-1) to qualify as a peak
+#define FFT_PEAK_MAX_CANDIDATES 32     // Maximum peaks to consider when finding closest
+#define FFT_PEAK_MAX_DISPLAY 1         // Maximum peaks to display near mouse
+#define FFT_PEAK_HOLD_DECAY 0.99f     // Per-frame decay for peak hold (closer to 1 = slower decay)
+#define FFT_PEAK_LABEL_EMA_ALPHA 0.15f // EMA smoothing for label position (lower = smoother)
+
+// Peak info structure for rendering
+typedef struct {
+    int bin;           // FFT bin index
+    float magnitude;   // Normalized magnitude (0-1)
+    float freq_hz;     // Frequency in Hz
+    float db;          // dB value
+    float screen_x;    // Screen X position
+    float screen_y;    // Screen Y position
+} fft_peak_t;
+
+// Find peaks near a given bin index within a search radius
+// Returns number of peaks found (up to max_peaks)
+static int fft_find_peaks_near(const float *magnitude, int num_bins,
+                               int center_bin, int search_radius,
+                               float min_prominence,
+                               fft_peak_t *peaks, int max_peaks) {
+    if (!magnitude || num_bins < 3 || !peaks || max_peaks <= 0) return 0;
+
+    int start_bin = center_bin - search_radius;
+    int end_bin = center_bin + search_radius;
+    if (start_bin < 1) start_bin = 1;
+    if (end_bin >= num_bins - 1) end_bin = num_bins - 2;
+
+    int peak_count = 0;
+
+    // Find local maxima in the search range
+    for (int i = start_bin; i <= end_bin && peak_count < max_peaks; i++) {
+        float val = magnitude[i];
+        float prev = magnitude[i - 1];
+        float next = magnitude[i + 1];
+
+        // Check if this is a local maximum
+        if (val > prev && val > next) {
+            // Calculate prominence: how much higher than surrounding valleys
+            // Look left for valley
+            float left_valley = val;
+            for (int j = i - 1; j >= 0; j--) {
+                if (magnitude[j] < left_valley) {
+                    left_valley = magnitude[j];
+                }
+                if (magnitude[j] > val) break;  // Hit a higher peak
+            }
+
+            // Look right for valley
+            float right_valley = val;
+            for (int j = i + 1; j < num_bins; j++) {
+                if (magnitude[j] < right_valley) {
+                    right_valley = magnitude[j];
+                }
+                if (magnitude[j] > val) break;  // Hit a higher peak
+            }
+
+            float prominence = val - fmaxf(left_valley, right_valley);
+
+            if (prominence >= min_prominence) {
+                peaks[peak_count].bin = i;
+                peaks[peak_count].magnitude = val;
+                peak_count++;
+            }
+        }
+    }
+
+    // Sort peaks by magnitude (descending) - simple bubble sort for small array
+    for (int i = 0; i < peak_count - 1; i++) {
+        for (int j = i + 1; j < peak_count; j++) {
+            if (peaks[j].magnitude > peaks[i].magnitude) {
+                fft_peak_t tmp = peaks[i];
+                peaks[i] = peaks[j];
+                peaks[j] = tmp;
+            }
+        }
+    }
+
+    return peak_count;
+}
 
 // Snap to 1-2-5 log scale sequence (same as oscilloscope)
 static double fft_snap_to_125(double value) {
@@ -559,6 +681,166 @@ void gui_fft_render(fft_state_t *state, float x, float y,
 
     // Render phosphor texture with heatmap colormap and bloom
     phosphor_rt_render(&state->phosphor, x, y, true);
+
+    // Update peak-hold buffer: max-hold with decay for stable peak detection
+    if (state->magnitude && state->peak_hold && state->fft_bins > 1) {
+        int fft_bins = state->fft_bins;
+        for (int i = 0; i < fft_bins; i++) {
+            // Decay existing peak-hold value
+            state->peak_hold[i] *= FFT_PEAK_HOLD_DECAY;
+            // Take max of decayed value and current magnitude
+            if (state->magnitude[i] > state->peak_hold[i]) {
+                state->peak_hold[i] = state->magnitude[i];
+            }
+        }
+    }
+
+    // Peak detection on mouse hover - show closest peak to mouse
+    if (state->peak_hold && state->data_ready && state->fft_bins > 1 && display_sample_rate > 0) {
+        Vector2 mouse = GetMousePosition();
+        Rectangle fft_rect = {x, y, width, height};
+
+        if (CheckCollisionPointRec(mouse, fft_rect)) {
+            float nyquist = display_sample_rate / 2.0f;
+            int fft_bins = state->fft_bins;
+
+            // IMPORTANT: The FFT is drawn to phosphor texture using rt_width, and the
+            // texture is rendered at screen position (x, y) with size (rt_width, rt_height).
+            // So we must use rt_width here to match the actual rendered coordinates.
+            float bin_width = (float)rt_width / (float)(fft_bins - 1);
+
+            // Convert mouse X to bin index
+            float rel_x = mouse.x - x;
+            int mouse_bin = (int)(rel_x / bin_width);
+            if (mouse_bin < 0) mouse_bin = 0;
+            if (mouse_bin >= fft_bins) mouse_bin = fft_bins - 1;
+
+            // Calculate search radius in bins
+            int search_radius_bins = (int)(FFT_PEAK_SEARCH_RADIUS_PX / bin_width + 0.5f);
+            if (search_radius_bins < 2) search_radius_bins = 2;
+
+            // Find peaks near mouse using peak-hold data (stable envelope)
+            // Use larger buffer to find all candidates, then select closest
+            fft_peak_t peaks[FFT_PEAK_MAX_CANDIDATES];
+            int peak_count = fft_find_peaks_near(state->peak_hold, fft_bins,
+                                                  mouse_bin, search_radius_bins,
+                                                  FFT_PEAK_MIN_PROMINENCE,
+                                                  peaks, FFT_PEAK_MAX_CANDIDATES);
+
+            // Find the best peak - balance between closest to mouse and largest magnitude
+            if (peak_count > 0) {
+                // Find the maximum magnitude among candidates for normalization
+                float max_mag = peaks[0].magnitude;
+                for (int i = 1; i < peak_count; i++) {
+                    if (peaks[i].magnitude > max_mag) {
+                        max_mag = peaks[i].magnitude;
+                    }
+                }
+
+                // Score each peak: combine distance score and magnitude score
+                // distance_score: 1.0 at mouse, 0.0 at edge of search radius
+                // magnitude_score: 0.0 to 1.0 normalized to max in range
+                // Weight magnitude more heavily so prominent peaks are preferred
+                const float distance_weight = 0.3f;
+                const float magnitude_weight = 0.7f;
+
+                int best_idx = 0;
+                float best_score = -1.0f;
+                int best_dist = abs(peaks[0].bin - mouse_bin);
+
+                for (int i = 0; i < peak_count; i++) {
+                    int dist = abs(peaks[i].bin - mouse_bin);
+                    float distance_score = 1.0f - (float)dist / (float)search_radius_bins;
+                    float magnitude_score = (max_mag > 0) ? peaks[i].magnitude / max_mag : 0.0f;
+                    float score = distance_weight * distance_score + magnitude_weight * magnitude_score;
+
+                    if (score > best_score) {
+                        best_score = score;
+                        best_idx = i;
+                        best_dist = dist;
+                    }
+                }
+
+                int closest_idx = best_idx;
+                int closest_dist = best_dist;
+
+                // Get the peak-hold magnitude for rendering
+                int peak_bin = peaks[closest_idx].bin;
+                float peak_mag = state->peak_hold[peak_bin];
+
+                // Calculate screen position for closest peak
+                float peak_x = x + peak_bin * bin_width;
+                float peak_y = y + height - (peak_mag * height);
+
+                // Calculate frequency and dB
+                float freq = (float)peak_bin / (float)(fft_bins - 1) * nyquist;
+                float db = FFT_DB_MIN + peak_mag * db_range;
+
+                // Draw peak marker (dot) - at actual peak position (no smoothing)
+                float dot_radius = 4.0f;
+                DrawCircleV((Vector2){peak_x, peak_y}, dot_radius, COLOR_TEXT);
+
+                // Apply EMA smoothing to label position only
+                float label_anchor_x, label_anchor_y;
+                if (!state->peak_label_active) {
+                    // First time - initialize directly to raw position
+                    state->peak_label_x = peak_x;
+                    state->peak_label_y = peak_y;
+                    state->peak_label_bin = peak_bin;
+                    state->peak_label_active = true;
+                    label_anchor_x = peak_x;
+                    label_anchor_y = peak_y;
+                } else {
+                    // Apply EMA: smoothed = alpha * raw + (1 - alpha) * previous
+                    state->peak_label_x = FFT_PEAK_LABEL_EMA_ALPHA * peak_x +
+                                          (1.0f - FFT_PEAK_LABEL_EMA_ALPHA) * state->peak_label_x;
+                    state->peak_label_y = FFT_PEAK_LABEL_EMA_ALPHA * peak_y +
+                                          (1.0f - FFT_PEAK_LABEL_EMA_ALPHA) * state->peak_label_y;
+                    state->peak_label_bin = peak_bin;
+                    label_anchor_x = state->peak_label_x;
+                    label_anchor_y = state->peak_label_y;
+                }
+
+                // Format frequency label
+                char freq_buf[32];
+                format_freq_label(freq_buf, sizeof(freq_buf), freq);
+
+                // Format dB label
+                char db_buf[16];
+                snprintf(db_buf, sizeof(db_buf), "%.1fdB", db);
+
+                // Combined label
+                char peak_label[64];
+                snprintf(peak_label, sizeof(peak_label), "%s %s", db_buf, freq_buf);
+
+                // Draw label with background for readability
+                // Use smoothed anchor position for label placement
+                int label_w = fft_measure_text(fonts, peak_label, FONT_SIZE_OSC_SCALE);
+                float label_x = label_anchor_x - label_w / 2;
+                float label_y = label_anchor_y - dot_radius - 10 - FONT_SIZE_OSC_SCALE;
+
+                // Keep label on screen
+                if (label_x < x + 2) label_x = x + 2;
+                if (label_x + label_w > x + width - 2) label_x = x + width - label_w - 2;
+                if (label_y < y + 2) label_y = label_anchor_y + dot_radius + 4;
+
+                // Draw background rectangle
+                DrawRectangle((int)(label_x - 2), (int)(label_y - 1),
+                             label_w + 4, FONT_SIZE_OSC_SCALE + 2,
+                             (Color){0, 0, 0, 180});
+
+                // Draw label text
+                fft_draw_text_mono(fonts, peak_label, label_x, label_y,
+                                   FONT_SIZE_OSC_SCALE, COLOR_TEXT);
+            } else {
+                // No peak found - deactivate label smoothing
+                state->peak_label_active = false;
+            }
+        } else {
+            // Mouse left FFT area - deactivate label smoothing
+            state->peak_label_active = false;
+        }
+    }
 
     // Draw "FFT" label in top-right corner (matching oscilloscope channel label style)
     const char *fft_label = "FFT";

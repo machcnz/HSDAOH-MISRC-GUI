@@ -58,6 +58,9 @@ typedef struct fft_state {
     // Current FFT magnitude output (normalized 0-1)
     float *magnitude;          // fft_bins floats, latest FFT result normalized
 
+    // Peak-hold magnitude for stable peak detection (max-hold with decay)
+    float *peak_hold;          // fft_bins floats, decayed peak envelope
+
     // GPU phosphor render texture (shared module)
     phosphor_rt_t phosphor;    // Reusable phosphor persistence effect
 
@@ -66,6 +69,12 @@ typedef struct fft_state {
 
     // Initialization state
     bool initialized;
+
+    // Peak label smoothing (EMA filtered position)
+    float peak_label_x;        // Smoothed X position for peak label
+    float peak_label_y;        // Smoothed Y position for peak label
+    int peak_label_bin;        // Last selected peak bin (for label content)
+    bool peak_label_active;    // Whether label is currently being displayed
 } fft_state_t;
 
 //-----------------------------------------------------------------------------

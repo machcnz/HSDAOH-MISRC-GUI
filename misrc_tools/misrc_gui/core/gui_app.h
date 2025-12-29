@@ -25,6 +25,7 @@ typedef enum {
     PANEL_VIEW_WAVEFORM_PHOSPHOR,  // Digital phosphor with persistence
     PANEL_VIEW_FFT,                // FFT spectrum analysis
     PANEL_VIEW_CVBS,               // CVBS luma decoder view
+    PANEL_VIEW_HISTOGRAM,          // Amplitude histogram
     PANEL_VIEW_COUNT
     // Future: PANEL_VIEW_XY, PANEL_VIEW_SPECTROGRAM
 } panel_view_type_t;

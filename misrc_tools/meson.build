@@ -191,11 +191,13 @@ if raylib_dep.found()
     # Signal
     'misrc_gui/signal/gui_trigger.c',
     'misrc_gui/signal/gui_cvbs.c',
+    'misrc_gui/signal/gui_histogram.c',
     # Visualization
     'misrc_gui/visualization/gui_oscilloscope.c',
     'misrc_gui/visualization/gui_phosphor_rt.c',
     'misrc_gui/visualization/gui_fft.c',
     'misrc_gui/visualization/gui_panel.c',
+    'misrc_gui/visualization/gui_histogram_panel.c',
     'misrc_gui/visualization/gui_text.c',
     'misrc_gui/visualization/gui_vu_meter.c',
     # UI
