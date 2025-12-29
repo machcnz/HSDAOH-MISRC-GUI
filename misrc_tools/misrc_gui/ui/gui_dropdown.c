@@ -102,43 +102,6 @@ static bool handle_device_dropdown(gui_app_t *app) {
     return clicked;
 }
 
-// Handle trigger mode selection for a channel
-static bool handle_trigger_mode_dropdown(gui_app_t *app, int ch) {
-    bool clicked = false;
-    channel_trigger_t *trig = (ch == 0) ? &app->trigger_a : &app->trigger_b;
-
-    if (Clay_PointerOver(CLAY_IDI("TrigModeBtn", ch))) {
-        gui_dropdown_toggle(DROPDOWN_TRIGGER_MODE, ch);
-        clicked = true;
-    } else if (gui_dropdown_is_open(DROPDOWN_TRIGGER_MODE, ch)) {
-        if (Clay_PointerOver(CLAY_IDI("TrigModeOptOff", ch))) {
-            trig->enabled = false;
-            gui_dropdown_close_all();
-            clicked = true;
-        }
-        if (Clay_PointerOver(CLAY_IDI("TrigModeOptRising", ch))) {
-            trig->enabled = true;
-            trig->trigger_mode = TRIGGER_MODE_RISING;
-            gui_dropdown_close_all();
-            clicked = true;
-        }
-        if (Clay_PointerOver(CLAY_IDI("TrigModeOptFalling", ch))) {
-            trig->enabled = true;
-            trig->trigger_mode = TRIGGER_MODE_FALLING;
-            gui_dropdown_close_all();
-            clicked = true;
-        }
-        if (Clay_PointerOver(CLAY_IDI("TrigModeOptCVBS", ch))) {
-            trig->enabled = true;
-            trig->trigger_mode = TRIGGER_MODE_CVBS_HSYNC;
-            gui_dropdown_close_all();
-            clicked = true;
-        }
-    }
-
-    return clicked;
-}
-
 // Handle layout selection for a channel
 static bool handle_layout_dropdown(gui_app_t *app, int ch) {
     bool clicked = false;
@@ -213,10 +176,6 @@ static bool handle_right_view_dropdown(gui_app_t *app, int ch) {
     return clicked;
 }
 
-// Note: CVBS system dropdown handling has moved to gui_panel.c
-// (panel_cvbs_overlay_handle_click) since the dropdown is now rendered
-// as an overlay inside the CVBS panel itself.
-
 //-----------------------------------------------------------------------------
 // Centralized Interaction Handler
 //-----------------------------------------------------------------------------
@@ -232,9 +191,6 @@ bool gui_dropdown_handle_click(gui_app_t *app) {
 
     // Per-channel dropdowns (toolbar controls)
     for (int ch = 0; ch < 2; ch++) {
-        if (handle_trigger_mode_dropdown(app, ch)) {
-            dropdown_clicked = true;
-        }
         if (handle_layout_dropdown(app, ch)) {
             dropdown_clicked = true;
         }

@@ -71,10 +71,8 @@ uint8_t *gui_extract_get_buf_aux(void);
 void gui_extract_update_stats(gui_app_t *app, const int16_t *buf_a,
                               const int16_t *buf_b, size_t num_samples);
 
-// Called by the render thread to update oscilloscope display when ready to draw a frame
-// Uses atomic flag to check if new samples are available from extraction thread
-// Returns true if new samples were processed, false if no new samples available
-bool gui_extract_update_display(void);
+// Note: gui_extract_update_display() has been removed - display processing is now
+// handled by the display thread via panel_process_all()
 
 // Get the "data available" event (callback signals this after writing to ringbuffer)
 // Returns NULL if extraction is not initialized

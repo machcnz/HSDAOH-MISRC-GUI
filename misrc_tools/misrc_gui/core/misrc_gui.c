@@ -230,9 +230,8 @@ int main(int argc, char **argv) {
         // Update VU meters
         gui_app_update_vu_meters(&app, dt);
 
-        // Update display buffer from extraction thread (render-driven)
-        // Only processes new samples if extraction thread has new data ready
-        gui_extract_update_display();
+        // Note: Display processing now handled by display thread via panel_process_all()
+        // Each panel type (waveform, histogram, FFT) receives raw samples via vtable->process()
 
         // Build UI layout
         Clay_BeginLayout();

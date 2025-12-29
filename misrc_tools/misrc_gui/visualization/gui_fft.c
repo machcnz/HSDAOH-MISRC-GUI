@@ -643,11 +643,17 @@ void gui_fft_render(fft_state_t *state, float x, float y,
 
     // Draw FFT bins as connected line segments (with zoom/pan)
     if (state->magnitude && state->data_ready && state->fft_bins > 1) {
-        Color lineColor = phosphor_rt_get_draw_color(&state->phosphor);
-
         int fft_bins = state->fft_bins;
         float zoom = state->zoom_level;
         float pan = state->pan_offset;
+
+        // Scale hit intensity inversely with zoom for consistent phosphor appearance
+        // At higher zoom, fewer bins are visible so each hit should contribute less
+        float base_hit = state->phosphor.config.hit_increment;
+        float zoom_adjusted_hit = base_hit / sqrtf(zoom);
+        if (zoom_adjusted_hit < 0.05f) zoom_adjusted_hit = 0.05f;  // Minimum intensity
+        unsigned char hit_val = (unsigned char)(zoom_adjusted_hit * 255.0f);
+        Color lineColor = (Color){hit_val, 0, 0, 255};
 
         // Calculate visible bin range based on zoom/pan
         // pan_offset is normalized frequency (0-1), zoom_level scales the view
@@ -953,13 +959,13 @@ void gui_fft_render(fft_state_t *state, float x, float y,
                 if (label_y < y + 2) label_y = label_anchor_y + dot_radius + 4;
 
                 // Draw background rectangle
-                DrawRectangle((int)(label_x - 2), (int)(label_y - 1),
-                             label_w + 4, FONT_SIZE_OSC_SCALE + 2,
-                             (Color){0, 0, 0, 180});
+                // DrawRectangle((int)(label_x - 2), (int)(label_y - 1),
+                //              label_w + 4, FONT_SIZE_OSC_SCALE + 2,
+                //              (Color){0, 0, 0, 180});
 
                 // Draw label text
                 fft_draw_text_mono(fonts, peak_label, label_x, label_y,
-                                   FONT_SIZE_OSC_SCALE, COLOR_TEXT);
+                                   FONT_SIZE_NORMAL, COLOR_TEXT);
                 }  // end if (best_score >= 0)
             } else {
                 // No peak found - deactivate label smoothing

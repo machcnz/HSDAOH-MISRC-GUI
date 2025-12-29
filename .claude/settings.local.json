@@ -15,7 +15,8 @@
       "Bash(taskkill:*)",
       "Bash(dir:*)",
       "Bash(findstr:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(grep:*)"
     ]
   }
 }

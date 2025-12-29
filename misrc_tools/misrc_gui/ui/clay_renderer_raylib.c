@@ -6,7 +6,7 @@
 #include <clay.h>
 #include "raylib.h"
 #include "../visualization/gui_custom_elements.h"
-#include "../visualization/gui_oscilloscope.h"
+#include "../visualization/gui_panel.h"
 #include "../visualization/gui_vu_meter.h"
 #include "gui_ui.h"
 #include <stdint.h>
@@ -179,13 +179,13 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 CustomLayoutElement *customElement = (CustomLayoutElement *)config->customData;
                 if (!customElement) continue;
                 switch (customElement->type) {
-                    case CUSTOM_LAYOUT_ELEMENT_TYPE_OSCILLOSCOPE: {
-                        CustomLayoutElement_Oscilloscope *osc = &customElement->customData.oscilloscope;
-                        if (osc->app) {
-                            Color color = (osc->channel == 0) ? COLOR_CHANNEL_A : COLOR_CHANNEL_B;
-                            render_oscilloscope_channel(osc->app, boundingBox.x, boundingBox.y,
-                                                        boundingBox.width, boundingBox.height,
-                                                        osc->channel, NULL, color);
+                    case CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL: {
+                        CustomLayoutElement_ChannelPanel *panel = &customElement->customData.channel_panel;
+                        if (panel->app) {
+                            Color color = (panel->channel == 0) ? COLOR_CHANNEL_A : COLOR_CHANNEL_B;
+                            render_channel_panels(panel->app, panel->channel,
+                                                  boundingBox.x, boundingBox.y,
+                                                  boundingBox.width, boundingBox.height, color);
                         }
                         break;
                     }

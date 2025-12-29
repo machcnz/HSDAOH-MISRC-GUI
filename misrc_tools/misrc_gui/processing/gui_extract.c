@@ -67,9 +67,6 @@ static bool s_events_initialized = false;
 
 // Note: Record buffer events now managed by buffer manager
 
-// Flag to indicate new samples are available for display (set by extract thread, cleared by render thread)
-static atomic_bool s_display_samples_ready = false;
-
 // Periodic buffer stats logging interval (in frames, ~1 frame = 65536 samples at 40MHz = 1.64ms)
 // Log every ~2 seconds = 1220 frames
 #define BUFMGR_LOG_INTERVAL 1220
@@ -126,10 +123,6 @@ static int extraction_thread(void *ctx) {
             }
             // If display buffer full, frame is silently dropped (lossy buffer policy)
         }
-
-        // Mark that new samples are available for legacy display path
-        // (will be removed once display thread is fully integrated)
-        atomic_store(&s_display_samples_ready, true);
 
         // Stats are cheap - always update them
         gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
@@ -529,22 +522,3 @@ rb_event_t *gui_extract_get_space_event(void) {
     return &s_space_event;
 }
 
-// Note: Record space events now managed by buffer manager - use bufmgr_get_space_event()
-
-// Called by the render thread to update oscilloscope display when ready to draw a frame
-// Returns true if new samples were processed, false if no new samples available
-bool gui_extract_update_display(void) {
-    // Check if new samples are available
-    if (!atomic_exchange(&s_display_samples_ready, false)) {
-        return false;  // No new samples
-    }
-
-    // Make sure we have valid context
-    if (!s_extract_app || !s_initialized) {
-        return false;
-    }
-
-    // Update the oscilloscope display from the latest extracted samples
-    gui_oscilloscope_update_display(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
-    return true;
-}

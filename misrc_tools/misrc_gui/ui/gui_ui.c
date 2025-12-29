@@ -506,19 +506,12 @@ static void render_toolbar(gui_app_t *app) {
 // Fixed width for labels to ensure alignment
 #define LABEL_WIDTH 50
 
-// Trigger level buffers
-static char trig_level_a_buf[16];
-static char trig_level_b_buf[16];
-
-// Render per-channel stats panel with trigger controls
+// Render per-channel stats panel (trigger controls moved to waveform panel overlay)
 static void render_channel_stats(gui_app_t *app, int channel) {
-    // Get per-channel stats and trigger
+    // Get per-channel stats
     uint32_t clip_pos, clip_neg, errors;
     float peak_pos, peak_neg;
-    Color channel_color;
     char *buf_peak_pos, *buf_peak_neg, *buf_clip_pos, *buf_clip_neg, *buf_errors;
-    channel_trigger_t *trig;
-    char *trig_level_buf;
 
     if (channel == 0) {
         clip_pos = atomic_load(&app->clip_count_a_pos);
@@ -526,41 +519,30 @@ static void render_channel_stats(gui_app_t *app, int channel) {
         errors = atomic_load(&app->error_count_a);
         peak_pos = app->vu_a.peak_pos;
         peak_neg = app->vu_a.peak_neg;
-        channel_color = COLOR_CHANNEL_A;
         buf_peak_pos = stat_a_peak_pos;
         buf_peak_neg = stat_a_peak_neg;
         buf_clip_pos = stat_a_clip_pos;
         buf_clip_neg = stat_a_clip_neg;
         buf_errors = stat_a_errors;
-        trig = &app->trigger_a;
-        trig_level_buf = trig_level_a_buf;
     } else {
         clip_pos = atomic_load(&app->clip_count_b_pos);
         clip_neg = atomic_load(&app->clip_count_b_neg);
         errors = atomic_load(&app->error_count_b);
         peak_pos = app->vu_b.peak_pos;
         peak_neg = app->vu_b.peak_neg;
-        channel_color = COLOR_CHANNEL_B;
         buf_peak_pos = stat_b_peak_pos;
         buf_peak_neg = stat_b_peak_neg;
         buf_clip_pos = stat_b_clip_pos;
         buf_clip_neg = stat_b_clip_neg;
         buf_errors = stat_b_errors;
-        trig = &app->trigger_b;
-        trig_level_buf = trig_level_b_buf;
     }
 
     // Format stats (peak/clip/errors)
-
     snprintf(buf_peak_pos, 16, "+%.0f%%", peak_pos * 100.0f);
     snprintf(buf_peak_neg, 16, "-%.0f%%", peak_neg * 100.0f);
     snprintf(buf_clip_pos, 16, "+%u", clip_pos);
     snprintf(buf_clip_neg, 16, "-%u", clip_neg);
     snprintf(buf_errors, 16, "%u", errors);
-
-    // Format trigger level
-    int level_percent = (int)(trig->level * 100 / 2048);
-    snprintf(trig_level_buf, 16, "%+d%%", level_percent);
 
     CLAY(CLAY_IDI("StatsPanel", channel), {
         .layout = {
@@ -611,126 +593,9 @@ static void render_channel_stats(gui_app_t *app, int channel) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
         }
 
-        // Separator line
-        CLAY(CLAY_IDI("StatSep", channel), {
-            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } },
-            .backgroundColor = to_clay_color(COLOR_TEXT_DIM)
-        }) {}
-
-        // Trigger row with combined mode/off dropdown
-        CLAY(CLAY_IDI("TrigRow", channel), { .layout = STAT_ROW_LAYOUT }) {
-            CLAY(CLAY_IDI("LblTrig", channel), { .layout = { .sizing = { CLAY_SIZING_FIXED(LABEL_WIDTH), CLAY_SIZING_FIT(0) } } }) {
-                CLAY_TEXT(CLAY_STRING("Trigger:"),
-                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-            }
-
-            // Trigger mode dropdown button (includes Off option)
-            const char *trig_mode_name;
-            if (!trig->enabled) {
-                trig_mode_name = "Off";
-            } else {
-                switch (trig->trigger_mode) {
-                    case TRIGGER_MODE_RISING:     trig_mode_name = "Rising"; break;
-                    case TRIGGER_MODE_FALLING:    trig_mode_name = "Falling"; break;
-                    case TRIGGER_MODE_CVBS_HSYNC: trig_mode_name = "CVBS"; break;
-                    default:                      trig_mode_name = "Rising"; break;
-                }
-            }
-            bool trig_dropdown_open = gui_dropdown_is_open(DROPDOWN_TRIGGER_MODE, channel);
-            Color btn_color = trig->enabled ? channel_color : COLOR_BUTTON;
-            Color btn_text_color = trig->enabled ? (Color){0, 0, 0, 255} : COLOR_TEXT;
-            if (trig_dropdown_open) btn_color = COLOR_BUTTON_HOVER;
-            CLAY(CLAY_IDI("TrigModeBtn", channel), {
-                .layout = {
-                    .sizing = { CLAY_SIZING_FIXED(65), CLAY_SIZING_FIXED(18) },
-                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                },
-                .backgroundColor = to_clay_color(btn_color),
-                .cornerRadius = CLAY_CORNER_RADIUS(3)
-            }) {
-                CLAY_TEXT(make_string(trig_mode_name),
-                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(btn_text_color) }));
-            }
-        }
-
-        // Trigger mode dropdown options (floating, visible when open)
-        if (gui_dropdown_is_open(DROPDOWN_TRIGGER_MODE, channel)) {
-            CLAY(CLAY_IDI("TrigModeOpts", channel), {
-                .layout = {
-                    .sizing = { CLAY_SIZING_FIXED(65), CLAY_SIZING_FIT(0) },
-                    .layoutDirection = CLAY_TOP_TO_BOTTOM
-                },
-                .floating = {
-                    .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
-                    .parentId = CLAY_IDI("TrigModeBtn", channel).id,
-                    .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM }
-                },
-                .backgroundColor = to_clay_color(COLOR_PANEL_BG),
-                .cornerRadius = CLAY_CORNER_RADIUS(3)
-            }) {
-                // Off option
-                bool off_hover = Clay_PointerOver(CLAY_IDI("TrigModeOptOff", channel));
-                Color off_color = gui_dropdown_option_color(!trig->enabled, off_hover);
-                CLAY(CLAY_IDI("TrigModeOptOff", channel), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(20) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(off_color)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Off"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-
-                // Rising edge option
-                bool rising_hover = Clay_PointerOver(CLAY_IDI("TrigModeOptRising", channel));
-                Color rising_color = gui_dropdown_option_color(trig->enabled && trig->trigger_mode == TRIGGER_MODE_RISING, rising_hover);
-                CLAY(CLAY_IDI("TrigModeOptRising", channel), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(20) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(rising_color)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Rising"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-
-                // Falling edge option
-                bool falling_hover = Clay_PointerOver(CLAY_IDI("TrigModeOptFalling", channel));
-                Color falling_color = gui_dropdown_option_color(trig->enabled && trig->trigger_mode == TRIGGER_MODE_FALLING, falling_hover);
-                CLAY(CLAY_IDI("TrigModeOptFalling", channel), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(20) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(falling_color)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Falling"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-
-                // CVBS H-Sync option
-                bool cvbs_hover = Clay_PointerOver(CLAY_IDI("TrigModeOptCVBS", channel));
-                Color cvbs_color = gui_dropdown_option_color(trig->enabled && trig->trigger_mode == TRIGGER_MODE_CVBS_HSYNC, cvbs_hover);
-                CLAY(CLAY_IDI("TrigModeOptCVBS", channel), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(20) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(cvbs_color)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("CVBS"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-            }
-        }
-
-        // Note: CVBS controls (enable/system selector) have moved to the CVBS panel overlay
-        // See render_cvbs_system_overlay() in gui_panel.c
-
         // Separator line before panel configuration
-        CLAY(CLAY_IDI("ModeSep", channel), {
+        // Note: Trigger controls have moved to the waveform panel overlay (per-panel)
+        CLAY(CLAY_IDI("StatSep", channel), {
             .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } },
             .backgroundColor = to_clay_color(COLOR_TEXT_DIM)
         }) {}
@@ -932,9 +797,9 @@ static void render_channels_panel(gui_app_t *app) {
     s_vu_a_element.customData.vu_meter.is_clipping_neg = atomic_load(&app->clip_count_a_neg) > 0;
     s_vu_a_element.customData.vu_meter.channel_color = COLOR_CHANNEL_A;
 
-    s_osc_a_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_OSCILLOSCOPE;
-    s_osc_a_element.customData.oscilloscope.app = app;
-    s_osc_a_element.customData.oscilloscope.channel = 0;
+    s_osc_a_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL;
+    s_osc_a_element.customData.channel_panel.app = app;
+    s_osc_a_element.customData.channel_panel.channel = 0;
 
     s_vu_b_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_VU_METER;
     s_vu_b_element.customData.vu_meter.meter = &app->vu_b;
@@ -943,9 +808,9 @@ static void render_channels_panel(gui_app_t *app) {
     s_vu_b_element.customData.vu_meter.is_clipping_neg = atomic_load(&app->clip_count_b_neg) > 0;
     s_vu_b_element.customData.vu_meter.channel_color = COLOR_CHANNEL_B;
 
-    s_osc_b_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_OSCILLOSCOPE;
-    s_osc_b_element.customData.oscilloscope.app = app;
-    s_osc_b_element.customData.oscilloscope.channel = 1;
+    s_osc_b_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL;
+    s_osc_b_element.customData.channel_panel.app = app;
+    s_osc_b_element.customData.channel_panel.channel = 1;
 
     CLAY(CLAY_ID("ChannelsPanel"), {
         .layout = {

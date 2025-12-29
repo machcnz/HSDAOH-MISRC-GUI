@@ -1,7 +1,8 @@
 /*
- * MISRC GUI - Oscilloscope and Trigger Implementation
+ * MISRC GUI - Waveform Panel Implementation
  *
- * Oscilloscope rendering, trigger detection, and mouse interaction
+ * Waveform panel vtable (line and phosphor modes), trigger detection,
+ * per-panel resampling, and grid rendering.
  */
 
 #include "gui_oscilloscope.h"
@@ -12,6 +13,7 @@
 #include "gui_text.h"
 #include "../ui/gui_ui.h"
 #include "gui_panel.h"
+#include "../ui/gui_dropdown.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +21,66 @@
 
 #if LIBSOXR_ENABLED
 #include <soxr.h>
-// Forward declaration for cleanup function
-static void gui_oscilloscope_cleanup_resampler(channel_trigger_t *trig);
 #endif
+
+//-----------------------------------------------------------------------------
+// Trigger Mode Labels (for dropdown UI)
+//-----------------------------------------------------------------------------
+
+static const char *s_trigger_mode_labels[] = {
+    [TRIGGER_MODE_RISING] = "Rising",
+    [TRIGGER_MODE_FALLING] = "Falling",
+    [TRIGGER_MODE_CVBS_HSYNC] = "CVBS",
+};
+
+//-----------------------------------------------------------------------------
+// Waveform Panel State (per-panel trigger, resampling, and display)
+//-----------------------------------------------------------------------------
+
+typedef struct {
+    // Trigger settings (per-panel, independent)
+    bool trigger_enabled;
+    int16_t trigger_level;
+    trigger_mode_t trigger_mode;
+    float zoom_scale;
+    int trigger_display_pos;
+
+    // Resampler state (per-panel)
+    void *resampler;           // soxr_t handle
+    float resampler_ratio;     // Current decimation ratio
+
+    // Display buffer (per-panel)
+    waveform_sample_t display_samples[DISPLAY_BUFFER_SIZE];
+    size_t display_samples_available;
+    atomic_int display_width;
+
+    // Phosphor state (for phosphor mode only)
+    phosphor_rt_t *phosphor;
+
+    // Phosphor color mode
+    phosphor_color_mode_t phosphor_color;
+
+    // UI overlay state (trigger mode dropdown)
+    Rectangle button_rect;
+    Rectangle options_rect[TRIGGER_MODE_COUNT];
+    bool dropdown_open;
+    panel_menu_item_t menu_items[TRIGGER_MODE_COUNT];
+
+    // Drag state for trigger level
+    bool dragging;
+
+    // Initialization flag
+    bool initialized;
+} waveform_panel_state_t;
+
+// Forward declarations for static helper functions
+static void waveform_cleanup_resampler(waveform_panel_state_t *state);
+static size_t waveform_resample_to_buffer(waveform_panel_state_t *state,
+                                           const int16_t *buf, size_t num_samples,
+                                           size_t start_idx, float decimation,
+                                           size_t target_width);
+static bool waveform_process_display(waveform_panel_state_t *state,
+                                      const int16_t *buf, size_t num_samples);
 
 //-----------------------------------------------------------------------------
 // Grid Settings
@@ -32,29 +91,11 @@ static void gui_oscilloscope_cleanup_resampler(channel_trigger_t *trig);
 #define GRID_MAX_DIVISIONS 20   // Maximum number of time divisions
 
 //-----------------------------------------------------------------------------
-// Static State
+// Cleanup
 //-----------------------------------------------------------------------------
 
-// Note: Waveform panel bounds are now tracked via panel_config_t.left_bounds/right_bounds
-// in gui_panel.c. The old s_waveform_bounds system has been removed.
-// Forward declaration for cursor management
-static bool waveform_is_dragging(void);
-
-// Cleanup oscilloscope resources (static state)
 void gui_oscilloscope_cleanup(void) {
-    // No static resources to clean up - phosphor cleanup is in gui_phosphor module
-}
-
-// Cleanup per-channel resampler resources
-void gui_oscilloscope_cleanup_resamplers(gui_app_t *app) {
-#if LIBSOXR_ENABLED
-    if (app) {
-        gui_oscilloscope_cleanup_resampler(&app->trigger_a);
-        gui_oscilloscope_cleanup_resampler(&app->trigger_b);
-    }
-#else
-    (void)app;
-#endif
+    // No static resources - per-panel cleanup handled by vtable destroy()
 }
 
 //-----------------------------------------------------------------------------
@@ -124,9 +165,6 @@ void draw_channel_grid(float x, float y, float width, float height,
 
             // Snap to 1-2-5 sequence
             double time_division = snap_to_125(rough_division);
-
-            // Calculate pixels per division
-            double pixels_per_div = time_division / time_per_pixel;
 
             // Determine the reference point (t=0) in pixels from left edge
             // If trigger is enabled and we have a valid position, use that as t=0
@@ -224,21 +262,22 @@ void draw_channel_grid(float x, float y, float width, float height,
 }
 
 //-----------------------------------------------------------------------------
-// Trigger Marker Drawing (shared by waveform panels)
+// Trigger Marker Drawing (for panel state)
 //-----------------------------------------------------------------------------
 
-static void draw_trigger_markers(float x, float y, float w, float h,
-                                  channel_trigger_t *trig, float amplitude_scale, Color color) {
-    if (!trig->enabled) return;
+static void draw_panel_trigger_markers(float x, float y, float w, float h,
+                                        const waveform_panel_state_t *state,
+                                        float amplitude_scale, Color color) {
+    if (!state->trigger_enabled) return;
 
     // Skip drawing trigger markers in CVBS mode (level is auto-detected)
-    if (trig->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) return;
+    if (state->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) return;
 
     float center_y = y + h / 2.0f;
     float scale = (h / 2.0f) * amplitude_scale;
 
     // Convert trigger level (-2048 to +2047) to normalized (-1 to +1)
-    float level_norm = trig->level / 2048.0f;
+    float level_norm = state->trigger_level / 2048.0f;
     float level_y = center_y - level_norm * scale;
 
     // Clamp to panel bounds
@@ -263,8 +302,8 @@ static void draw_trigger_markers(float x, float y, float w, float h,
     DrawTriangle(arrow_tip, arrow_bot, arrow_top, trig_color);
 
     // Draw vertical trigger position marker at actual trigger position (if triggered)
-    if (trig->trigger_display_pos >= 0 && trig->trigger_display_pos < (int)w) {
-        float trigger_x = x + (float)trig->trigger_display_pos;
+    if (state->trigger_display_pos >= 0 && state->trigger_display_pos < (int)w) {
+        float trigger_x = x + (float)state->trigger_display_pos;
 
         Color marker_color = { color.r, color.g, color.b, 80 };
         DrawLineEx((Vector2){trigger_x, y}, (Vector2){trigger_x, y + h}, 1.0f, marker_color);
@@ -276,34 +315,36 @@ static void draw_trigger_markers(float x, float y, float w, float h,
     }
 }
 
+
 //-----------------------------------------------------------------------------
-// Waveform Panel Rendering (Line Mode)
+// Waveform Panel Rendering (using panel state)
 //-----------------------------------------------------------------------------
 
-void render_waveform_line(gui_app_t *app, int channel,
-                          float x, float y, float w, float h, Color color) {
-    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+// Internal render for line mode using panel state
+static void render_waveform_line_internal(waveform_panel_state_t *state,
+                                           gui_app_t *app, int channel,
+                                           Rectangle bounds, Color color) {
+    float x = bounds.x, y = bounds.y, w = bounds.width, h = bounds.height;
     const char *label = (channel == 0) ? "CH A" : "CH B";
+
+    // Update display width for processing thread
+    int new_display_width = (int)w;
+    if (new_display_width < 100) new_display_width = 100;
+    if (new_display_width > DISPLAY_BUFFER_SIZE) new_display_width = DISPLAY_BUFFER_SIZE;
+    atomic_store(&state->display_width, new_display_width);
 
     // Draw grid with labels first
     uint32_t sample_rate = atomic_load(&app->sample_rate);
     draw_channel_grid(x, y, w, h, label, color, app->settings.show_grid,
-                      trig->zoom_scale, sample_rate,
-                      trig->enabled, trig->trigger_display_pos);
+                      state->zoom_scale, sample_rate,
+                      state->trigger_enabled, state->trigger_display_pos);
 
     // Draw trigger level and position markers
-    draw_trigger_markers(x, y, w, h, trig, app->settings.amplitude_scale, color);
+    draw_panel_trigger_markers(x, y, w, h, state, app->settings.amplitude_scale, color);
 
-    // Get display samples
-    waveform_sample_t *samples;
-    size_t samples_available;
-    if (channel == 0) {
-        samples = app->display_samples_a;
-        samples_available = app->display_samples_available_a;
-    } else {
-        samples = app->display_samples_b;
-        samples_available = app->display_samples_available_b;
-    }
+    // Get display samples from panel state
+    waveform_sample_t *samples = state->display_samples;
+    size_t samples_available = state->display_samples_available;
 
     if (samples_available == 0) return;
 
@@ -332,34 +373,31 @@ void render_waveform_line(gui_app_t *app, int channel,
     }
 }
 
-//-----------------------------------------------------------------------------
-// Waveform Panel Rendering (Phosphor Mode)
-//-----------------------------------------------------------------------------
-
-void render_waveform_phosphor(gui_app_t *app, int channel,
-                              float x, float y, float w, float h, Color color) {
-    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+// Internal render for phosphor mode using panel state
+static void render_waveform_phosphor_internal(waveform_panel_state_t *state,
+                                               gui_app_t *app, int channel,
+                                               Rectangle bounds, Color color) {
+    float x = bounds.x, y = bounds.y, w = bounds.width, h = bounds.height;
     const char *label = (channel == 0) ? "CH A" : "CH B";
+
+    // Update display width for processing thread
+    int new_display_width = (int)w;
+    if (new_display_width < 100) new_display_width = 100;
+    if (new_display_width > DISPLAY_BUFFER_SIZE) new_display_width = DISPLAY_BUFFER_SIZE;
+    atomic_store(&state->display_width, new_display_width);
 
     // Draw grid with labels first
     uint32_t sample_rate = atomic_load(&app->sample_rate);
     draw_channel_grid(x, y, w, h, label, color, app->settings.show_grid,
-                      trig->zoom_scale, sample_rate,
-                      trig->enabled, trig->trigger_display_pos);
+                      state->zoom_scale, sample_rate,
+                      state->trigger_enabled, state->trigger_display_pos);
 
     // Draw trigger level and position markers
-    draw_trigger_markers(x, y, w, h, trig, app->settings.amplitude_scale, color);
+    draw_panel_trigger_markers(x, y, w, h, state, app->settings.amplitude_scale, color);
 
-    // Get display samples
-    waveform_sample_t *samples;
-    size_t samples_available;
-    if (channel == 0) {
-        samples = app->display_samples_a;
-        samples_available = app->display_samples_available_a;
-    } else {
-        samples = app->display_samples_b;
-        samples_available = app->display_samples_available_b;
-    }
+    // Get display samples from panel state
+    waveform_sample_t *samples = state->display_samples;
+    size_t samples_available = state->display_samples_available;
 
     if (samples_available == 0) return;
 
@@ -370,8 +408,8 @@ void render_waveform_phosphor(gui_app_t *app, int channel,
     int samples_to_draw = (samples_available < (size_t)buf_width) ?
                           (int)samples_available : buf_width;
 
-    // Get phosphor state for this channel
-    phosphor_rt_t *prt = (channel == 0) ? app->phosphor_a : app->phosphor_b;
+    // Get phosphor state from panel
+    phosphor_rt_t *prt = state->phosphor;
     if (prt) {
         // Initialize/resize phosphor if needed
         phosphor_rt_init(prt, buf_width, buf_height);
@@ -382,7 +420,7 @@ void render_waveform_phosphor(gui_app_t *app, int channel,
         phosphor_rt_end_frame(prt);
 
         // Render phosphor to screen
-        if (trig->phosphor_color == PHOSPHOR_COLOR_OPACITY) {
+        if (state->phosphor_color == PHOSPHOR_COLOR_OPACITY) {
             phosphor_rt_render_opacity(prt, x, y);
         } else {
             phosphor_rt_render(prt, x, y, false);
@@ -410,39 +448,7 @@ void render_waveform_phosphor(gui_app_t *app, int channel,
 }
 
 //-----------------------------------------------------------------------------
-// Oscilloscope Rendering
-//-----------------------------------------------------------------------------
-
-void render_oscilloscope_channel(gui_app_t *app, float x, float y, float width, float height,
-                                  int channel, const char *label, Color channel_color) {
-    (void)label;  // Label is now drawn by individual panel renderers
-
-    // Initialize text helpers with app (for font access)
-    gui_text_set_app(app);
-
-    // Get trigger state for this channel
-    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
-
-    // Store actual display width for the processing thread (atomic for thread safety)
-    if (channel >= 0 && channel < 2) {
-        int new_display_width = (int)width;
-        if (new_display_width < 100) new_display_width = 100;  // Minimum reasonable width
-        if (new_display_width > DISPLAY_BUFFER_SIZE) new_display_width = DISPLAY_BUFFER_SIZE;
-        atomic_store(&trig->display_width, new_display_width);
-    }
-
-    // Render panels using the panel abstraction system
-    // Each panel draws its own grid, waveform, and labels
-    // Waveform panels will register their bounds for mouse interaction
-    render_channel_panels(app, channel, x, y, width, height, channel_color);
-}
-
-// Note: Mouse interaction (click/drag, scroll) is now handled via vtable
-// (waveform_handle_click, waveform_handle_scroll) and dispatched through
-// the unified panel handling system (panel_handle_all_clicks, panel_handle_all_scrolls)
-
-//-----------------------------------------------------------------------------
-// Trigger Detection (wrappers to gui_trigger module)
+// Trigger Detection
 //-----------------------------------------------------------------------------
 
 ssize_t find_trigger_point_from(const int16_t *buf, size_t count,
@@ -455,40 +461,38 @@ ssize_t find_trigger_point(const int16_t *buf, size_t count,
     return trigger_find_from_config(buf, count, trig, 1);
 }
 
+//=============================================================================
+// Panel Interface (vtable) Implementation
+//=============================================================================
+
 //-----------------------------------------------------------------------------
-// Decimation and Display Buffer Processing (with libsoxr resampling)
+// Waveform Panel Resampler (per-panel libsoxr)
 //-----------------------------------------------------------------------------
 
 #if LIBSOXR_ENABLED
 // Ensure resampler is initialized with correct decimation ratio
-// Returns the resampler handle, creating/recreating if needed
-// decimation: the zoom_scale value (samples per pixel, continuous)
-static soxr_t ensure_resampler(channel_trigger_t *trig, float decimation) {
+static soxr_t waveform_ensure_resampler(waveform_panel_state_t *state, float decimation) {
     // Check if we need to create or recreate the resampler
-    // Recreate if ratio changed by more than 0.1% (to avoid floating point noise)
-    float ratio_diff = fabsf(trig->resampler_ratio - decimation);
-    bool need_recreate = (trig->resampler == NULL) ||
+    float ratio_diff = fabsf(state->resampler_ratio - decimation);
+    bool need_recreate = (state->resampler == NULL) ||
                          (ratio_diff > decimation * 0.001f);
 
     if (!need_recreate) {
-        return (soxr_t)trig->resampler;
+        return (soxr_t)state->resampler;
     }
 
     // Destroy old resampler if exists
-    if (trig->resampler) {
-        soxr_delete((soxr_t)trig->resampler);
-        trig->resampler = NULL;
+    if (state->resampler) {
+        soxr_delete((soxr_t)state->resampler);
+        state->resampler = NULL;
     }
 
     // Create new resampler for this decimation ratio
-    // in_rate:out_rate = decimation:1
-    // printf("Creating soxr resampler for decimation %.3f\n", decimation);
     const double in_rate = (double)decimation;
     const double out_rate = 1.0;
 
     soxr_error_t soxr_err = NULL;
     soxr_io_spec_t io_spec = soxr_io_spec(SOXR_FLOAT32_I, SOXR_FLOAT32_I);
-    // Use SOXR_LQ - low latency works better for non-streaming frame-by-frame processing
     soxr_quality_spec_t qual_spec = soxr_quality_spec(SOXR_QQ, 0);
 
     soxr_t resampler = soxr_create(in_rate, out_rate, 1, &soxr_err, &io_spec, &qual_spec, NULL);
@@ -496,28 +500,33 @@ static soxr_t ensure_resampler(channel_trigger_t *trig, float decimation) {
         return NULL;
     }
 
-    trig->resampler = resampler;
-    trig->resampler_ratio = decimation;
+    state->resampler = resampler;
+    state->resampler_ratio = decimation;
 
     return resampler;
 }
-
-// Cleanup resampler for a channel (call on shutdown)
-static void gui_oscilloscope_cleanup_resampler(channel_trigger_t *trig) {
-    if (trig && trig->resampler) {
-        soxr_delete((soxr_t)trig->resampler);
-        trig->resampler = NULL;
-        trig->resampler_ratio = 0.0f;
-    }
-}
 #endif
 
-// Resample a single channel from source buffer to display buffer using libsoxr
-// Proper anti-alias filtering is applied during resampling
-static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample_t *dest,
-                                         const int16_t *buf, size_t num_samples,
-                                         size_t start_idx, float decimation,
-                                         size_t target_width) {
+static void waveform_cleanup_resampler(waveform_panel_state_t *state) {
+#if LIBSOXR_ENABLED
+    if (state && state->resampler) {
+        soxr_delete((soxr_t)state->resampler);
+        state->resampler = NULL;
+        state->resampler_ratio = 0.0f;
+    }
+#else
+    (void)state;
+#endif
+}
+
+//-----------------------------------------------------------------------------
+// Waveform Panel Resampling (per-panel display buffer)
+//-----------------------------------------------------------------------------
+
+static size_t waveform_resample_to_buffer(waveform_panel_state_t *state,
+                                           const int16_t *buf, size_t num_samples,
+                                           size_t start_idx, float decimation,
+                                           size_t target_width) {
     const float scale = 1.0f / 2048.0f;
 
     // Clamp target width to buffer size
@@ -533,13 +542,14 @@ static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample
     if (display_count > target_width) display_count = target_width;
     if (display_count == 0) return 0;
 
-    // Calculate how many source samples we actually need for this display width
+    // Calculate how many source samples we actually need
     size_t source_samples_needed = (size_t)ceilf((float)display_count * decimation);
     if (source_samples_needed > available) source_samples_needed = available;
 
+    waveform_sample_t *dest = state->display_samples;
+
 #if LIBSOXR_ENABLED
-    // Bypass soxr for 1:1 ratio (no resampling needed)
-    // Use small epsilon to handle floating point imprecision
+    // Bypass soxr for 1:1 ratio
     if (decimation >= 0.999f && decimation <= 1.001f) {
         size_t count = (display_count < source_samples_needed) ? display_count : source_samples_needed;
         for (size_t i = 0; i < count; i++) {
@@ -549,10 +559,9 @@ static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample
     }
 
     // Temporary buffers for float conversion
-    static float temp_input[DISPLAY_BUFFER_SIZE * 256];  // Max ~256x decimation
+    static float temp_input[DISPLAY_BUFFER_SIZE * 256];
     static float temp_output[DISPLAY_BUFFER_SIZE];
 
-    // Limit input size to our temp buffer
     size_t max_input = sizeof(temp_input) / sizeof(temp_input[0]);
     if (source_samples_needed > max_input) {
         source_samples_needed = max_input;
@@ -566,13 +575,12 @@ static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample
     }
 
     // Get or create resampler for this decimation ratio
-    soxr_t resampler = ensure_resampler(trig, decimation);
+    soxr_t resampler = waveform_ensure_resampler(state, decimation);
     if (!resampler) {
         return 0;
     }
 
     // Clear resampler state for fresh data each frame
-    // (we're not doing continuous streaming, each frame is independent)
     soxr_clear(resampler);
 
     // Process through resampler
@@ -592,7 +600,7 @@ static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample
 
     return out_done;
 #else
-    // No libsoxr: simple point sampling (no anti-aliasing)
+    // No libsoxr: simple point sampling
     for (size_t i = 0; i < display_count; i++) {
         size_t src_idx = start_idx + (size_t)((float)i * decimation);
         if (src_idx >= num_samples) src_idx = num_samples - 1;
@@ -602,22 +610,41 @@ static size_t resample_to_buffer_smooth(channel_trigger_t *trig, waveform_sample
 #endif
 }
 
-bool process_channel_display(gui_app_t *app, const int16_t *buf, size_t num_samples,
-                             waveform_sample_t *display_buf, size_t *display_count,
-                             channel_trigger_t *trig, int channel) {
-    (void)app;      // Unused parameter
-    (void)channel;  // Unused parameter (kept for API compatibility)
+//-----------------------------------------------------------------------------
+// Waveform Panel Processing (per-panel trigger detection and resampling)
+//-----------------------------------------------------------------------------
+
+// Find trigger point using panel's trigger configuration
+static ssize_t waveform_find_trigger_from(const int16_t *buf, size_t count,
+                                           const waveform_panel_state_t *state,
+                                           size_t min_index) {
+    if (!state->trigger_enabled) return -1;
+    if (count < 2 || min_index >= count) return -1;
+
+    // Use the gui_trigger module for actual trigger detection
+    // Create a temporary channel_trigger_t to use with existing trigger code
+    channel_trigger_t temp_trig = {
+        .enabled = state->trigger_enabled,
+        .level = state->trigger_level,
+        .trigger_mode = state->trigger_mode,
+    };
+
+    return trigger_find_from_config(buf, count, &temp_trig, min_index);
+}
+
+// Process raw samples and update panel's display buffer
+static bool waveform_process_display(waveform_panel_state_t *state,
+                                      const int16_t *buf, size_t num_samples) {
+    if (!state || !buf || num_samples == 0) return false;
 
     // Get display width (set by renderer, defaults to DISPLAY_BUFFER_SIZE)
-    // Use atomic_load for thread safety since renderer runs on main thread
-    size_t display_width = (size_t)atomic_load(&trig->display_width);
+    size_t display_width = (size_t)atomic_load(&state->display_width);
     if (display_width == 0 || display_width > DISPLAY_BUFFER_SIZE) {
         display_width = DISPLAY_BUFFER_SIZE;
     }
 
-    // Get decimation factor from zoom_scale (samples per pixel)
-    // Clamp to valid range
-    float decimation = trig->zoom_scale;
+    // Get decimation factor from zoom_scale
+    float decimation = state->zoom_scale;
     if (decimation < ZOOM_SCALE_MIN) decimation = ZOOM_SCALE_MIN;
     if (decimation > ZOOM_SCALE_MAX) decimation = ZOOM_SCALE_MAX;
 
@@ -625,17 +652,19 @@ bool process_channel_display(gui_app_t *app, const int16_t *buf, size_t num_samp
     float display_window = (float)display_width * decimation;
 
     // If trigger is disabled, just show the start of the buffer
-    if (!trig->enabled) {
-        trig->trigger_display_pos = -1;
-        *display_count = resample_to_buffer_smooth(trig, display_buf, buf, num_samples, 0, decimation, display_width);
+    if (!state->trigger_enabled) {
+        state->trigger_display_pos = -1;
+        state->display_samples_available = waveform_resample_to_buffer(
+            state, buf, num_samples, 0, decimation, display_width);
         return true;
     }
 
     // When zoomed out so far that display_window >= 90% of buffer,
     // there's no room for trigger positioning - just show from start
     if (display_window >= (float)num_samples * 0.9f) {
-        trig->trigger_display_pos = -1;
-        *display_count = resample_to_buffer_smooth(trig, display_buf, buf, num_samples, 0, decimation, display_width);
+        state->trigger_display_pos = -1;
+        state->display_samples_available = waveform_resample_to_buffer(
+            state, buf, num_samples, 0, decimation, display_width);
         return true;
     }
 
@@ -645,195 +674,41 @@ bool process_channel_display(gui_app_t *app, const int16_t *buf, size_t num_samp
     float post_trigger_raw_samples = display_window - pre_trigger_raw_samples;
 
     // Calculate the valid search range for triggers
-    // Trigger must be at least pre_trigger_raw_samples into the buffer
-    // and have enough room for post_trigger_raw_samples after it
     size_t min_trig_pos = (size_t)pre_trigger_raw_samples;
     size_t max_trig_pos = num_samples - (size_t)post_trigger_raw_samples;
 
     // Check if there's a valid search range
     if (min_trig_pos >= max_trig_pos) {
-        // No valid range - display window too large for this buffer
-        trig->trigger_display_pos = -1;
-        *display_count = resample_to_buffer_smooth(trig, display_buf, buf, num_samples, 0, decimation, display_width);
+        state->trigger_display_pos = -1;
+        state->display_samples_available = waveform_resample_to_buffer(
+            state, buf, num_samples, 0, decimation, display_width);
         return true;
     }
 
     // Find trigger point starting from minimum valid position
-    ssize_t trig_pos = find_trigger_point_from(buf, max_trig_pos, trig, min_trig_pos);
+    ssize_t trig_pos = waveform_find_trigger_from(buf, max_trig_pos, state, min_trig_pos);
 
     if (trig_pos < 0) {
-        // No trigger found in valid range - hold previous display
+        // No trigger found - hold previous display
         return false;
     }
 
-    // Trigger found in valid range - place it at desired position
+    // Trigger found - place it at desired position
     size_t start_pos = (size_t)((float)trig_pos - pre_trigger_raw_samples);
-    trig->trigger_display_pos = (int)trigger_display_pos;
-    *display_count = resample_to_buffer_smooth(trig, display_buf, buf, num_samples, start_pos, decimation, display_width);
+    state->trigger_display_pos = (int)trigger_display_pos;
+    state->display_samples_available = waveform_resample_to_buffer(
+        state, buf, num_samples, start_pos, decimation, display_width);
     return true;
 }
 
-void gui_oscilloscope_update_display(gui_app_t *app, const int16_t *buf_a,
-                                      const int16_t *buf_b, size_t num_samples) {
-    // Process channel A
-    size_t count_a = app->display_samples_available_a;
-    if (process_channel_display(app, buf_a, num_samples,
-                                app->display_samples_a, &count_a, &app->trigger_a, 0)) {
-        app->display_samples_available_a = count_a;
-    }
+// Vtable process function (called from display thread via panel_process_all)
+static void waveform_vtable_process(void *state_ptr, const int16_t *samples,
+                                     size_t count, uint32_t sample_rate) {
+    (void)sample_rate;  // Currently unused but available for future use
+    if (!state_ptr || !samples || count == 0) return;
 
-    // Process channel B
-    size_t count_b = app->display_samples_available_b;
-    if (process_channel_display(app, buf_b, num_samples,
-                                app->display_samples_b, &count_b, &app->trigger_b, 1)) {
-        app->display_samples_available_b = count_b;
-    }
-}
-
-//=============================================================================
-// Panel Interface (vtable) Implementation
-//=============================================================================
-
-// Note: Waveform panels use shared state from gui_app_t (phosphor, trigger,
-// display samples). The vtable lifecycle functions are no-ops because the
-// actual state is managed at the app level, not per-panel.
-//
-// The render function receives display_samples from the caller, but also
-// needs access to app state for grids, triggers, phosphor, etc.
-// This is a limitation of the current vtable interface.
-
-//-----------------------------------------------------------------------------
-// Waveform Panel Scroll Handler (shared by line and phosphor)
-//-----------------------------------------------------------------------------
-
-static bool waveform_handle_scroll(void *state, float delta, Rectangle bounds) {
-    (void)state;  // Waveform uses app->trigger state, not per-panel state
-
-    if (delta == 0.0f) return false;
-
-    Vector2 mouse = GetMousePosition();
-    if (!CheckCollisionPointRec(mouse, bounds)) return false;
-
-    // Determine which channel this panel belongs to by checking bounds
-    // This is a workaround since we don't have channel info in scroll handler
-    // The panel system stores bounds per-channel, so we check both
-    extern gui_app_t *g_app_ptr;  // Set during render
-    if (!g_app_ptr) return false;
-
-    // Check which channel's bounds this matches
-    int channel = -1;
-    if (CheckCollisionPointRec(mouse, g_app_ptr->panel_config_a.left_bounds) ||
-        CheckCollisionPointRec(mouse, g_app_ptr->panel_config_a.right_bounds)) {
-        channel = 0;
-    } else if (CheckCollisionPointRec(mouse, g_app_ptr->panel_config_b.left_bounds) ||
-               CheckCollisionPointRec(mouse, g_app_ptr->panel_config_b.right_bounds)) {
-        channel = 1;
-    }
-
-    if (channel < 0) return false;
-
-    channel_trigger_t *trig = (channel == 0) ? &g_app_ptr->trigger_a : &g_app_ptr->trigger_b;
-
-    // Smooth zoom: multiply/divide by a factor for each scroll step
-    const float zoom_factor = 1.10f;
-
-    if (delta > 0.0f) {
-        // Scroll up = zoom in (fewer samples per pixel)
-        trig->zoom_scale /= zoom_factor;
-        if (trig->zoom_scale < 0.5f) {
-            trig->zoom_scale = 0.5f;
-        }
-    } else {
-        // Scroll down = zoom out (more samples per pixel)
-        trig->zoom_scale *= zoom_factor;
-        if (trig->zoom_scale > ZOOM_SCALE_MAX) {
-            trig->zoom_scale = ZOOM_SCALE_MAX;
-        }
-    }
-
-    return true;
-}
-
-// Global app pointer for waveform scroll/click handlers (set during render)
-gui_app_t *g_app_ptr = NULL;
-
-// Drag state for trigger level adjustment
-static int s_vtable_dragging_channel = -1;  // -1 = not dragging, 0/1 = channel being dragged
-static Rectangle s_vtable_drag_bounds = {0};  // Bounds of the panel being dragged
-
-//-----------------------------------------------------------------------------
-// Waveform Panel Click Handler (shared by line and phosphor)
-//-----------------------------------------------------------------------------
-
-static bool waveform_handle_click(void *state, struct gui_app *app, int channel,
-                                   Vector2 click, Rectangle bounds) {
-    (void)state;  // Waveform uses app->trigger state, not per-panel state
-
-    if (!app) return false;
-
-    // Check if click is within bounds
-    if (!CheckCollisionPointRec(click, bounds)) {
-        return false;
-    }
-
-    // Get trigger for this channel
-    channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
-
-    // Don't allow trigger level drag in CVBS mode (level is auto-detected)
-    if (trig->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) {
-        return false;
-    }
-
-    // Start dragging on mouse press
-    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-        s_vtable_dragging_channel = channel;
-        s_vtable_drag_bounds = bounds;
-
-        // Enable trigger when starting to drag
-        trig->enabled = true;
-
-        return true;
-    }
-
-    return false;
-}
-
-// Update drag state for trigger level (call from render to handle continuous drag)
-static void waveform_update_drag(gui_app_t *app) {
-    if (!app || s_vtable_dragging_channel < 0) return;
-
-    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
-        Vector2 mouse = GetMousePosition();
-        int ch = s_vtable_dragging_channel;
-        Rectangle bounds = s_vtable_drag_bounds;
-        channel_trigger_t *trig = (ch == 0) ? &app->trigger_a : &app->trigger_b;
-
-        // Convert mouse Y to trigger level
-        // bounds.y is top (level = +2047)
-        // bounds.y + bounds.height is bottom (level = -2048)
-        // center is level = 0
-
-        float center_y = bounds.y + bounds.height / 2.0f;
-        float half_height = (bounds.height / 2.0f) * app->settings.amplitude_scale;
-
-        // Calculate normalized level (-1 to +1)
-        float level_norm = (center_y - mouse.y) / half_height;
-
-        // Clamp to valid range
-        if (level_norm > 1.0f) level_norm = 1.0f;
-        if (level_norm < -1.0f) level_norm = -1.0f;
-
-        // Convert to 12-bit signed value
-        trig->level = (int16_t)(level_norm * 2047.0f);
-    } else {
-        // Mouse released - stop dragging
-        s_vtable_dragging_channel = -1;
-    }
-}
-
-// Check if waveform is currently being dragged (for cursor management)
-static bool waveform_is_dragging(void) {
-    return s_vtable_dragging_channel >= 0;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+    waveform_process_display(state, samples, count);
 }
 
 //-----------------------------------------------------------------------------
@@ -841,41 +716,315 @@ static bool waveform_is_dragging(void) {
 //-----------------------------------------------------------------------------
 
 static void *waveform_line_create(void) {
-    // No per-panel state needed - uses shared app state
-    return NULL;
+    waveform_panel_state_t *state = calloc(1, sizeof(waveform_panel_state_t));
+    if (!state) return NULL;
+
+    // Initialize trigger settings with defaults
+    state->trigger_enabled = false;
+    state->trigger_level = 0;
+    state->trigger_mode = TRIGGER_MODE_RISING;
+    state->zoom_scale = ZOOM_SCALE_DEFAULT;
+    state->trigger_display_pos = -1;
+
+    // Initialize display state
+    atomic_init(&state->display_width, DISPLAY_BUFFER_SIZE);
+    state->display_samples_available = 0;
+
+    // Resampler initialized on demand
+    state->resampler = NULL;
+    state->resampler_ratio = 0.0f;
+
+    // No phosphor for line mode
+    state->phosphor = NULL;
+    state->phosphor_color = PHOSPHOR_COLOR_HEATMAP;
+
+    // UI state
+    state->dropdown_open = false;
+    state->dragging = false;
+
+    state->initialized = true;
+    return state;
 }
 
-static void waveform_line_destroy(void *state) {
-    (void)state;
+static void waveform_line_destroy(void *state_ptr) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    waveform_cleanup_resampler(state);
+    // Line mode has no phosphor to clean up
+
+    free(state);
 }
 
-static void waveform_line_clear(void *state) {
-    (void)state;
+static void waveform_line_clear(void *state_ptr) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    state->display_samples_available = 0;
+    state->trigger_display_pos = -1;
 }
 
-static void waveform_line_render(void *state, gui_app_t *app, int channel,
+//-----------------------------------------------------------------------------
+// Waveform Panel Overlay (Trigger Mode Dropdown)
+//-----------------------------------------------------------------------------
+
+static void waveform_render_overlay(void *state_ptr, Rectangle bounds) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    if (!state->initialized) return;
+
+    // Format current trigger mode
+    const char *mode_label;
+    if (!state->trigger_enabled) {
+        mode_label = "Off";
+    } else {
+        mode_label = s_trigger_mode_labels[state->trigger_mode];
+    }
+
+    // Button dimensions (similar to histogram)
+    float btn_w = 60, btn_h = 18;
+    float btn_x = bounds.x + bounds.width - btn_w - 8;
+    float btn_y = bounds.y + 8;
+
+    // Draw "Trigger:" label before the dropdown button
+    const char *trig_label = "Trig:";
+    int trig_label_w = gui_text_measure(trig_label, FONT_SIZE_DROPDOWN_OPT);
+    float label_x = btn_x - trig_label_w - 6;
+    float label_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+    gui_text_draw(trig_label, label_x, label_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT_DIM);
+
+    state->button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
+
+    // Draw button
+    Color btn_bg = state->dropdown_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    DrawRectangleRounded(state->button_rect, 0.15f, 4, btn_bg);
+
+    // Draw text centered with arrow
+    int text_w = gui_text_measure(mode_label, FONT_SIZE_DROPDOWN_OPT);
+    float arrow_w = 8;
+    float total_w = text_w + arrow_w + 4;
+    float text_x = btn_x + (btn_w - total_w) / 2;
+    float text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+    gui_text_draw(mode_label, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // Draw arrow
+    float arrow_size = 5.0f;
+    float arrow_x = text_x + text_w + 6;
+    float arrow_cy = btn_y + btn_h / 2;
+    if (state->dropdown_open) {
+        Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
+        Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
+        Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
+        DrawTriangle(top, left, right, COLOR_TEXT);
+    } else {
+        Vector2 bottom = { arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
+        Vector2 left = { arrow_x, arrow_cy - arrow_size/2 };
+        Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
+        DrawTriangle(bottom, right, left, COLOR_TEXT);
+    }
+
+    // Draw dropdown options if open
+    if (state->dropdown_open) {
+        float opt_y = btn_y + btn_h;
+        float opt_h = 20;
+        int num_options = TRIGGER_MODE_COUNT + 1;  // +1 for "Off" option
+
+        DrawRectangleRounded((Rectangle){btn_x, opt_y, btn_w, opt_h * num_options},
+                             0.1f, 4, COLOR_PANEL_BG);
+
+        // Option 0: Off
+        Rectangle off_rect = {btn_x, opt_y, btn_w, opt_h};
+        state->options_rect[0] = off_rect;  // Store in first slot (repurpose)
+
+        bool is_off = !state->trigger_enabled;
+        Vector2 mouse = GetMousePosition();
+        bool hover_off = CheckCollisionPointRec(mouse, off_rect);
+
+        Color off_bg = gui_dropdown_option_color(is_off, hover_off);
+        DrawRectangleRec(off_rect, off_bg);
+
+        const char *off_label = "Off";
+        int off_text_w = gui_text_measure(off_label, FONT_SIZE_DROPDOWN_OPT);
+        float off_text_x = btn_x + btn_w/2 - off_text_w/2;
+        float off_text_y = opt_y + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+        gui_text_draw(off_label, off_text_x, off_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+        // Options 1..N: Trigger modes
+        for (int i = 0; i < TRIGGER_MODE_COUNT; i++) {
+            Rectangle opt_rect = {btn_x, opt_y + (i + 1) * opt_h, btn_w, opt_h};
+            state->options_rect[i] = opt_rect;
+
+            bool is_selected = state->trigger_enabled && (state->trigger_mode == (trigger_mode_t)i);
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+
+            Color opt_bg = gui_dropdown_option_color(is_selected, hover);
+            DrawRectangleRec(opt_rect, opt_bg);
+
+            const char *opt_label = s_trigger_mode_labels[i];
+            int opt_text_w = gui_text_measure(opt_label, FONT_SIZE_DROPDOWN_OPT);
+            float opt_text_x = btn_x + btn_w/2 - opt_text_w/2;
+            float opt_text_y = opt_y + (i + 1) * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+            gui_text_draw(opt_label, opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Waveform Panel Click Handler (with dropdown support)
+//-----------------------------------------------------------------------------
+
+static bool waveform_panel_handle_click(void *state_ptr, struct gui_app *app, int channel,
+                                         Vector2 click, Rectangle bounds) {
+    (void)channel;  // Unused since we now use per-panel state
+
+    if (!state_ptr || !app) return false;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    // Check button click (toggle dropdown)
+    if (CheckCollisionPointRec(click, state->button_rect)) {
+        state->dropdown_open = !state->dropdown_open;
+        return true;
+    }
+
+    // Check option clicks if dropdown is open
+    if (state->dropdown_open) {
+        // Check "Off" option (stored in options_rect[0] when dropdown open)
+        Rectangle off_rect = {state->button_rect.x, state->button_rect.y + state->button_rect.height,
+                              state->button_rect.width, 20};
+        if (CheckCollisionPointRec(click, off_rect)) {
+            state->trigger_enabled = false;
+            state->dropdown_open = false;
+            return true;
+        }
+
+        // Check trigger mode options
+        for (int i = 0; i < TRIGGER_MODE_COUNT; i++) {
+            Rectangle opt_rect = {state->button_rect.x,
+                                  state->button_rect.y + state->button_rect.height + (i + 1) * 20,
+                                  state->button_rect.width, 20};
+            if (CheckCollisionPointRec(click, opt_rect)) {
+                state->trigger_enabled = true;
+                state->trigger_mode = (trigger_mode_t)i;
+                state->dropdown_open = false;
+                return true;
+            }
+        }
+
+        // Click outside dropdown closes it
+        state->dropdown_open = false;
+        return true;
+    }
+
+    // Check if click is within bounds for trigger level drag
+    if (!CheckCollisionPointRec(click, bounds)) {
+        return false;
+    }
+
+    // Don't allow trigger level drag in CVBS mode (level is auto-detected)
+    if (state->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) {
+        return false;
+    }
+
+    // Start dragging on mouse press
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        state->dragging = true;
+
+        // Enable trigger when starting to drag
+        state->trigger_enabled = true;
+
+        // Calculate trigger level from click position
+        float center_y = bounds.y + bounds.height / 2.0f;
+        float half_height = (bounds.height / 2.0f) * app->settings.amplitude_scale;
+
+        float level_norm = (center_y - click.y) / half_height;
+        if (level_norm > 1.0f) level_norm = 1.0f;
+        if (level_norm < -1.0f) level_norm = -1.0f;
+
+        state->trigger_level = (int16_t)(level_norm * 2047.0f);
+
+        return true;
+    }
+
+    return false;
+}
+
+//-----------------------------------------------------------------------------
+// Waveform Panel Drag Update (called during render for continuous drag)
+//-----------------------------------------------------------------------------
+
+static void waveform_panel_update_drag(waveform_panel_state_t *state, gui_app_t *app, Rectangle bounds) {
+    if (!state || !app || !state->dragging) return;
+
+    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        Vector2 mouse = GetMousePosition();
+
+        // Calculate trigger level from mouse position
+        float center_y = bounds.y + bounds.height / 2.0f;
+        float half_height = (bounds.height / 2.0f) * app->settings.amplitude_scale;
+
+        float level_norm = (center_y - mouse.y) / half_height;
+        if (level_norm > 1.0f) level_norm = 1.0f;
+        if (level_norm < -1.0f) level_norm = -1.0f;
+
+        state->trigger_level = (int16_t)(level_norm * 2047.0f);
+    } else {
+        // Mouse released - stop dragging
+        state->dragging = false;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Waveform Panel Scroll Handler (per-panel zoom)
+//-----------------------------------------------------------------------------
+
+static bool waveform_panel_handle_scroll(void *state_ptr, float delta, Rectangle bounds) {
+    if (!state_ptr || delta == 0.0f) return false;
+
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    Vector2 mouse = GetMousePosition();
+    if (!CheckCollisionPointRec(mouse, bounds)) return false;
+
+    // Smooth zoom: multiply/divide by a factor for each scroll step
+    const float zoom_factor = 1.10f;
+
+    if (delta > 0.0f) {
+        // Scroll up = zoom in (fewer samples per pixel)
+        state->zoom_scale /= zoom_factor;
+        if (state->zoom_scale < ZOOM_SCALE_MIN) {
+            state->zoom_scale = ZOOM_SCALE_MIN;
+        }
+    } else {
+        // Scroll down = zoom out (more samples per pixel)
+        state->zoom_scale *= zoom_factor;
+        if (state->zoom_scale > ZOOM_SCALE_MAX) {
+            state->zoom_scale = ZOOM_SCALE_MAX;
+        }
+    }
+
+    return true;
+}
+
+static void waveform_line_render(void *state_ptr, gui_app_t *app, int channel,
                                   Rectangle bounds, Color channel_color) {
-    (void)state;
+    if (!app || !state_ptr) return;
 
-    if (!app) return;
-
-    // Set global app pointer for scroll/click handlers
-    g_app_ptr = app;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+    if (!state->initialized) return;
 
     // Update drag state for trigger level (continuous while mouse is held)
-    waveform_update_drag(app);
+    waveform_panel_update_drag(state, app, bounds);
 
     // Set cursor when hovering over waveform panel or dragging
     Vector2 mouse = GetMousePosition();
     if (!gui_popup_is_open()) {
-        if (CheckCollisionPointRec(mouse, bounds) || waveform_is_dragging()) {
+        if (CheckCollisionPointRec(mouse, bounds) || state->dragging) {
             SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
         }
     }
 
-    // Delegate to existing render function
-    render_waveform_line(app, channel, bounds.x, bounds.y,
-                         bounds.width, bounds.height, channel_color);
+    render_waveform_line_internal(state, app, channel, bounds, channel_color);
 }
 
 static const panel_vtable_t s_waveform_line_vtable = {
@@ -883,11 +1032,11 @@ static const panel_vtable_t s_waveform_line_vtable = {
     .create = waveform_line_create,
     .destroy = waveform_line_destroy,
     .clear = waveform_line_clear,
-    .process = NULL,  // Waveform uses resampled display samples
+    .process = waveform_vtable_process,
     .render = waveform_line_render,
-    .render_overlay = NULL,
-    .handle_click = waveform_handle_click,    // Trigger level drag
-    .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
+    .render_overlay = waveform_render_overlay,
+    .handle_click = waveform_panel_handle_click,
+    .handle_scroll = waveform_panel_handle_scroll,
     .get_menu_count = NULL,
     .get_menu = NULL,
 };
@@ -901,41 +1050,88 @@ void gui_waveform_line_panel_register(void) {
 //-----------------------------------------------------------------------------
 
 static void *waveform_phosphor_create(void) {
-    // No per-panel state - uses shared app->phosphor_a/b
-    return NULL;
+    waveform_panel_state_t *state = calloc(1, sizeof(waveform_panel_state_t));
+    if (!state) return NULL;
+
+    // Initialize trigger settings with defaults
+    state->trigger_enabled = false;
+    state->trigger_level = 0;
+    state->trigger_mode = TRIGGER_MODE_RISING;
+    state->zoom_scale = ZOOM_SCALE_DEFAULT;
+    state->trigger_display_pos = -1;
+
+    // Initialize display state
+    atomic_init(&state->display_width, DISPLAY_BUFFER_SIZE);
+    state->display_samples_available = 0;
+
+    // Resampler initialized on demand
+    state->resampler = NULL;
+    state->resampler_ratio = 0.0f;
+
+    // Allocate phosphor state for phosphor mode
+    state->phosphor = calloc(1, sizeof(phosphor_rt_t));
+    if (!state->phosphor) {
+        free(state);
+        return NULL;
+    }
+    state->phosphor_color = PHOSPHOR_COLOR_HEATMAP;
+
+    // UI state
+    state->dropdown_open = false;
+    state->dragging = false;
+
+    state->initialized = true;
+    return state;
 }
 
-static void waveform_phosphor_destroy(void *state) {
-    (void)state;
+static void waveform_phosphor_destroy(void *state_ptr) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    waveform_cleanup_resampler(state);
+
+    // Clean up phosphor
+    if (state->phosphor) {
+        phosphor_rt_cleanup(state->phosphor);
+        free(state->phosphor);
+        state->phosphor = NULL;
+    }
+
+    free(state);
 }
 
-static void waveform_phosphor_clear(void *state) {
-    (void)state;
+static void waveform_phosphor_clear(void *state_ptr) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    state->display_samples_available = 0;
+    state->trigger_display_pos = -1;
+
+    // Clear phosphor persistence
+    if (state->phosphor) {
+        phosphor_rt_clear(state->phosphor);
+    }
 }
 
-static void waveform_phosphor_render(void *state, gui_app_t *app, int channel,
+static void waveform_phosphor_render(void *state_ptr, gui_app_t *app, int channel,
                                       Rectangle bounds, Color channel_color) {
-    (void)state;
+    if (!app || !state_ptr) return;
 
-    if (!app) return;
-
-    // Set global app pointer for scroll/click handlers
-    g_app_ptr = app;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+    if (!state->initialized) return;
 
     // Update drag state for trigger level (continuous while mouse is held)
-    waveform_update_drag(app);
+    waveform_panel_update_drag(state, app, bounds);
 
     // Set cursor when hovering over waveform panel or dragging
     Vector2 mouse = GetMousePosition();
     if (!gui_popup_is_open()) {
-        if (CheckCollisionPointRec(mouse, bounds) || waveform_is_dragging()) {
+        if (CheckCollisionPointRec(mouse, bounds) || state->dragging) {
             SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
         }
     }
 
-    // Delegate to existing render function
-    render_waveform_phosphor(app, channel, bounds.x, bounds.y,
-                             bounds.width, bounds.height, channel_color);
+    render_waveform_phosphor_internal(state, app, channel, bounds, channel_color);
 }
 
 static const panel_vtable_t s_waveform_phosphor_vtable = {
@@ -943,11 +1139,11 @@ static const panel_vtable_t s_waveform_phosphor_vtable = {
     .create = waveform_phosphor_create,
     .destroy = waveform_phosphor_destroy,
     .clear = waveform_phosphor_clear,
-    .process = NULL,
+    .process = waveform_vtable_process,
     .render = waveform_phosphor_render,
-    .render_overlay = NULL,
-    .handle_click = waveform_handle_click,    // Trigger level drag
-    .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
+    .render_overlay = waveform_render_overlay,
+    .handle_click = waveform_panel_handle_click,
+    .handle_scroll = waveform_panel_handle_scroll,
     .get_menu_count = NULL,
     .get_menu = NULL,
 };

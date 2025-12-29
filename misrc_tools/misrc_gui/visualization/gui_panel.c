@@ -50,28 +50,18 @@ bool panel_view_type_available(panel_view_type_t type) {
 //-----------------------------------------------------------------------------
 
 void* panel_create_view_state(panel_view_type_t type) {
-    // Waveform views use shared phosphor from app, no per-panel state
-    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
-        return NULL;
-    }
-
-    // Use vtable factory if registered (preferred path for all panel types)
+    // Use vtable factory if registered (all panel types should use this path)
     const panel_vtable_t *vtable = panel_get_vtable(type);
     if (vtable && vtable->create) {
         return vtable->create();
     }
 
-    // Fallback for legacy panels without vtable (should not be reached)
+    // Fallback for panels without vtable (should not be reached)
     return NULL;
 }
 
 void panel_destroy_view_state(panel_view_type_t type, void *state) {
     if (!state) return;
-
-    // Waveform views have no state to destroy
-    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
-        return;
-    }
 
     // Use vtable destroy if registered (handles proper cleanup)
     const panel_vtable_t *vtable = panel_get_vtable(type);
@@ -82,11 +72,6 @@ void panel_destroy_view_state(panel_view_type_t type, void *state) {
 
 void panel_clear_view_state(panel_view_type_t type, void *state) {
     if (!state) return;
-
-    // Waveform views have no state to clear
-    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
-        return;
-    }
 
     // Use vtable clear if registered
     const panel_vtable_t *vtable = panel_get_vtable(type);
@@ -173,7 +158,9 @@ void panel_config_init_default(channel_panel_config_t *config) {
     config->split = false;
     config->left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
     config->right_view = PANEL_VIEW_FFT;
-    config->left_state = NULL;
+    // Create initial state for the default left view
+    config->left_state = panel_create_view_state(config->left_view);
+    // Right state only created when split mode is enabled
     config->right_state = NULL;
 }
 

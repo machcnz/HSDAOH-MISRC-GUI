@@ -309,13 +309,13 @@ void gui_app_init(gui_app_t *app) {
     app->panel_config_a.split = true;
     app->panel_config_a.left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
     app->panel_config_a.right_view = PANEL_VIEW_FFT;
-    app->panel_config_a.left_state = NULL;
+    app->panel_config_a.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM_PHOSPHOR);
     app->panel_config_a.right_state = panel_create_view_state(PANEL_VIEW_FFT);
 
     app->panel_config_b.split = true;
     app->panel_config_b.left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
     app->panel_config_b.right_view = PANEL_VIEW_FFT;
-    app->panel_config_b.left_state = NULL;
+    app->panel_config_b.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM_PHOSPHOR);
     app->panel_config_b.right_state = panel_create_view_state(PANEL_VIEW_FFT);
 
     // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
@@ -381,12 +381,12 @@ void gui_app_cleanup(gui_app_t *app) {
     // Note: CVBS decoders are now owned by panel state (left_state/right_state)
     // and cleaned up via panel_config_cleanup() below
 
-    // Cleanup panel configurations (includes FFT, CVBS, histogram state)
+    // Cleanup panel configurations (includes FFT, CVBS, histogram, waveform state)
+    // Per-panel resamplers are cleaned up by vtable destroy() functions
     panel_config_cleanup(&app->panel_config_a);
     panel_config_cleanup(&app->panel_config_b);
 
-    // Cleanup oscilloscope resources (static state and resamplers)
-    gui_oscilloscope_cleanup_resamplers(app);
+    // Cleanup oscilloscope static resources
     gui_oscilloscope_cleanup();
 
     // Cleanup display thread

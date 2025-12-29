@@ -20,7 +20,7 @@ typedef struct vu_meter_state vu_meter_state_t;
 //-----------------------------------------------------------------------------
 
 typedef enum {
-    CUSTOM_LAYOUT_ELEMENT_TYPE_OSCILLOSCOPE,
+    CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL,  // Channel panel area (waveform, FFT, histogram, etc.)
     CUSTOM_LAYOUT_ELEMENT_TYPE_VU_METER
 } CustomLayoutElementType;
 
@@ -31,7 +31,7 @@ typedef enum {
 typedef struct {
     gui_app_t *app;
     int channel;  // 0 = A, 1 = B
-} CustomLayoutElement_Oscilloscope;
+} CustomLayoutElement_ChannelPanel;
 
 typedef struct {
     vu_meter_state_t *meter;
@@ -44,7 +44,7 @@ typedef struct {
 typedef struct {
     CustomLayoutElementType type;
     union {
-        CustomLayoutElement_Oscilloscope oscilloscope;
+        CustomLayoutElement_ChannelPanel channel_panel;
         CustomLayoutElement_VUMeter vu_meter;
     } customData;
 } CustomLayoutElement;
