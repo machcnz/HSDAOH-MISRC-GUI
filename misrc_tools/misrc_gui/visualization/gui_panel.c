@@ -153,9 +153,6 @@ void panel_clear_view_state(panel_view_type_t type, void *state) {
     }
 }
 
-// NOTE: Legacy panel_render_fn and s_render_fns[] have been removed.
-// All panel rendering now uses vtable dispatch via panel_get_vtable().
-
 //-----------------------------------------------------------------------------
 // Channel Panel Rendering (Main Entry Point)
 //-----------------------------------------------------------------------------
@@ -338,6 +335,55 @@ bool panel_handle_all_clicks(gui_app_t *app, Vector2 mouse_pos) {
         if (config->split) {
             if (try_panel_click(app, ch, config->right_view, config->right_state,
                                 config->right_bounds, mouse_pos)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+//-----------------------------------------------------------------------------
+// Unified Panel Scroll Handling
+//-----------------------------------------------------------------------------
+
+// Helper: Try vtable scroll handler for a panel
+static bool try_panel_scroll(panel_view_type_t type, void *state,
+                              Rectangle bounds, float delta) {
+    // First check if mouse is within bounds
+    Vector2 mouse = GetMousePosition();
+    if (!CheckCollisionPointRec(mouse, bounds)) {
+        return false;
+    }
+
+    // Try vtable handler
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+    if (vtable && vtable->handle_scroll) {
+        return vtable->handle_scroll(state, delta, bounds);
+    }
+
+    return false;
+}
+
+bool panel_handle_all_scrolls(gui_app_t *app, float delta) {
+    if (!app || delta == 0.0f) return false;
+
+    // Process both channels
+    for (int ch = 0; ch < 2; ch++) {
+        channel_panel_config_t *config = (ch == 0)
+            ? &app->panel_config_a
+            : &app->panel_config_b;
+
+        // Try left panel
+        if (try_panel_scroll(config->left_view, config->left_state,
+                              config->left_bounds, delta)) {
+            return true;
+        }
+
+        // Try right panel if in split mode
+        if (config->split) {
+            if (try_panel_scroll(config->right_view, config->right_state,
+                                  config->right_bounds, delta)) {
                 return true;
             }
         }

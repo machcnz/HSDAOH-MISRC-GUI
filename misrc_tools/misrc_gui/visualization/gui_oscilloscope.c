@@ -543,32 +543,8 @@ void handle_oscilloscope_interaction(gui_app_t *app) {
         s_dragging_channel = -1;
     }
 
-    // Mouse wheel zoom when hovering over waveform panel
-    if (hover_channel >= 0) {
-        float wheel = GetMouseWheelMove();
-        if (wheel != 0.0f) {
-            channel_trigger_t *trig = (hover_channel == 0) ? &app->trigger_a : &app->trigger_b;
-
-            // Smooth zoom: multiply/divide by a factor for each scroll step
-            // Using 1.15 gives ~10% zoom per scroll tick
-            const float zoom_factor = 1.10f;
-
-            if (wheel > 0.0f) {
-                // Scroll up = zoom in (fewer samples per pixel)
-                trig->zoom_scale /= zoom_factor;
-                // Allow going below 1.0, will be clamped in processing
-                if (trig->zoom_scale < 0.5f) {
-                    trig->zoom_scale = 0.5f;
-                }
-            } else {
-                // Scroll down = zoom out (more samples per pixel)
-                trig->zoom_scale *= zoom_factor;
-                if (trig->zoom_scale > ZOOM_SCALE_MAX) {
-                    trig->zoom_scale = ZOOM_SCALE_MAX;
-                }
-            }
-        }
-    }
+    // Note: Mouse wheel zoom is now handled via vtable (waveform_handle_scroll)
+    // through the unified panel scroll handling system (panel_handle_all_scrolls)
 
     // Change cursor when hovering over oscilloscope (but not when popup is open)
     if (gui_popup_is_open()) {
@@ -842,6 +818,61 @@ void gui_oscilloscope_update_display(gui_app_t *app, const int16_t *buf_a,
 // This is a limitation of the current vtable interface.
 
 //-----------------------------------------------------------------------------
+// Waveform Panel Scroll Handler (shared by line and phosphor)
+//-----------------------------------------------------------------------------
+
+static bool waveform_handle_scroll(void *state, float delta, Rectangle bounds) {
+    (void)state;  // Waveform uses app->trigger state, not per-panel state
+
+    if (delta == 0.0f) return false;
+
+    Vector2 mouse = GetMousePosition();
+    if (!CheckCollisionPointRec(mouse, bounds)) return false;
+
+    // Determine which channel this panel belongs to by checking bounds
+    // This is a workaround since we don't have channel info in scroll handler
+    // The panel system stores bounds per-channel, so we check both
+    extern gui_app_t *g_app_ptr;  // Set during render
+    if (!g_app_ptr) return false;
+
+    // Check which channel's bounds this matches
+    int channel = -1;
+    if (CheckCollisionPointRec(mouse, g_app_ptr->panel_config_a.left_bounds) ||
+        CheckCollisionPointRec(mouse, g_app_ptr->panel_config_a.right_bounds)) {
+        channel = 0;
+    } else if (CheckCollisionPointRec(mouse, g_app_ptr->panel_config_b.left_bounds) ||
+               CheckCollisionPointRec(mouse, g_app_ptr->panel_config_b.right_bounds)) {
+        channel = 1;
+    }
+
+    if (channel < 0) return false;
+
+    channel_trigger_t *trig = (channel == 0) ? &g_app_ptr->trigger_a : &g_app_ptr->trigger_b;
+
+    // Smooth zoom: multiply/divide by a factor for each scroll step
+    const float zoom_factor = 1.10f;
+
+    if (delta > 0.0f) {
+        // Scroll up = zoom in (fewer samples per pixel)
+        trig->zoom_scale /= zoom_factor;
+        if (trig->zoom_scale < 0.5f) {
+            trig->zoom_scale = 0.5f;
+        }
+    } else {
+        // Scroll down = zoom out (more samples per pixel)
+        trig->zoom_scale *= zoom_factor;
+        if (trig->zoom_scale > ZOOM_SCALE_MAX) {
+            trig->zoom_scale = ZOOM_SCALE_MAX;
+        }
+    }
+
+    return true;
+}
+
+// Global app pointer for waveform scroll handler (set during render)
+gui_app_t *g_app_ptr = NULL;
+
+//-----------------------------------------------------------------------------
 // Waveform Line Panel Vtable
 //-----------------------------------------------------------------------------
 
@@ -864,6 +895,9 @@ static void waveform_line_render(void *state, gui_app_t *app, int channel,
 
     if (!app) return;
 
+    // Set global app pointer for scroll handler
+    g_app_ptr = app;
+
     // Delegate to existing render function
     render_waveform_line(app, channel, bounds.x, bounds.y,
                          bounds.width, bounds.height, channel_color);
@@ -877,8 +911,8 @@ static const panel_vtable_t s_waveform_line_vtable = {
     .process = NULL,  // Waveform uses resampled display samples
     .render = waveform_line_render,
     .render_overlay = NULL,
-    .handle_click = NULL,  // Handled by handle_oscilloscope_interaction()
-    .handle_scroll = NULL,
+    .handle_click = NULL,  // Trigger drag handled by handle_oscilloscope_interaction()
+    .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
     .get_menu_count = NULL,
     .get_menu = NULL,
 };
@@ -910,6 +944,9 @@ static void waveform_phosphor_render(void *state, gui_app_t *app, int channel,
 
     if (!app) return;
 
+    // Set global app pointer for scroll handler
+    g_app_ptr = app;
+
     // Delegate to existing render function
     render_waveform_phosphor(app, channel, bounds.x, bounds.y,
                              bounds.width, bounds.height, channel_color);
@@ -923,8 +960,8 @@ static const panel_vtable_t s_waveform_phosphor_vtable = {
     .process = NULL,
     .render = waveform_phosphor_render,
     .render_overlay = NULL,
-    .handle_click = NULL,
-    .handle_scroll = NULL,
+    .handle_click = NULL,  // Trigger drag handled by handle_oscilloscope_interaction()
+    .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
     .get_menu_count = NULL,
     .get_menu = NULL,
 };

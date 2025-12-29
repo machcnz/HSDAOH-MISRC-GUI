@@ -62,12 +62,17 @@ void panel_config_set_right_view(channel_panel_config_t *config, panel_view_type
 void panel_config_set_split(channel_panel_config_t *config, bool split);
 
 //-----------------------------------------------------------------------------
-// Unified Panel Click Handling
+// Unified Panel Input Handling
 //-----------------------------------------------------------------------------
 
 // Handle click events for all panel overlays using vtable dispatch.
 // Iterates through both channels' panel configs and checks for clicks.
 // Returns true if any panel consumed the click.
 bool panel_handle_all_clicks(gui_app_t *app, Vector2 mouse_pos);
+
+// Handle scroll events for all panels using vtable dispatch.
+// Checks which panel the mouse is over and calls its scroll handler.
+// Returns true if any panel consumed the scroll.
+bool panel_handle_all_scrolls(gui_app_t *app, float delta);
 
 #endif // GUI_PANEL_H

@@ -235,6 +235,13 @@ bool gui_fft_init(fft_state_t *state) {
     state->data_ready = false;
     state->initialized = true;
 
+    // Initialize zoom/pan state
+    state->zoom_level = 1.0f;
+    state->pan_offset = 0.0f;
+    state->dragging = false;
+    state->drag_start_x = 0.0f;
+    state->drag_start_pan = 0.0f;
+
     fprintf(stderr, "[FFT] Initialized with dynamic sizing (%d-%d samples)\n",
             FFT_SIZE_MIN, FFT_SIZE_MAX);
 
@@ -271,6 +278,11 @@ void gui_fft_clear(fft_state_t *state) {
     state->peak_label_x = 0.0f;
     state->peak_label_y = 0.0f;
     state->peak_label_bin = 0;
+
+    // Reset zoom/pan state
+    state->zoom_level = 1.0f;
+    state->pan_offset = 0.0f;
+    state->dragging = false;
 
     state->data_ready = false;
 #endif
@@ -462,7 +474,7 @@ void gui_fft_swap_buffers(fft_state_t *state) {
 #define FFT_GRID_MAX_DIVISIONS 12    // Maximum number of frequency divisions
 
 // Peak detection settings
-#define FFT_PEAK_SEARCH_RADIUS_PX 10   // Pixels around mouse to search for peaks
+#define FFT_PEAK_SEARCH_RADIUS_PX 30   // Pixels around mouse to search for peaks
 #define FFT_PEAK_MIN_PROMINENCE 0.02f  // Minimum prominence (0-1) to qualify as a peak
 #define FFT_PEAK_MAX_CANDIDATES 32     // Maximum peaks to consider when finding closest
 #define FFT_PEAK_MAX_DISPLAY 1         // Maximum peaks to display near mouse
@@ -629,22 +641,38 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     // Begin phosphor frame (applies decay and prepares for drawing)
     phosphor_rt_begin_frame(&state->phosphor);
 
-    // Draw FFT bins as connected line segments
+    // Draw FFT bins as connected line segments (with zoom/pan)
     if (state->magnitude && state->data_ready && state->fft_bins > 1) {
         Color lineColor = phosphor_rt_get_draw_color(&state->phosphor);
 
         int fft_bins = state->fft_bins;
+        float zoom = state->zoom_level;
+        float pan = state->pan_offset;
 
-        // Map FFT bins to render texture width
-        float bin_width = (float)rt_width / (float)(fft_bins - 1);
+        // Calculate visible bin range based on zoom/pan
+        // pan_offset is normalized frequency (0-1), zoom_level scales the view
+        // visible range: [pan, pan + 1/zoom] in normalized frequency
+        float visible_start = pan;
+        float visible_end = pan + 1.0f / zoom;
 
-        for (int bin = 0; bin < fft_bins - 1; bin++) {
+        // Convert to bin indices
+        int start_bin = (int)(visible_start * (fft_bins - 1));
+        int end_bin = (int)ceilf(visible_end * (fft_bins - 1));
+        if (start_bin < 0) start_bin = 0;
+        if (end_bin >= fft_bins) end_bin = fft_bins - 1;
+
+        for (int bin = start_bin; bin < end_bin; bin++) {
             float intensity1 = state->magnitude[bin];
             float intensity2 = state->magnitude[bin + 1];
 
-            // X positions for this segment
-            float x1 = bin * bin_width;
-            float x2 = (bin + 1) * bin_width;
+            // Convert bin to normalized frequency (0-1)
+            float freq_norm1 = (float)bin / (float)(fft_bins - 1);
+            float freq_norm2 = (float)(bin + 1) / (float)(fft_bins - 1);
+
+            // Map to screen X using zoom/pan
+            // screen_x = (freq_norm - pan) * zoom * width
+            float x1 = (freq_norm1 - pan) * zoom * rt_width;
+            float x2 = (freq_norm2 - pan) * zoom * rt_width;
 
             // Y positions based on intensity (0 = bottom, 1 = top)
             float y1 = rt_height - (intensity1 * rt_height);
@@ -670,8 +698,6 @@ void gui_fft_render(fft_state_t *state, float x, float y,
     float first_db = ceilf(FFT_DB_MIN / db_division) * db_division;
     int div_count = 0;
 
-    const float eps = 1e-3f;
-
     for (float db = first_db;
         db <= FFT_DB_MAX && div_count < FFT_GRID_MAX_DIVISIONS;
         db += db_division)
@@ -695,12 +721,19 @@ void gui_fft_render(fft_state_t *state, float x, float y,
         div_count++;
     }
 
-    // Draw vertical frequency grid lines with 1-2-5 snapping (matching oscilloscope time grid logic)
+    // Draw vertical frequency grid lines with 1-2-5 snapping (with zoom/pan support)
     if (sample_rate > 0) {
         float nyquist = (float)sample_rate / 2.0f;
+        float zoom = state->zoom_level;
+        float pan = state->pan_offset;
 
-        // Calculate frequency per pixel
-        float freq_per_pixel = nyquist / width;
+        // Visible frequency range based on zoom/pan
+        float visible_freq_start = pan * nyquist;
+        float visible_freq_end = (pan + 1.0f / zoom) * nyquist;
+        float visible_freq_range = visible_freq_end - visible_freq_start;
+
+        // Calculate frequency per pixel for visible range
+        float freq_per_pixel = visible_freq_range / width;
 
         // Calculate rough frequency division to get reasonable spacing
         float rough_division = freq_per_pixel * (float)FFT_GRID_MIN_SPACING_PX;
@@ -708,23 +741,28 @@ void gui_fft_render(fft_state_t *state, float x, float y,
         // Snap to 1-2-5 sequence
         float freq_division = (float)fft_snap_to_125((double)rough_division);
 
-        // Calculate pixels per division
-        float pixels_per_div = freq_division / freq_per_pixel;
+        // Find first grid line in visible range
+        float first_grid_freq = ceilf(visible_freq_start / freq_division) * freq_division;
 
         // Draw vertical grid lines at frequency intervals
         char freq_buf[32];
         div_count = 0;
-        for (float freq = freq_division; freq < nyquist && div_count < FFT_GRID_MAX_DIVISIONS; freq += freq_division) {
-            float normalized = freq / nyquist;
-            float line_x = x + (normalized * width);
+        for (float freq = first_grid_freq; freq < visible_freq_end && div_count < FFT_GRID_MAX_DIVISIONS; freq += freq_division) {
+            // Convert frequency to screen position using zoom/pan
+            float freq_norm = freq / nyquist;  // Normalized frequency (0-1)
+            float screen_norm = (freq_norm - pan) * zoom;  // Normalized screen position (0-1)
+            float line_x = x + (screen_norm * width);
 
-            DrawLineV((Vector2){line_x, y}, (Vector2){line_x, y + height}, COLOR_GRID);
+            // Only draw if within visible bounds
+            if (line_x >= x && line_x <= x + width) {
+                DrawLineV((Vector2){line_x, y}, (Vector2){line_x, y + height}, COLOR_GRID);
 
-            // Draw frequency label (skip if too close to edges)
-            if (line_x > x + 30 && line_x < x + width - 30) {
-                format_freq_label(freq_buf, sizeof(freq_buf), freq);
-                int label_w = fft_measure_text(fonts, freq_buf, FONT_SIZE_OSC_SCALE);
-                fft_draw_text_mono(fonts, freq_buf, line_x - label_w / 2, y + height - 14, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
+                // Draw frequency label (skip if too close to edges)
+                if (line_x > x + 30 && line_x < x + width - 30) {
+                    format_freq_label(freq_buf, sizeof(freq_buf), freq);
+                    int label_w = fft_measure_text(fonts, freq_buf, FONT_SIZE_OSC_SCALE);
+                    fft_draw_text_mono(fonts, freq_buf, line_x - label_w / 2, y + height - 14, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
+                }
             }
             div_count++;
         }
@@ -736,7 +774,13 @@ void gui_fft_render(fft_state_t *state, float x, float y,
         int div_label_w = fft_measure_text(fonts, div_label, FONT_SIZE_OSC_DIV);
         fft_draw_text_mono(fonts, div_label, x + width - div_label_w - 8, y + 26, FONT_SIZE_OSC_DIV, COLOR_TEXT);
 
-        (void)pixels_per_div; // Suppress unused warning
+        // Show zoom level if zoomed in
+        if (zoom > 1.01f) {
+            char zoom_label[32];
+            snprintf(zoom_label, sizeof(zoom_label), "%.1fx", zoom);
+            int zoom_label_w = fft_measure_text(fonts, zoom_label, FONT_SIZE_OSC_DIV);
+            fft_draw_text_mono(fonts, zoom_label, x + width - zoom_label_w - 8, y + 42, FONT_SIZE_OSC_DIV, COLOR_TEXT_DIM);
+        }
     }
 
     // Draw center line (0V equivalent position not applicable for FFT, skip)
@@ -760,7 +804,7 @@ void gui_fft_render(fft_state_t *state, float x, float y,
         }
     }
 
-    // Peak detection on mouse hover - show closest peak to mouse
+    // Peak detection on mouse hover - show closest peak to mouse (with zoom/pan support)
     if (state->peak_hold && state->data_ready && state->fft_bins > 1 && sample_rate > 0) {
         Vector2 mouse = GetMousePosition();
         Rectangle fft_rect = {x, y, width, height};
@@ -768,20 +812,24 @@ void gui_fft_render(fft_state_t *state, float x, float y,
         if (CheckCollisionPointRec(mouse, fft_rect)) {
             float nyquist = (float)sample_rate / 2.0f;
             int fft_bins = state->fft_bins;
+            float zoom = state->zoom_level;
+            float pan = state->pan_offset;
 
-            // IMPORTANT: The FFT is drawn to phosphor texture using rt_width, and the
-            // texture is rendered at screen position (x, y) with size (rt_width, rt_height).
-            // So we must use rt_width here to match the actual rendered coordinates.
-            float bin_width = (float)rt_width / (float)(fft_bins - 1);
+            // Convert mouse X to normalized frequency using zoom/pan
+            // screen_norm = (freq_norm - pan) * zoom
+            // => freq_norm = screen_norm / zoom + pan
+            float screen_norm = (mouse.x - x) / width;  // 0.0 to 1.0
+            float freq_norm = screen_norm / zoom + pan;
 
-            // Convert mouse X to bin index
-            float rel_x = mouse.x - x;
-            int mouse_bin = (int)(rel_x / bin_width);
+            // Convert to bin index
+            int mouse_bin = (int)(freq_norm * (fft_bins - 1) + 0.5f);
             if (mouse_bin < 0) mouse_bin = 0;
             if (mouse_bin >= fft_bins) mouse_bin = fft_bins - 1;
 
-            // Calculate search radius in bins
-            int search_radius_bins = (int)(FFT_PEAK_SEARCH_RADIUS_PX / bin_width + 0.5f);
+            // Calculate search radius in bins (adjusted for zoom)
+            // At higher zoom, bins are wider on screen, so search covers fewer bins
+            float bin_width_screen = width * zoom / (float)(fft_bins - 1);
+            int search_radius_bins = (int)(FFT_PEAK_SEARCH_RADIUS_PX / bin_width_screen + 0.5f);
             if (search_radius_bins < 2) search_radius_bins = 2;
 
             // Find peaks near mouse using peak-hold data (stable envelope)
@@ -802,39 +850,54 @@ void gui_fft_render(fft_state_t *state, float x, float y,
                     }
                 }
 
-                // Score each peak: combine distance score and magnitude score
-                // distance_score: 1.0 at mouse, 0.0 at edge of search radius
-                // magnitude_score: 0.0 to 1.0 normalized to max in range
+                // Score each peak: use circular (Euclidean) distance from mouse
+                // Calculate screen position for each peak and measure actual distance
                 // Weight magnitude more heavily so prominent peaks are preferred
                 const float distance_weight = 0.3f;
                 const float magnitude_weight = 0.7f;
+                float search_radius_px = (float)FFT_PEAK_SEARCH_RADIUS_PX;
 
                 int best_idx = 0;
                 float best_score = -1.0f;
-                int best_dist = abs(peaks[0].bin - mouse_bin);
 
                 for (int i = 0; i < peak_count; i++) {
-                    int dist = abs(peaks[i].bin - mouse_bin);
-                    float distance_score = 1.0f - (float)dist / (float)search_radius_bins;
+                    // Calculate screen position for this peak using zoom/pan
+                    int bin = peaks[i].bin;
+                    float peak_mag = state->peak_hold[bin];
+                    float bin_freq_norm = (float)bin / (float)(fft_bins - 1);
+                    float px = x + (bin_freq_norm - pan) * zoom * width;
+                    float py = y + height - (peak_mag * height);
+
+                    // Calculate circular (Euclidean) distance from mouse
+                    float dx = px - mouse.x;
+                    float dy = py - mouse.y;
+                    float dist = sqrtf(dx * dx + dy * dy);
+
+                    // Only consider peaks within circular radius
+                    if (dist > search_radius_px) continue;
+
+                    float distance_score = 1.0f - dist / search_radius_px;
                     float magnitude_score = (max_mag > 0) ? peaks[i].magnitude / max_mag : 0.0f;
                     float score = distance_weight * distance_score + magnitude_weight * magnitude_score;
 
                     if (score > best_score) {
                         best_score = score;
                         best_idx = i;
-                        best_dist = dist;
                     }
                 }
 
-                int closest_idx = best_idx;
-                int closest_dist = best_dist;
+                // Skip if no peak within circular radius
+                if (best_score < 0) {
+                    state->peak_label_active = false;
+                } else {
 
                 // Get the peak-hold magnitude for rendering
-                int peak_bin = peaks[closest_idx].bin;
+                int peak_bin = peaks[best_idx].bin;
                 float peak_mag = state->peak_hold[peak_bin];
 
-                // Calculate screen position for closest peak
-                float peak_x = x + peak_bin * bin_width;
+                // Calculate screen position for closest peak using zoom/pan
+                float peak_freq_norm = (float)peak_bin / (float)(fft_bins - 1);
+                float peak_x = x + (peak_freq_norm - pan) * zoom * width;
                 float peak_y = y + height - (peak_mag * height);
 
                 // Calculate frequency and dB
@@ -897,6 +960,7 @@ void gui_fft_render(fft_state_t *state, float x, float y,
                 // Draw label text
                 fft_draw_text_mono(fonts, peak_label, label_x, label_y,
                                    FONT_SIZE_OSC_SCALE, COLOR_TEXT);
+                }  // end if (best_score >= 0)
             } else {
                 // No peak found - deactivate label smoothing
                 state->peak_label_active = false;
@@ -923,8 +987,133 @@ void gui_fft_render(fft_state_t *state, float x, float y,
 #endif
 }
 
-// NOTE: Legacy gui_fft_render_panel() has been removed.
-// All rendering now uses fft_vtable_render() via vtable dispatch.
+//=============================================================================
+// Zoom and Pan Interaction
+//=============================================================================
+
+// Zoom limits
+#define FFT_ZOOM_MIN 1.0f      // No zoom (full spectrum)
+#define FFT_ZOOM_MAX 64.0f     // Maximum zoom (64x)
+#define FFT_ZOOM_FACTOR 1.15f  // Zoom step per scroll tick
+
+// Handle mouse scroll for zoom (X-axis only, centered on mouse position)
+static bool fft_handle_scroll(void *state_ptr, float delta, Rectangle bounds) {
+#if LIBFFTW_ENABLED
+    if (!state_ptr || delta == 0.0f) return false;
+
+    fft_state_t *state = (fft_state_t *)state_ptr;
+    if (!state->initialized) return false;
+
+    Vector2 mouse = GetMousePosition();
+
+    // Check if mouse is inside bounds
+    if (!CheckCollisionPointRec(mouse, bounds)) return false;
+
+    // Calculate the normalized frequency position under mouse before zoom
+    float rel_x = (mouse.x - bounds.x) / bounds.width;  // 0.0 to 1.0
+    float freq_under_mouse = state->pan_offset + rel_x / state->zoom_level;
+
+    // Apply zoom
+    if (delta > 0.0f) {
+        // Scroll up = zoom in
+        state->zoom_level *= FFT_ZOOM_FACTOR;
+        if (state->zoom_level > FFT_ZOOM_MAX) state->zoom_level = FFT_ZOOM_MAX;
+    } else {
+        // Scroll down = zoom out
+        state->zoom_level /= FFT_ZOOM_FACTOR;
+        if (state->zoom_level < FFT_ZOOM_MIN) state->zoom_level = FFT_ZOOM_MIN;
+    }
+
+    // Adjust pan to keep the frequency under mouse at the same screen position
+    // freq_under_mouse = pan_offset + rel_x / zoom_level
+    // => pan_offset = freq_under_mouse - rel_x / zoom_level
+    state->pan_offset = freq_under_mouse - rel_x / state->zoom_level;
+
+    // Clamp pan to valid range [0, 1 - 1/zoom]
+    float max_pan = 1.0f - 1.0f / state->zoom_level;
+    if (max_pan < 0.0f) max_pan = 0.0f;
+    if (state->pan_offset < 0.0f) state->pan_offset = 0.0f;
+    if (state->pan_offset > max_pan) state->pan_offset = max_pan;
+
+    return true;
+#else
+    (void)state_ptr;
+    (void)delta;
+    (void)bounds;
+    return false;
+#endif
+}
+
+// Handle mouse click for drag-to-pan
+static bool fft_handle_click(void *state_ptr, struct gui_app *app, int channel,
+                              Vector2 click, Rectangle bounds) {
+#if LIBFFTW_ENABLED
+    (void)app;
+    (void)channel;
+
+    if (!state_ptr) return false;
+
+    fft_state_t *state = (fft_state_t *)state_ptr;
+    if (!state->initialized) return false;
+
+    // Only allow panning when zoomed in
+    if (state->zoom_level <= 1.0f) return false;
+
+    // Check if click is inside bounds
+    if (!CheckCollisionPointRec(click, bounds)) {
+        state->dragging = false;
+        return false;
+    }
+
+    // Start dragging
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        state->dragging = true;
+        state->drag_start_x = click.x;
+        state->drag_start_pan = state->pan_offset;
+        return true;
+    }
+
+    return false;
+#else
+    (void)state_ptr;
+    (void)app;
+    (void)channel;
+    (void)click;
+    (void)bounds;
+    return false;
+#endif
+}
+
+// Update drag state (call from render to handle continuous drag)
+static void fft_update_drag(fft_state_t *state, Rectangle bounds) {
+#if LIBFFTW_ENABLED
+    if (!state || !state->initialized || !state->dragging) return;
+
+    Vector2 mouse = GetMousePosition();
+
+    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        // Calculate pan delta based on mouse movement
+        float dx = mouse.x - state->drag_start_x;
+        // Convert pixel delta to normalized frequency delta
+        // At zoom_level, the visible frequency range is 1/zoom_level
+        // So pixel movement maps to frequency: dx / width * (1/zoom_level)
+        float freq_delta = -dx / bounds.width / state->zoom_level;
+        state->pan_offset = state->drag_start_pan + freq_delta;
+
+        // Clamp pan to valid range
+        float max_pan = 1.0f - 1.0f / state->zoom_level;
+        if (max_pan < 0.0f) max_pan = 0.0f;
+        if (state->pan_offset < 0.0f) state->pan_offset = 0.0f;
+        if (state->pan_offset > max_pan) state->pan_offset = max_pan;
+    } else {
+        // Mouse released - stop dragging
+        state->dragging = false;
+    }
+#else
+    (void)state;
+    (void)bounds;
+#endif
+}
 
 //=============================================================================
 // Panel Interface (vtable) Implementation
@@ -999,6 +1188,9 @@ static void fft_vtable_render(void *state_ptr, gui_app_t *app, int channel,
         return;
     }
 
+    // Update drag state for pan (continuous while mouse is held)
+    fft_update_drag(fft, bounds);
+
     // Swap buffers to get latest FFT data from display thread
     gui_fft_swap_buffers(fft);
 
@@ -1027,8 +1219,8 @@ static const panel_vtable_t s_fft_vtable = {
     .render_overlay = NULL,  // No overlay for FFT
 
     // Interaction
-    .handle_click = NULL,
-    .handle_scroll = NULL,
+    .handle_click = fft_handle_click,    // Drag to pan
+    .handle_scroll = fft_handle_scroll,  // Scroll to zoom (centered on mouse)
 
     // Menus
     .get_menu_count = NULL,

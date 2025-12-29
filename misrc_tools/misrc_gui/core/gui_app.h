@@ -257,14 +257,13 @@ typedef struct gui_app {
     // Display thread (decoupled from recording path)
     display_thread_t *display_thread;
 
-    // Legacy backpressure statistics (used during migration, will be removed)
-    // TODO: Remove once gui_capture.c is fully migrated to buffer_manager
+    // Backpressure statistics (for debugging buffer contention)
     atomic_uint_fast32_t rb_wait_count;     // Times callback had to wait for buffer space
     atomic_uint_fast32_t rb_drop_count;     // Frames dropped due to full buffer (after timeout)
 
     // Recording state
     double recording_start_time;
-    atomic_uint_fast64_t recording_bytes;        // Legacy: total raw bytes
+    atomic_uint_fast64_t recording_bytes;        // Total raw bytes recorded
     atomic_uint_fast64_t recording_raw_a;        // Raw input bytes channel A
     atomic_uint_fast64_t recording_raw_b;        // Raw input bytes channel B
     atomic_uint_fast64_t recording_compressed_a; // Compressed output bytes channel A

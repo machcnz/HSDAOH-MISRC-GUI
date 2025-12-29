@@ -257,7 +257,6 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
 
     // Initialize lowpass filter state
     decoder->lpf_state = 0;
-    decoder->lpf_output = 0;
 
     // Initialize edge detection state (uses filtered signal)
     decoder->last_filtered_above = true;
@@ -369,7 +368,6 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
 
     // Reset lowpass filter state
     decoder->lpf_state = 0;
-    decoder->lpf_output = 0;
 
     // Reset edge detection state (uses filtered signal)
     decoder->last_filtered_above = true;
@@ -1269,9 +1267,6 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
         }
     }
 }
-
-// NOTE: Legacy gui_cvbs_render_panel() and gui_cvbs_overlay_handle_click() have been removed.
-// All rendering and click handling now uses vtable dispatch.
 
 //=============================================================================
 // Panel Interface (vtable) Implementation

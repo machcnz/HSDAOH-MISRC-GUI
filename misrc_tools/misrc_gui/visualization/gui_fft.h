@@ -74,8 +74,8 @@ typedef struct fft_state {
     float *magnitude_back;     // fft_bins floats, written by display thread
     atomic_int magnitude_ready; // 1 when back buffer has new data to swap
 
-    // Legacy magnitude pointer (points to front buffer for compatibility)
-    float *magnitude;          // Alias to magnitude_front
+    // Alias to magnitude_front for render-thread access
+    float *magnitude;
 
     // Peak-hold magnitude for stable peak detection (max-hold with decay)
     float *peak_hold;          // fft_bins floats, decayed peak envelope
@@ -97,6 +97,13 @@ typedef struct fft_state {
     float peak_label_y;        // Smoothed Y position for peak label
     int peak_label_bin;        // Last selected peak bin (for label content)
     bool peak_label_active;    // Whether label is currently being displayed
+
+    // Zoom and pan state (X-axis only, frequency domain)
+    float zoom_level;          // Zoom factor (1.0 = full spectrum, >1 = zoomed in)
+    float pan_offset;          // Pan offset in normalized frequency (0.0 - 1.0 range)
+    bool dragging;             // Currently dragging to pan
+    float drag_start_x;        // Mouse X position at drag start
+    float drag_start_pan;      // Pan offset at drag start
 } fft_state_t;
 
 //-----------------------------------------------------------------------------
@@ -153,7 +160,5 @@ void gui_fft_swap_buffers(fft_state_t *state);
 //   fonts: Font array (index 0 = Inter, index 1 = Space Mono), NULL for default
 void gui_fft_render(fft_state_t *state, float x, float y,
                     float width, float height, Color color, Font *fonts);
-
-// NOTE: Legacy gui_fft_render_panel() removed - rendering uses vtable dispatch.
 
 #endif // GUI_FFT_H

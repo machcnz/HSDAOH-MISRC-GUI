@@ -44,16 +44,6 @@ typedef struct {
     panel_menu_item_t menu_items[7];
 } histogram_panel_state_t;
 
-// NOTE: Legacy s_histogram_overlay[] array has been removed.
-// All click handling now uses vtable dispatch with self-contained state.
-
-
-// NOTE: Legacy render_histogram_bins_overlay() has been removed.
-// Overlay rendering now uses histogram_vtable_render_overlay() with self-contained state.
-
-// NOTE: Legacy gui_histogram_render_panel() and gui_histogram_overlay_handle_click()
-// have been removed. All rendering and click handling now uses vtable dispatch.
-
 //-----------------------------------------------------------------------------
 // Histogram Panel Processing (called from display thread)
 //-----------------------------------------------------------------------------

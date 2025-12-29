@@ -21,6 +21,7 @@
 #include "../input/gui_capture.h"
 #include "../processing/gui_extract.h"
 #include "../visualization/gui_oscilloscope.h"
+#include "../visualization/gui_panel.h"
 #include "../ui/gui_dropdown.h"
 #include "../ui/gui_popup.h"
 #include "../output/gui_record.h"
@@ -244,6 +245,12 @@ int main(int argc, char **argv) {
 
         // Handle oscilloscope mouse interaction (drag to set trigger level)
         handle_oscilloscope_interaction(&app);
+
+        // Handle panel scroll events (e.g., FFT zoom)
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0.0f) {
+            panel_handle_all_scrolls(&app, wheel);
+        }
 
         // Render
         BeginDrawing();

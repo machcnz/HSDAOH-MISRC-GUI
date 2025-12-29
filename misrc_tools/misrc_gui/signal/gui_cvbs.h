@@ -153,7 +153,6 @@ typedef struct cvbs_decoder {
 
     // Lowpass filter state for sync detection (fixed-point Q16)
     int32_t lpf_state;             // IIR lowpass filter accumulator (Q16 fixed-point)
-    int32_t lpf_output;            // Filtered signal value (unused, kept for ABI)
 
     // Edge detection state (persistent across buffers)
     bool last_filtered_above;      // Was last filtered sample above threshold?
@@ -166,7 +165,7 @@ typedef struct cvbs_decoder {
     // V-sync detector state (separate from H-sync)
     size_t vsync_last_edge_pos;    // Position of last falling edge for V-sync
 
-    // Legacy sync tracking (kept for compatibility)
+    // Sync tracking state
     cvbs_levels_t levels;          // Current signal levels
     int lines_since_vsync;         // Lines counted since last V-sync detection
 
