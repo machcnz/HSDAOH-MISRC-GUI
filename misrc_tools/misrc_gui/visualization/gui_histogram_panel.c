@@ -7,12 +7,18 @@
 
 #include "gui_histogram_panel.h"
 #include "../core/gui_app.h"
-#include "../processing/gui_display_thread.h"
 #include "../ui/gui_ui.h"
 #include "../ui/gui_dropdown.h"
 #include "gui_text.h"
 #include <math.h>
 #include <stdio.h>
+
+//-----------------------------------------------------------------------------
+// Rendering Configuration
+//-----------------------------------------------------------------------------
+
+// Set to true for logarithmic Y-axis scaling, false for linear
+static const bool s_use_log_scale = false;
 
 //-----------------------------------------------------------------------------
 // Bin count options for dropdown
@@ -27,63 +33,13 @@ static const int s_num_bin_options = sizeof(s_bin_options) / sizeof(s_bin_option
 
 typedef struct {
     Rectangle button_rect;
-    Rectangle options_rect[7];  // Up to 7 bin options
+    Rectangle options_rect[7];  // Must match s_num_bin_options
     bool is_visible;
     histogram_state_t *hist;    // Pointer to histogram state for this panel
 } histogram_overlay_hitbox_t;
 
 static histogram_overlay_hitbox_t s_histogram_overlay[2];  // One per channel
 
-//-----------------------------------------------------------------------------
-// Heatmap Color Conversion (matches phosphor shader for consistency)
-//-----------------------------------------------------------------------------
-
-// Convert intensity (0.0-1.0) to heatmap color
-// Blue -> Cyan -> Green -> Yellow -> Red
-static Color intensity_to_heatmap(float intensity) {
-    if (intensity < 0.02f) {
-        return (Color){0, 0, 0, 0};  // Transparent for very low values
-    }
-    if (intensity > 1.0f) intensity = 1.0f;
-
-    float r, g, b;
-
-    if (intensity < 0.25f) {
-        // Dark blue to cyan
-        float t = intensity / 0.25f;
-        r = 0.0f;
-        g = 0.078f * t;
-        b = 0.392f + 0.608f * t;
-    } else if (intensity < 0.5f) {
-        // Cyan to green
-        float t = (intensity - 0.25f) / 0.25f;
-        r = 0.0f;
-        g = 0.078f + 0.922f * t;
-        b = 1.0f - 0.784f * t;
-    } else if (intensity < 0.75f) {
-        // Green to yellow
-        float t = (intensity - 0.5f) / 0.25f;
-        r = t;
-        g = 1.0f;
-        b = 0.216f - 0.216f * t;
-    } else {
-        // Yellow to red
-        float t = (intensity - 0.75f) / 0.25f;
-        r = 1.0f;
-        g = 1.0f - 0.706f * t;
-        b = 0.0f;
-    }
-
-    // Alpha: quadratic ramp for better visibility at low intensities
-    float alpha = 0.3f + 0.7f * intensity * intensity;
-
-    return (Color){
-        (unsigned char)(r * 255.0f),
-        (unsigned char)(g * 255.0f),
-        (unsigned char)(b * 255.0f),
-        (unsigned char)(alpha * 255.0f)
-    };
-}
 
 //-----------------------------------------------------------------------------
 // Bins Selector Overlay Rendering
@@ -183,7 +139,7 @@ static void render_histogram_bins_overlay(int channel, histogram_state_t *hist,
 void gui_histogram_render_panel(struct gui_app *app, int channel,
                                 float x, float y, float w, float h,
                                 void *state, Color color) {
-    (void)color;  // Currently unused, could be used for opacity mode
+    (void)app;  // Processing moved to display thread
 
     // Reset overlay visibility at start
     s_histogram_overlay[channel].is_visible = false;
@@ -199,20 +155,8 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
         return;
     }
 
-    // Get raw samples from display thread (not the decimated display_samples)
-    display_thread_t *dt = app->display_thread;
-    const int16_t *samples = NULL;
-    size_t samples_available = 0;
-
-    if (dt && dt->samples.sample_count > 0) {
-        samples = (channel == 0) ? dt->samples.samples_a : dt->samples.samples_b;
-        samples_available = dt->samples.sample_count;
-    }
-
-    // Process raw samples into histogram
-    if (samples && samples_available > 0) {
-        histogram_process(hist, samples, samples_available);
-    }
+    // Note: histogram_process() is now called from the display thread,
+    // not here in the render function. This separates computation from rendering.
 
     // Draw background (same as oscilloscope/FFT panels)
     DrawRectangle((int)x, (int)y, (int)w, (int)h, COLOR_METER_BG);
@@ -236,10 +180,18 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
     }
     if (actual_max < 0.001f) actual_max = 1.0f;  // Avoid division by zero
 
-    // Scale factor: tallest bar reaches 75% of drawable height
-    // height = (bin_value / actual_max) * drawable_height * 0.75
-    // Simplify: height = bin_value * (drawable_height * 0.75 / actual_max)
-    float height_per_unit = (drawable_height * 0.75f) / actual_max;
+    // Calculate scaling factor based on scale mode
+    float height_scale = 0.0f;
+    float log_max = 0.0f;
+    if (s_use_log_scale) {
+        // Log scale: use log10(1 + value * 1000) for better dynamic range
+        log_max = log10f(1.0f + actual_max * 1000.0f);
+        if (log_max < 0.001f) log_max = 1.0f;
+        height_scale = drawable_height / log_max;
+    } else {
+        // Linear scale: tallest bar fills drawable height
+        height_scale = drawable_height / actual_max;
+    }
 
     // Draw histogram bars - two rendering modes based on bin count vs panel width
     if (num_bins <= panel_width) {
@@ -249,16 +201,16 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
         for (int bin = 0; bin < num_bins; bin++) {
             float intensity = hist->bins[bin];
 
-            // Compute bar height: intensity * height_per_unit
-            // This ensures max bin value maps to 75% of drawable height
-            int bar_height = (int)(intensity * height_per_unit);
-            if (bar_height < 1 && intensity > 0.02f) bar_height = 1;
+            int bar_height;
+            if (s_use_log_scale) {
+                float log_val = log10f(1.0f + intensity * 1000.0f);
+                bar_height = (int)(log_val * height_scale);
+            } else {
+                bar_height = (int)(intensity * height_scale);
+            }
+            if (bar_height < 1 && intensity > 0.0001f) bar_height = 1;
 
             if (bar_height > 0) {
-                // Normalized value for color (0.0 to 1.0 based on actual_max)
-                float normalized = intensity / actual_max;
-                Color bar_color = intensity_to_heatmap(normalized);
-
                 // Calculate bar position and width to fill panel without gaps
                 int bar_x = (int)(x + bin * bar_width);
                 int bar_x_next = (int)(x + (bin + 1) * bar_width);
@@ -266,7 +218,7 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
                 if (actual_width < 1) actual_width = 1;
 
                 int bar_y = (int)(y + margin_top + drawable_height - bar_height);
-                DrawRectangle(bar_x, bar_y, actual_width, bar_height, bar_color);
+                DrawRectangle(bar_x, bar_y, actual_width, bar_height, color);
             }
         }
     } else {
@@ -286,19 +238,19 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
                 }
             }
 
-            // Compute bar height: max_val * height_per_unit
-            // This ensures max bin value maps to 75% of drawable height
-            int bar_height = (int)(max_val * height_per_unit);
-            if (bar_height < 1 && max_val > 0.02f) bar_height = 1;
+            int bar_height;
+            if (s_use_log_scale) {
+                float log_val = log10f(1.0f + max_val * 1000.0f);
+                bar_height = (int)(log_val * height_scale);
+            } else {
+                bar_height = (int)(max_val * height_scale);
+            }
+            if (bar_height < 1 && max_val > 0.0001f) bar_height = 1;
 
             if (bar_height > 0) {
-                // Normalized value for color (0.0 to 1.0 based on actual_max)
-                float normalized = max_val / actual_max;
-                Color bar_color = intensity_to_heatmap(normalized);
-
                 int bar_x = (int)x + px;
                 int bar_y = (int)(y + margin_top + drawable_height - bar_height);
-                DrawRectangle(bar_x, bar_y, 1, bar_height, bar_color);
+                DrawRectangle(bar_x, bar_y, 1, bar_height, color);
             }
         }
     }
@@ -376,4 +328,42 @@ bool gui_histogram_overlay_handle_click(struct gui_app *app, int channel,
     }
 
     return false;
+}
+
+//-----------------------------------------------------------------------------
+// Histogram Panel Processing (called from display thread)
+//-----------------------------------------------------------------------------
+
+// Helper to process histogram for a single panel config
+static void process_panel_histograms(const channel_panel_config_t *config,
+                                     const int16_t *samples,
+                                     size_t count) {
+    if (!config) return;
+
+    // Check left panel
+    if (config->left_view == PANEL_VIEW_HISTOGRAM && config->left_state) {
+        histogram_process((histogram_state_t *)config->left_state, samples, count);
+    }
+
+    // Check right panel (only if split mode is active)
+    if (config->split && config->right_view == PANEL_VIEW_HISTOGRAM && config->right_state) {
+        histogram_process((histogram_state_t *)config->right_state, samples, count);
+    }
+}
+
+void gui_histogram_panel_process_all(struct gui_app *app,
+                                     const int16_t *samples_a,
+                                     const int16_t *samples_b,
+                                     size_t count) {
+    if (!app || count == 0) return;
+
+    // Process channel A histograms
+    if (samples_a) {
+        process_panel_histograms(&app->panel_config_a, samples_a, count);
+    }
+
+    // Process channel B histograms
+    if (samples_b) {
+        process_panel_histograms(&app->panel_config_b, samples_b, count);
+    }
 }

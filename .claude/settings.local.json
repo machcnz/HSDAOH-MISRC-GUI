@@ -14,7 +14,8 @@
       "Bash(./build/rebuild-windows.bat)",
       "Bash(taskkill:*)",
       "Bash(dir:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(tree:*)"
     ]
   }
 }

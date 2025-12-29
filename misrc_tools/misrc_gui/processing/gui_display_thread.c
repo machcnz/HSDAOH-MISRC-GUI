@@ -7,6 +7,7 @@
 #include "gui_display_thread.h"
 #include "../core/gui_app.h"
 #include "../signal/gui_cvbs.h"
+#include "../visualization/gui_histogram_panel.h"
 #include "../visualization/gui_oscilloscope.h"
 #include "../../common/buffer_manager.h"
 #include "../../common/buffer.h"
@@ -65,6 +66,9 @@ static int display_thread_func(void *ctx) {
             gui_cvbs_process_buffer(cvbs_b, samples_b, DISPLAY_FRAME_SAMPLES);
             atomic_fetch_sub(&app->cvbs_busy_b, 1);
         }
+
+        /* Histogram processing */
+        gui_histogram_panel_process_all(app, samples_a, samples_b, DISPLAY_FRAME_SAMPLES);
 
         /* Copy samples to output buffer for render thread */
         memcpy(dt->samples.samples_a, samples_a, DISPLAY_CHANNEL_SIZE);

@@ -41,4 +41,22 @@ void gui_histogram_render_panel(struct gui_app *app, int channel,
 bool gui_histogram_overlay_handle_click(struct gui_app *app, int channel,
                                         Vector2 mouse_pos);
 
+//-----------------------------------------------------------------------------
+// Histogram Panel Processing (called from display thread)
+//-----------------------------------------------------------------------------
+
+// Process histograms for all active histogram panels.
+// Iterates through panel configs and calls histogram_process for each.
+// Call this from the display thread with the raw sample data.
+//
+// Parameters:
+//   app: Application state (contains panel configurations)
+//   samples_a: Channel A samples
+//   samples_b: Channel B samples
+//   count: Number of samples per channel
+void gui_histogram_panel_process_all(struct gui_app *app,
+                                     const int16_t *samples_a,
+                                     const int16_t *samples_b,
+                                     size_t count);
+
 #endif // GUI_HISTOGRAM_PANEL_H
