@@ -33,11 +33,19 @@ static const char *s_trigger_mode_labels[] = {
     [TRIGGER_MODE_CVBS_HSYNC] = "CVBS",
 };
 
+static const char *s_render_mode_labels[] = {
+    [WAVEFORM_MODE_LINE] = "Line",
+    [WAVEFORM_MODE_PHOSPHOR] = "Phosphor",
+};
+
 //-----------------------------------------------------------------------------
 // Waveform Panel State (per-panel trigger, resampling, and display)
 //-----------------------------------------------------------------------------
 
 typedef struct {
+    // Render mode (line vs phosphor)
+    waveform_render_mode_t render_mode;
+
     // Trigger settings (per-panel, independent)
     bool trigger_enabled;
     int16_t trigger_level;
@@ -54,20 +62,31 @@ typedef struct {
     size_t display_samples_available;
     atomic_int display_width;
 
-    // Phosphor state (for phosphor mode only)
+    // Phosphor state (allocated on demand for phosphor mode)
     phosphor_rt_t *phosphor;
 
     // Phosphor color mode
     phosphor_color_mode_t phosphor_color;
 
-    // UI overlay state (trigger mode dropdown)
-    Rectangle button_rect;
-    Rectangle options_rect[TRIGGER_MODE_COUNT];
-    bool dropdown_open;
+    // UI overlay state - two dropdowns: render mode and trigger mode
+    Rectangle render_mode_btn_rect;
+    Rectangle render_mode_opts_rect[WAVEFORM_MODE_COUNT];
+    bool render_mode_dropdown_open;
+
+    Rectangle trigger_btn_rect;
+    Rectangle trigger_opts_rect[TRIGGER_MODE_COUNT + 1];  // +1 for "Off"
+    bool trigger_dropdown_open;
+
     panel_menu_item_t menu_items[TRIGGER_MODE_COUNT];
 
     // Drag state for trigger level
     bool dragging;
+
+    // CVBS detected levels (updated when CVBS trigger mode active)
+    int16_t cvbs_sync_level;    // Sync tip level (lowest peak)
+    int16_t cvbs_blank_level;   // Blanking level (second peak)
+    int16_t cvbs_threshold;     // Detection threshold (midpoint)
+    bool cvbs_levels_valid;     // True if levels were successfully detected
 
     // Initialization flag
     bool initialized;
@@ -263,18 +282,69 @@ void draw_channel_grid(float x, float y, float width, float height,
 // Trigger Marker Drawing (for panel state)
 //-----------------------------------------------------------------------------
 
+// Helper to draw a dashed horizontal line
+static void draw_dashed_hline(float x, float y, float w, Color color, float dash_len, float gap_len) {
+    for (float dx = 0; dx < w; dx += dash_len + gap_len) {
+        float dash_end = dx + dash_len;
+        if (dash_end > w) dash_end = w;
+        DrawLineEx((Vector2){x + dx, y}, (Vector2){x + dash_end, y}, 1.0f, color);
+    }
+}
+
 static void draw_panel_trigger_markers(float x, float y, float w, float h,
                                         const waveform_panel_state_t *state,
                                         float amplitude_scale, Color color) {
     if (!state->trigger_enabled) return;
 
-    // Skip drawing trigger markers in CVBS mode (level is auto-detected)
-    if (state->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) return;
-
     float center_y = y + h / 2.0f;
     float scale = (h / 2.0f) * amplitude_scale;
 
-    // Convert trigger level (-2048 to +2047) to normalized (-1 to +1)
+    // CVBS mode: draw detected sync, blanking, and threshold levels
+    if (state->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) {
+        if (!state->cvbs_levels_valid) return;
+
+        // Colors for CVBS levels
+        Color sync_color = { 255, 100, 100, 140 };    // Red-ish for sync tip
+        Color blank_color = { 100, 255, 100, 140 };   // Green-ish for blanking
+        Color thresh_color = { color.r, color.g, color.b, 180 };  // Channel color for threshold
+
+        // Convert levels to Y positions (levels are -2048 to +2047)
+        float sync_y = center_y - (state->cvbs_sync_level / 2048.0f) * scale;
+        float blank_y = center_y - (state->cvbs_blank_level / 2048.0f) * scale;
+        float thresh_y = center_y - (state->cvbs_threshold / 2048.0f) * scale;
+
+        // Clamp to bounds
+        if (sync_y < y) sync_y = y;
+        if (sync_y > y + h) sync_y = y + h;
+        if (blank_y < y) blank_y = y;
+        if (blank_y > y + h) blank_y = y + h;
+        if (thresh_y < y) thresh_y = y;
+        if (thresh_y > y + h) thresh_y = y + h;
+
+        // Draw sync tip level (dotted)
+        draw_dashed_hline(x, sync_y, w, sync_color, 4.0f, 4.0f);
+
+        // Draw blanking level (dotted)
+        draw_dashed_hline(x, blank_y, w, blank_color, 4.0f, 4.0f);
+
+        // Draw threshold level (dashed, more prominent)
+        draw_dashed_hline(x, thresh_y, w, thresh_color, 8.0f, 4.0f);
+
+        // Draw labels on right edge
+        gui_text_draw_mono("S", x + w - 12, sync_y - 6, FONT_SIZE_OSC_SCALE, sync_color);
+        gui_text_draw_mono("B", x + w - 12, blank_y - 6, FONT_SIZE_OSC_SCALE, blank_color);
+        gui_text_draw_mono("T", x + w - 12, thresh_y - 6, FONT_SIZE_OSC_SCALE, thresh_color);
+
+        // Draw vertical trigger position marker at actual trigger position (if triggered)
+        if (state->trigger_display_pos >= 0 && state->trigger_display_pos < (int)w) {
+            float trigger_x = x + (float)state->trigger_display_pos;
+            Color marker_color = { color.r, color.g, color.b, 80 };
+            DrawLineEx((Vector2){trigger_x, y}, (Vector2){trigger_x, y + h}, 1.0f, marker_color);
+        }
+        return;
+    }
+
+    // Normal trigger mode: draw single trigger level line
     float level_norm = state->trigger_level / 2048.0f;
     float level_y = center_y - level_norm * scale;
 
@@ -284,13 +354,7 @@ static void draw_panel_trigger_markers(float x, float y, float w, float h,
 
     // Draw dashed trigger level line (semi-transparent channel color)
     Color trig_color = { color.r, color.g, color.b, 128 };
-    float dash_len = 8.0f;
-    float gap_len = 4.0f;
-    for (float dx = 0; dx < w; dx += dash_len + gap_len) {
-        float dash_end = dx + dash_len;
-        if (dash_end > w) dash_end = w;
-        DrawLineEx((Vector2){x + dx, level_y}, (Vector2){x + dash_end, level_y}, 1.0f, trig_color);
-    }
+    draw_dashed_hline(x, level_y, w, trig_color, 8.0f, 4.0f);
 
     // Draw small trigger arrow on the left edge
     float arrow_size = 6.0f;
@@ -706,6 +770,23 @@ static void waveform_vtable_process(void *state_ptr, const int16_t *samples,
     if (!state_ptr || !samples || count == 0) return;
 
     waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    // Update CVBS levels when in CVBS trigger mode
+    if (state->trigger_enabled && state->trigger_mode == TRIGGER_MODE_CVBS_HSYNC) {
+        cvbs_levels_t levels;
+        trigger_analyze_cvbs_levels(samples, count, &levels);
+        if (levels.range >= 100) {
+            state->cvbs_sync_level = levels.sig_min;
+            state->cvbs_blank_level = levels.black_level;
+            state->cvbs_threshold = levels.sync_threshold;
+            state->cvbs_levels_valid = true;
+        } else {
+            state->cvbs_levels_valid = false;
+        }
+    } else {
+        state->cvbs_levels_valid = false;
+    }
+
     waveform_process_display(state, samples, count);
 }
 
@@ -713,9 +794,12 @@ static void waveform_vtable_process(void *state_ptr, const int16_t *samples,
 // Waveform Line Panel Vtable
 //-----------------------------------------------------------------------------
 
-static void *waveform_line_create(void) {
+static void *waveform_create(void) {
     waveform_panel_state_t *state = calloc(1, sizeof(waveform_panel_state_t));
     if (!state) return NULL;
+
+    // Default to phosphor mode
+    state->render_mode = WAVEFORM_MODE_PHOSPHOR;
 
     // Initialize trigger settings with defaults
     state->trigger_enabled = false;
@@ -732,85 +816,73 @@ static void *waveform_line_create(void) {
     state->resampler = NULL;
     state->resampler_ratio = 0.0f;
 
-    // No phosphor for line mode
-    state->phosphor = NULL;
+    // Allocate phosphor state (used when in phosphor mode)
+    state->phosphor = calloc(1, sizeof(phosphor_rt_t));
+    if (!state->phosphor) {
+        free(state);
+        return NULL;
+    }
     state->phosphor_color = PHOSPHOR_COLOR_HEATMAP;
 
     // UI state
-    state->dropdown_open = false;
+    state->render_mode_dropdown_open = false;
+    state->trigger_dropdown_open = false;
     state->dragging = false;
 
     state->initialized = true;
     return state;
 }
 
-static void waveform_line_destroy(void *state_ptr) {
+static void waveform_destroy(void *state_ptr) {
     if (!state_ptr) return;
     waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
 
     waveform_cleanup_resampler(state);
-    // Line mode has no phosphor to clean up
+
+    // Clean up phosphor
+    if (state->phosphor) {
+        phosphor_rt_cleanup(state->phosphor);
+        free(state->phosphor);
+        state->phosphor = NULL;
+    }
 
     free(state);
 }
 
-static void waveform_line_clear(void *state_ptr) {
+static void waveform_clear(void *state_ptr) {
     if (!state_ptr) return;
     waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
 
     state->display_samples_available = 0;
     state->trigger_display_pos = -1;
+
+    // Clear phosphor persistence if in phosphor mode
+    if (state->phosphor) {
+        phosphor_rt_clear(state->phosphor);
+    }
 }
 
 //-----------------------------------------------------------------------------
-// Waveform Panel Overlay (Trigger Mode Dropdown)
+// Waveform Panel Overlay (Render Mode + Trigger Mode Dropdowns)
 //-----------------------------------------------------------------------------
 
-static void waveform_render_overlay(void *state_ptr, Rectangle bounds) {
-    if (!state_ptr) return;
-    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+// Helper to draw a dropdown button with label
+static void draw_dropdown_button(Rectangle btn, const char *label, bool is_open) {
+    Color btn_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    DrawRectangleRounded(btn, 0.15f, 4, btn_bg);
 
-    if (!state->initialized) return;
-
-    // Format current trigger mode
-    const char *mode_label;
-    if (!state->trigger_enabled) {
-        mode_label = "Off";
-    } else {
-        mode_label = s_trigger_mode_labels[state->trigger_mode];
-    }
-
-    // Button dimensions (similar to histogram)
-    float btn_w = 60, btn_h = 18;
-    float btn_x = bounds.x + bounds.width - btn_w - 8;
-    float btn_y = bounds.y + 8;
-
-    // Draw "Trigger:" label before the dropdown button
-    const char *trig_label = "Trig:";
-    int trig_label_w = gui_text_measure(trig_label, FONT_SIZE_DROPDOWN_OPT);
-    float label_x = btn_x - trig_label_w - 6;
-    float label_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
-    gui_text_draw(trig_label, label_x, label_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT_DIM);
-
-    state->button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
-
-    // Draw button
-    Color btn_bg = state->dropdown_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
-    DrawRectangleRounded(state->button_rect, 0.15f, 4, btn_bg);
-
-    // Draw text centered with arrow
-    int text_w = gui_text_measure(mode_label, FONT_SIZE_DROPDOWN_OPT);
+    int text_w = gui_text_measure(label, FONT_SIZE_DROPDOWN_OPT);
     float arrow_w = 8;
     float total_w = text_w + arrow_w + 4;
-    float text_x = btn_x + (btn_w - total_w) / 2;
-    float text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
-    gui_text_draw(mode_label, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+    float text_x = btn.x + (btn.width - total_w) / 2;
+    float text_y = btn.y + (btn.height - FONT_SIZE_DROPDOWN_OPT) / 2;
+    gui_text_draw(label, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
     // Draw arrow
     float arrow_size = 5.0f;
     float arrow_x = text_x + text_w + 6;
-    float arrow_cy = btn_y + btn_h / 2;
-    if (state->dropdown_open) {
+    float arrow_cy = btn.y + btn.height / 2;
+    if (is_open) {
         Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
         Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
         Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
@@ -821,48 +893,117 @@ static void waveform_render_overlay(void *state_ptr, Rectangle bounds) {
         Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
         DrawTriangle(bottom, right, left, COLOR_TEXT);
     }
+}
 
-    // Draw dropdown options if open
-    if (state->dropdown_open) {
+static void waveform_render_overlay(void *state_ptr, Rectangle bounds) {
+    if (!state_ptr) return;
+    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
+
+    if (!state->initialized) return;
+
+    float btn_h = 18;
+    float btn_y = bounds.y + 8;
+    Vector2 mouse = GetMousePosition();
+
+    // Button widths
+    float trig_btn_w = 65;
+    float render_btn_w = 85;  // Larger for render mode with label
+
+    //-------------------------------------------------------------------------
+    // Trigger Mode Dropdown (top-right, rightmost)
+    //-------------------------------------------------------------------------
+    float trig_btn_x = bounds.x + bounds.width - trig_btn_w - 8;
+    state->trigger_btn_rect = (Rectangle){trig_btn_x, btn_y, trig_btn_w, btn_h};
+
+    // Draw "Trig:" label
+    const char *trig_prefix = "Trig:";
+    int trig_prefix_w = gui_text_measure(trig_prefix, FONT_SIZE_DROPDOWN_OPT);
+    gui_text_draw(trig_prefix, trig_btn_x - trig_prefix_w - 4,
+                  btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2,
+                  FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT_DIM);
+
+    const char *trig_label = state->trigger_enabled ? s_trigger_mode_labels[state->trigger_mode] : "Off";
+    draw_dropdown_button(state->trigger_btn_rect, trig_label, state->trigger_dropdown_open);
+
+    // Draw trigger dropdown options if open
+    if (state->trigger_dropdown_open) {
         float opt_y = btn_y + btn_h;
         float opt_h = 20;
-        int num_options = TRIGGER_MODE_COUNT + 1;  // +1 for "Off" option
+        int num_options = TRIGGER_MODE_COUNT + 1;  // +1 for "Off"
 
-        DrawRectangleRounded((Rectangle){btn_x, opt_y, btn_w, opt_h * num_options},
+        DrawRectangleRounded((Rectangle){trig_btn_x, opt_y, trig_btn_w, opt_h * num_options},
                              0.1f, 4, COLOR_PANEL_BG);
 
         // Option 0: Off
-        Rectangle off_rect = {btn_x, opt_y, btn_w, opt_h};
-        state->options_rect[0] = off_rect;  // Store in first slot (repurpose)
+        Rectangle off_rect = {trig_btn_x, opt_y, trig_btn_w, opt_h};
+        state->trigger_opts_rect[0] = off_rect;
 
         bool is_off = !state->trigger_enabled;
-        Vector2 mouse = GetMousePosition();
         bool hover_off = CheckCollisionPointRec(mouse, off_rect);
-
-        Color off_bg = gui_dropdown_option_color(is_off, hover_off);
-        DrawRectangleRec(off_rect, off_bg);
+        DrawRectangleRec(off_rect, gui_dropdown_option_color(is_off, hover_off));
 
         const char *off_label = "Off";
-        int off_text_w = gui_text_measure(off_label, FONT_SIZE_DROPDOWN_OPT);
-        float off_text_x = btn_x + btn_w/2 - off_text_w/2;
-        float off_text_y = opt_y + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
-        gui_text_draw(off_label, off_text_x, off_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        int off_w = gui_text_measure(off_label, FONT_SIZE_DROPDOWN_OPT);
+        gui_text_draw(off_label, trig_btn_x + trig_btn_w/2 - off_w/2,
+                      opt_y + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2,
+                      FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
         // Options 1..N: Trigger modes
         for (int i = 0; i < TRIGGER_MODE_COUNT; i++) {
-            Rectangle opt_rect = {btn_x, opt_y + (i + 1) * opt_h, btn_w, opt_h};
-            state->options_rect[i] = opt_rect;
+            Rectangle opt_rect = {trig_btn_x, opt_y + (i + 1) * opt_h, trig_btn_w, opt_h};
+            state->trigger_opts_rect[i + 1] = opt_rect;
 
             bool is_selected = state->trigger_enabled && (state->trigger_mode == (trigger_mode_t)i);
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+
+            DrawRectangleRec(opt_rect, gui_dropdown_option_color(is_selected, hover));
+
+            const char *opt_label = s_trigger_mode_labels[i];
+            int opt_w = gui_text_measure(opt_label, FONT_SIZE_DROPDOWN_OPT);
+            gui_text_draw(opt_label, trig_btn_x + trig_btn_w/2 - opt_w/2,
+                          opt_y + (i + 1) * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2,
+                          FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // Render Mode Dropdown (to the left of trigger)
+    //-------------------------------------------------------------------------
+    float render_btn_x = trig_btn_x - trig_prefix_w - 8 - render_btn_w - 8;
+    state->render_mode_btn_rect = (Rectangle){render_btn_x, btn_y, render_btn_w, btn_h};
+
+    // Draw "Mode:" label
+    const char *mode_prefix = "Mode:";
+    int mode_prefix_w = gui_text_measure(mode_prefix, FONT_SIZE_DROPDOWN_OPT);
+    gui_text_draw(mode_prefix, render_btn_x - mode_prefix_w - 4,
+                  btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2,
+                  FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT_DIM);
+
+    const char *render_label = s_render_mode_labels[state->render_mode];
+    draw_dropdown_button(state->render_mode_btn_rect, render_label, state->render_mode_dropdown_open);
+
+    // Draw render mode dropdown options if open
+    if (state->render_mode_dropdown_open) {
+        float opt_y = btn_y + btn_h;
+        float opt_h = 20;
+
+        DrawRectangleRounded((Rectangle){render_btn_x, opt_y, render_btn_w, opt_h * WAVEFORM_MODE_COUNT},
+                             0.1f, 4, COLOR_PANEL_BG);
+
+        for (int i = 0; i < WAVEFORM_MODE_COUNT; i++) {
+            Rectangle opt_rect = {render_btn_x, opt_y + i * opt_h, render_btn_w, opt_h};
+            state->render_mode_opts_rect[i] = opt_rect;
+
+            bool is_selected = (state->render_mode == (waveform_render_mode_t)i);
             bool hover = CheckCollisionPointRec(mouse, opt_rect);
 
             Color opt_bg = gui_dropdown_option_color(is_selected, hover);
             DrawRectangleRec(opt_rect, opt_bg);
 
-            const char *opt_label = s_trigger_mode_labels[i];
+            const char *opt_label = s_render_mode_labels[i];
             int opt_text_w = gui_text_measure(opt_label, FONT_SIZE_DROPDOWN_OPT);
-            float opt_text_x = btn_x + btn_w/2 - opt_text_w/2;
-            float opt_text_y = opt_y + (i + 1) * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+            float opt_text_x = render_btn_x + render_btn_w/2 - opt_text_w/2;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
             gui_text_draw(opt_label, opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
         }
     }
@@ -879,42 +1020,72 @@ static bool waveform_panel_handle_click(void *state_ptr, struct gui_app *app, in
     if (!state_ptr || !app) return false;
     waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
 
-    // Check button click (toggle dropdown)
-    if (CheckCollisionPointRec(click, state->button_rect)) {
-        state->dropdown_open = !state->dropdown_open;
+    //-------------------------------------------------------------------------
+    // Render Mode Dropdown
+    //-------------------------------------------------------------------------
+    if (CheckCollisionPointRec(click, state->render_mode_btn_rect)) {
+        state->render_mode_dropdown_open = !state->render_mode_dropdown_open;
+        state->trigger_dropdown_open = false;  // Close other dropdown
         return true;
     }
 
-    // Check option clicks if dropdown is open
-    if (state->dropdown_open) {
-        // Check "Off" option (stored in options_rect[0] when dropdown open)
-        Rectangle off_rect = {state->button_rect.x, state->button_rect.y + state->button_rect.height,
-                              state->button_rect.width, 20};
+    if (state->render_mode_dropdown_open) {
+        for (int i = 0; i < WAVEFORM_MODE_COUNT; i++) {
+            Rectangle opt_rect = {state->render_mode_btn_rect.x,
+                                  state->render_mode_btn_rect.y + state->render_mode_btn_rect.height + i * 20,
+                                  state->render_mode_btn_rect.width, 20};
+            if (CheckCollisionPointRec(click, opt_rect)) {
+                state->render_mode = (waveform_render_mode_t)i;
+                state->render_mode_dropdown_open = false;
+                return true;
+            }
+        }
+        // Click outside closes dropdown
+        state->render_mode_dropdown_open = false;
+        return true;
+    }
+
+    //-------------------------------------------------------------------------
+    // Trigger Mode Dropdown
+    //-------------------------------------------------------------------------
+    if (CheckCollisionPointRec(click, state->trigger_btn_rect)) {
+        state->trigger_dropdown_open = !state->trigger_dropdown_open;
+        state->render_mode_dropdown_open = false;  // Close other dropdown
+        return true;
+    }
+
+    if (state->trigger_dropdown_open) {
+        // Check "Off" option
+        Rectangle off_rect = {state->trigger_btn_rect.x,
+                              state->trigger_btn_rect.y + state->trigger_btn_rect.height,
+                              state->trigger_btn_rect.width, 20};
         if (CheckCollisionPointRec(click, off_rect)) {
             state->trigger_enabled = false;
-            state->dropdown_open = false;
+            state->trigger_dropdown_open = false;
             return true;
         }
 
         // Check trigger mode options
         for (int i = 0; i < TRIGGER_MODE_COUNT; i++) {
-            Rectangle opt_rect = {state->button_rect.x,
-                                  state->button_rect.y + state->button_rect.height + (i + 1) * 20,
-                                  state->button_rect.width, 20};
+            Rectangle opt_rect = {state->trigger_btn_rect.x,
+                                  state->trigger_btn_rect.y + state->trigger_btn_rect.height + (i + 1) * 20,
+                                  state->trigger_btn_rect.width, 20};
             if (CheckCollisionPointRec(click, opt_rect)) {
                 state->trigger_enabled = true;
                 state->trigger_mode = (trigger_mode_t)i;
-                state->dropdown_open = false;
+                state->trigger_dropdown_open = false;
                 return true;
             }
         }
 
-        // Click outside dropdown closes it
-        state->dropdown_open = false;
+        // Click outside closes dropdown
+        state->trigger_dropdown_open = false;
         return true;
     }
 
-    // Check if click is within bounds for trigger level drag
+    //-------------------------------------------------------------------------
+    // Trigger Level Drag
+    //-------------------------------------------------------------------------
     if (!CheckCollisionPointRec(click, bounds)) {
         return false;
     }
@@ -1004,8 +1175,8 @@ static bool waveform_panel_handle_scroll(void *state_ptr, float delta, Rectangle
     return true;
 }
 
-static void waveform_line_render(void *state_ptr, gui_app_t *app, int channel,
-                                  Rectangle bounds, Color channel_color) {
+static void waveform_render(void *state_ptr, gui_app_t *app, int channel,
+                             Rectangle bounds, Color channel_color) {
     if (!app || !state_ptr) return;
 
     waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
@@ -1022,16 +1193,25 @@ static void waveform_line_render(void *state_ptr, gui_app_t *app, int channel,
         }
     }
 
-    render_waveform_line_internal(state, app, channel, bounds, channel_color);
+    // Dispatch based on render mode
+    if (state->render_mode == WAVEFORM_MODE_PHOSPHOR) {
+        render_waveform_phosphor_internal(state, app, channel, bounds, channel_color);
+    } else {
+        render_waveform_line_internal(state, app, channel, bounds, channel_color);
+    }
 }
 
-static const panel_vtable_t s_waveform_line_vtable = {
-    .name = "Line",
-    .create = waveform_line_create,
-    .destroy = waveform_line_destroy,
-    .clear = waveform_line_clear,
+//-----------------------------------------------------------------------------
+// Unified Waveform Panel Vtable
+//-----------------------------------------------------------------------------
+
+static const panel_vtable_t s_waveform_vtable = {
+    .name = "Waveform",
+    .create = waveform_create,
+    .destroy = waveform_destroy,
+    .clear = waveform_clear,
     .process = waveform_vtable_process,
-    .render = waveform_line_render,
+    .render = waveform_render,
     .render_overlay = waveform_render_overlay,
     .handle_click = waveform_panel_handle_click,
     .handle_scroll = waveform_panel_handle_scroll,
@@ -1039,113 +1219,6 @@ static const panel_vtable_t s_waveform_line_vtable = {
     .get_menu = NULL,
 };
 
-void gui_waveform_line_panel_register(void) {
-    panel_register(PANEL_VIEW_WAVEFORM_LINE, &s_waveform_line_vtable);
-}
-
-//-----------------------------------------------------------------------------
-// Waveform Phosphor Panel Vtable
-//-----------------------------------------------------------------------------
-
-static void *waveform_phosphor_create(void) {
-    waveform_panel_state_t *state = calloc(1, sizeof(waveform_panel_state_t));
-    if (!state) return NULL;
-
-    // Initialize trigger settings with defaults
-    state->trigger_enabled = false;
-    state->trigger_level = 0;
-    state->trigger_mode = TRIGGER_MODE_RISING;
-    state->zoom_scale = ZOOM_SCALE_DEFAULT;
-    state->trigger_display_pos = -1;
-
-    // Initialize display state
-    atomic_init(&state->display_width, DISPLAY_BUFFER_SIZE);
-    state->display_samples_available = 0;
-
-    // Resampler initialized on demand
-    state->resampler = NULL;
-    state->resampler_ratio = 0.0f;
-
-    // Allocate phosphor state for phosphor mode
-    state->phosphor = calloc(1, sizeof(phosphor_rt_t));
-    if (!state->phosphor) {
-        free(state);
-        return NULL;
-    }
-    state->phosphor_color = PHOSPHOR_COLOR_HEATMAP;
-
-    // UI state
-    state->dropdown_open = false;
-    state->dragging = false;
-
-    state->initialized = true;
-    return state;
-}
-
-static void waveform_phosphor_destroy(void *state_ptr) {
-    if (!state_ptr) return;
-    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
-
-    waveform_cleanup_resampler(state);
-
-    // Clean up phosphor
-    if (state->phosphor) {
-        phosphor_rt_cleanup(state->phosphor);
-        free(state->phosphor);
-        state->phosphor = NULL;
-    }
-
-    free(state);
-}
-
-static void waveform_phosphor_clear(void *state_ptr) {
-    if (!state_ptr) return;
-    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
-
-    state->display_samples_available = 0;
-    state->trigger_display_pos = -1;
-
-    // Clear phosphor persistence
-    if (state->phosphor) {
-        phosphor_rt_clear(state->phosphor);
-    }
-}
-
-static void waveform_phosphor_render(void *state_ptr, gui_app_t *app, int channel,
-                                      Rectangle bounds, Color channel_color) {
-    if (!app || !state_ptr) return;
-
-    waveform_panel_state_t *state = (waveform_panel_state_t *)state_ptr;
-    if (!state->initialized) return;
-
-    // Update drag state for trigger level (continuous while mouse is held)
-    waveform_panel_update_drag(state, app, bounds);
-
-    // Set cursor when hovering over waveform panel or dragging
-    Vector2 mouse = GetMousePosition();
-    if (!gui_popup_is_open()) {
-        if (CheckCollisionPointRec(mouse, bounds) || state->dragging) {
-            SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
-        }
-    }
-
-    render_waveform_phosphor_internal(state, app, channel, bounds, channel_color);
-}
-
-static const panel_vtable_t s_waveform_phosphor_vtable = {
-    .name = "Phosphor",
-    .create = waveform_phosphor_create,
-    .destroy = waveform_phosphor_destroy,
-    .clear = waveform_phosphor_clear,
-    .process = waveform_vtable_process,
-    .render = waveform_phosphor_render,
-    .render_overlay = waveform_render_overlay,
-    .handle_click = waveform_panel_handle_click,
-    .handle_scroll = waveform_panel_handle_scroll,
-    .get_menu_count = NULL,
-    .get_menu = NULL,
-};
-
-void gui_waveform_phosphor_panel_register(void) {
-    panel_register(PANEL_VIEW_WAVEFORM_PHOSPHOR, &s_waveform_phosphor_vtable);
+void gui_waveform_panel_register(void) {
+    panel_register(PANEL_VIEW_WAVEFORM, &s_waveform_vtable);
 }

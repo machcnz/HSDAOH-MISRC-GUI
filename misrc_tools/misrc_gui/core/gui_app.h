@@ -19,14 +19,20 @@ typedef struct display_thread display_thread_t;
 //-----------------------------------------------------------------------------
 
 typedef enum {
-    PANEL_VIEW_WAVEFORM_LINE,      // Simple line oscilloscope (fast)
-    PANEL_VIEW_WAVEFORM_PHOSPHOR,  // Digital phosphor with persistence
+    PANEL_VIEW_WAVEFORM,           // Waveform oscilloscope (line or phosphor mode)
     PANEL_VIEW_FFT,                // FFT spectrum analysis
     PANEL_VIEW_CVBS,               // CVBS luma decoder view
     PANEL_VIEW_HISTOGRAM,          // Amplitude histogram
     PANEL_VIEW_COUNT
     // Future: PANEL_VIEW_XY, PANEL_VIEW_SPECTROGRAM
 } panel_view_type_t;
+
+// Waveform render modes (selected via dropdown on panel)
+typedef enum {
+    WAVEFORM_MODE_LINE,            // Simple line waveform (fast)
+    WAVEFORM_MODE_PHOSPHOR,        // Digital phosphor with persistence
+    WAVEFORM_MODE_COUNT
+} waveform_render_mode_t;
 
 // Per-Channel Panel Configuration
 typedef struct channel_panel_config {

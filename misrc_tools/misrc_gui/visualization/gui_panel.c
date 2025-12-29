@@ -19,8 +19,7 @@
 //-----------------------------------------------------------------------------
 
 static const char* s_view_names[] = {
-    [PANEL_VIEW_WAVEFORM_LINE] = "Line",
-    [PANEL_VIEW_WAVEFORM_PHOSPHOR] = "Phosphor",
+    [PANEL_VIEW_WAVEFORM] = "Waveform",
     [PANEL_VIEW_FFT] = "FFT",
     [PANEL_VIEW_CVBS] = "CVBS",
     [PANEL_VIEW_HISTOGRAM] = "Histogram",
@@ -33,8 +32,7 @@ const char* panel_view_type_name(panel_view_type_t type) {
 
 bool panel_view_type_available(panel_view_type_t type) {
     switch (type) {
-        case PANEL_VIEW_WAVEFORM_LINE:
-        case PANEL_VIEW_WAVEFORM_PHOSPHOR:
+        case PANEL_VIEW_WAVEFORM:
         case PANEL_VIEW_CVBS:
         case PANEL_VIEW_HISTOGRAM:
             return true;
@@ -156,7 +154,7 @@ void render_channel_panels(gui_app_t *app, int channel,
 
 void panel_config_init_default(channel_panel_config_t *config) {
     config->split = false;
-    config->left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
+    config->left_view = PANEL_VIEW_WAVEFORM;
     config->right_view = PANEL_VIEW_FFT;
     // Create initial state for the default left view
     config->left_state = panel_create_view_state(config->left_view);

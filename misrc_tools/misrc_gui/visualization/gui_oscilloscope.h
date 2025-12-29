@@ -17,8 +17,7 @@
 // Panel Registration
 //-----------------------------------------------------------------------------
 
-void gui_waveform_line_panel_register(void);
-void gui_waveform_phosphor_panel_register(void);
+void gui_waveform_panel_register(void);
 
 //-----------------------------------------------------------------------------
 // Phosphor Parameters

@@ -70,7 +70,7 @@ void panel_instance_destroy(panel_instance_t *instance) {
 
     instance->state = NULL;
     instance->vtable = NULL;
-    instance->type = PANEL_VIEW_WAVEFORM_LINE;
+    instance->type = PANEL_VIEW_WAVEFORM;
     instance->last_bounds = (Rectangle){0};
 }
 

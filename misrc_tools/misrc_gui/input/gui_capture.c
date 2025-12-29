@@ -224,8 +224,7 @@ void gui_app_init(gui_app_t *app) {
     // Initialize panel registry and register all panel types
     // This must happen before any panel state is created
     panel_registry_init();
-    gui_waveform_line_panel_register();
-    gui_waveform_phosphor_panel_register();
+    gui_waveform_panel_register();
     gui_fft_panel_register();
     gui_cvbs_panel_register();
     gui_histogram_panel_register();
@@ -307,15 +306,15 @@ void gui_app_init(gui_app_t *app) {
 
     // Initialize panel configuration (new panel abstraction system)
     app->panel_config_a.split = true;
-    app->panel_config_a.left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
+    app->panel_config_a.left_view = PANEL_VIEW_WAVEFORM;
     app->panel_config_a.right_view = PANEL_VIEW_FFT;
-    app->panel_config_a.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM_PHOSPHOR);
+    app->panel_config_a.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM);
     app->panel_config_a.right_state = panel_create_view_state(PANEL_VIEW_FFT);
 
     app->panel_config_b.split = true;
-    app->panel_config_b.left_view = PANEL_VIEW_WAVEFORM_PHOSPHOR;
+    app->panel_config_b.left_view = PANEL_VIEW_WAVEFORM;
     app->panel_config_b.right_view = PANEL_VIEW_FFT;
-    app->panel_config_b.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM_PHOSPHOR);
+    app->panel_config_b.left_state = panel_create_view_state(PANEL_VIEW_WAVEFORM);
     app->panel_config_b.right_state = panel_create_view_state(PANEL_VIEW_FFT);
 
     // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
