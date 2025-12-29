@@ -481,16 +481,14 @@ void bufmgr_dump_status(buffer_manager_t *mgr) {
 void bufmgr_log_periodic(buffer_manager_t *mgr) {
     if (!mgr) return;
 
-    /* Build compact one-line status for each initialized buffer */
-    /* Format: [BUFMGR] CAP_RF:45% DISPLAY:12% (waits:5 drops:0) */
+    /* Build compact one-line status showing per-buffer fill/wait/drop */
+    /* Format: [BUFMGR] RF:45%/0/0 DISP:12%/0/0 (fill%/waits/drops) */
 
     char line[512];
     int pos = 0;
     pos += snprintf(line + pos, sizeof(line) - pos, "[BUFMGR] ");
 
     int active_count = 0;
-    uint32_t total_waits = 0;
-    uint32_t total_drops = 0;
 
     for (int i = 0; i < BUF_COUNT; i++) {
         if (!mgr->initialized[i]) continue;
@@ -498,9 +496,6 @@ void bufmgr_log_periodic(buffer_manager_t *mgr) {
         float fill_pct = bufmgr_fill_percent(mgr, (buffer_id_t)i) * 100.0f;
         uint32_t waits = atomic_load(&mgr->stats[i].write_waits);
         uint32_t drops = atomic_load(&mgr->stats[i].write_drops);
-
-        total_waits += waits;
-        total_drops += drops;
 
         /* Short name for buffer */
         const char *short_name;
@@ -516,13 +511,12 @@ void bufmgr_log_periodic(buffer_manager_t *mgr) {
         if (active_count > 0) {
             pos += snprintf(line + pos, sizeof(line) - pos, " ");
         }
-        pos += snprintf(line + pos, sizeof(line) - pos, "%s:%.0f%%", short_name, fill_pct);
+        pos += snprintf(line + pos, sizeof(line) - pos, "%s:%.0f%%/%u/%u",
+                        short_name, fill_pct, waits, drops);
         active_count++;
     }
 
     if (active_count > 0) {
-        pos += snprintf(line + pos, sizeof(line) - pos, " (waits:%u drops:%u)",
-                        total_waits, total_drops);
         fprintf(stderr, "%s\n", line);
     }
 }
