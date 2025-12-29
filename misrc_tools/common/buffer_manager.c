@@ -58,14 +58,14 @@ static const backpressure_policy_t s_default_policies[BUF_COUNT] = {
         .log_drops = true,
     },
     [BUF_RECORD_A] = {
-        .max_wait_attempts = 100,
-        .wait_timeout_ms = 10,
+        .max_wait_attempts = 200,
+        .wait_timeout_ms = 5,
         .log_first_wait = true,
         .log_drops = true,
     },
     [BUF_RECORD_B] = {
-        .max_wait_attempts = 100,
-        .wait_timeout_ms = 10,
+        .max_wait_attempts = 200,
+        .wait_timeout_ms = 5,
         .log_first_wait = true,
         .log_drops = true,
     },
@@ -175,6 +175,9 @@ void bufmgr_reset(buffer_manager_t *mgr, buffer_id_t id) {
     /* Reset head/tail pointers atomically */
     atomic_store(&mgr->buffers[id].head, 0);
     atomic_store(&mgr->buffers[id].tail, 0);
+
+    /* Also reset stats for this buffer */
+    memset(&mgr->stats[id], 0, sizeof(buffer_stats_t));
 
     fprintf(stderr, "[BUFMGR] Reset buffer '%s'\n", mgr->configs[id].name);
 }

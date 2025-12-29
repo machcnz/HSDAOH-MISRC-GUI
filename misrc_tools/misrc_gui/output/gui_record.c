@@ -125,6 +125,9 @@ static int flac_writer_thread(void *ctx) {
     size_t len = BUFFER_READ_SIZE * sizeof(int32_t);
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
 
+    // Boost thread priority to avoid backpressure when window is minimized
+    thrd_set_priority(THRD_PRIORITY_ABOVE);
+
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
@@ -179,6 +182,9 @@ static int raw_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
     size_t len = BUFFER_READ_SIZE * bps;
+
+    // Boost thread priority to avoid backpressure when window is minimized
+    thrd_set_priority(THRD_PRIORITY_ABOVE);
 
     fprintf(stderr, "[RAW] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
@@ -464,13 +470,15 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_start_wait_count = atomic_load(&app->rb_wait_count);
         s_start_drop_count = atomic_load(&app->rb_drop_count);
 
-        // Mark as recording and start writer threads
+        // Boost process priority during recording - affects all threads including FLAC encoder threads
+        proc_set_priority(PROC_PRIORITY_ABOVE);
+
+        // Mark as recording
         app->is_recording = true;
         app->recording_start_time = GetTime();
 
-        // Enable recording in extraction thread
-        gui_extract_set_recording(true, true, bits_a, bits_b);
-
+        // Start writer threads BEFORE enabling recording in extraction thread
+        // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
             thrd_create(&s_writer_thread_a, flac_writer_thread, &s_ctx_a);
         }
@@ -478,6 +486,12 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             thrd_create(&s_writer_thread_b, flac_writer_thread, &s_ctx_b);
         }
         s_writer_threads_running = true;
+
+        // Small delay to let writer threads initialize and start waiting on buffers
+        thrd_sleep_ms(10);
+
+        // Now enable recording in extraction thread - data will start flowing
+        gui_extract_set_recording(true, true, bits_a, bits_b);
 
         // Start audio output/monitoring (if enabled)
         gui_audio_start(app, &app->buffers);
@@ -517,13 +531,15 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_start_wait_count = atomic_load(&app->rb_wait_count);
         s_start_drop_count = atomic_load(&app->rb_drop_count);
 
-        // Mark as recording and start writer threads
+        // Boost process priority during recording
+        proc_set_priority(PROC_PRIORITY_ABOVE);
+
+        // Mark as recording
         app->is_recording = true;
         app->recording_start_time = GetTime();
 
-        // Enable recording in extraction thread
-        gui_extract_set_recording(true, false, bits_a, bits_b);
-
+        // Start writer threads BEFORE enabling recording in extraction thread
+        // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
             thrd_create(&s_writer_thread_a, raw_writer_thread, &s_ctx_a);
         }
@@ -531,6 +547,12 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             thrd_create(&s_writer_thread_b, raw_writer_thread, &s_ctx_b);
         }
         s_writer_threads_running = true;
+
+        // Small delay to let writer threads initialize and start waiting on buffers
+        thrd_sleep_ms(10);
+
+        // Now enable recording in extraction thread - data will start flowing
+        gui_extract_set_recording(true, false, bits_a, bits_b);
 
         // Start audio output/monitoring (if enabled)
         gui_audio_start(app, &app->buffers);
@@ -553,6 +575,9 @@ void gui_record_stop(gui_app_t *app) {
 
     // Stop audio output/monitoring
     gui_audio_stop(app);
+
+    // Restore normal process priority
+    proc_set_priority(PROC_PRIORITY_NORMAL);
 
     // Signal threads to stop
     app->is_recording = false;
