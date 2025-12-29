@@ -35,38 +35,10 @@ static void gui_oscilloscope_cleanup_resampler(channel_trigger_t *trig);
 // Static State
 //-----------------------------------------------------------------------------
 
-// Waveform panel bounds for mouse interaction (stored per channel)
-// In split mode, there can be up to 2 waveform panels per channel (left + right)
-// We track bounds for waveform panels specifically, not FFT panels
-typedef struct {
-    Rectangle bounds;
-    bool valid;
-} panel_bounds_t;
-
-static panel_bounds_t s_waveform_bounds[2][2] = {0};  // [channel][panel_index]
-static int s_waveform_panel_count[2] = {0, 0};        // How many waveform panels per channel
-static int s_dragging_channel = -1;  // Which channel is being dragged (-1 = none)
-
-// Clear waveform bounds for a channel (call before rendering panels)
-void gui_oscilloscope_clear_bounds(int channel) {
-    if (channel >= 0 && channel < 2) {
-        s_waveform_panel_count[channel] = 0;
-        s_waveform_bounds[channel][0].valid = false;
-        s_waveform_bounds[channel][1].valid = false;
-    }
-}
-
-// Register waveform panel bounds (call from waveform renderers)
-static void register_waveform_bounds(int channel, float x, float y, float w, float h) {
-    if (channel >= 0 && channel < 2) {
-        int idx = s_waveform_panel_count[channel];
-        if (idx < 2) {
-            s_waveform_bounds[channel][idx].bounds = (Rectangle){x, y, w, h};
-            s_waveform_bounds[channel][idx].valid = true;
-            s_waveform_panel_count[channel]++;
-        }
-    }
-}
+// Note: Waveform panel bounds are now tracked via panel_config_t.left_bounds/right_bounds
+// in gui_panel.c. The old s_waveform_bounds system has been removed.
+// Forward declaration for cursor management
+static bool waveform_is_dragging(void);
 
 // Cleanup oscilloscope resources (static state)
 void gui_oscilloscope_cleanup(void) {
@@ -310,9 +282,6 @@ void render_waveform_line(gui_app_t *app, int channel,
     channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
     const char *label = (channel == 0) ? "CH A" : "CH B";
 
-    // Register bounds for mouse interaction (trigger level drag)
-    register_waveform_bounds(channel, x, y, w, h);
-
     // Draw grid with labels first
     uint32_t sample_rate = atomic_load(&app->sample_rate);
     draw_channel_grid(x, y, w, h, label, color, app->settings.show_grid,
@@ -368,9 +337,6 @@ void render_waveform_phosphor(gui_app_t *app, int channel,
                               float x, float y, float w, float h, Color color) {
     channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
     const char *label = (channel == 0) ? "CH A" : "CH B";
-
-    // Register bounds for mouse interaction (trigger level drag)
-    register_waveform_bounds(channel, x, y, w, h);
 
     // Draw grid with labels first
     uint32_t sample_rate = atomic_load(&app->sample_rate);
@@ -454,9 +420,6 @@ void render_oscilloscope_channel(gui_app_t *app, float x, float y, float width, 
     // Get trigger state for this channel
     channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
 
-    // Clear waveform bounds before rendering (waveform renderers will register their bounds)
-    gui_oscilloscope_clear_bounds(channel);
-
     // Store actual display width for the processing thread (atomic for thread safety)
     if (channel >= 0 && channel < 2) {
         int new_display_width = (int)width;
@@ -471,90 +434,9 @@ void render_oscilloscope_channel(gui_app_t *app, float x, float y, float width, 
     render_channel_panels(app, channel, x, y, width, height, channel_color);
 }
 
-//-----------------------------------------------------------------------------
-// Mouse Interaction
-//-----------------------------------------------------------------------------
-
-void handle_oscilloscope_interaction(gui_app_t *app) {
-    if (!app) return;
-
-    // Don't process clicks if UI already consumed them (dropdown, popup, etc.)
-    if (gui_ui_click_consumed()) return;
-
-    Vector2 mouse = GetMousePosition();
-    bool mouse_down = IsMouseButtonDown(MOUSE_LEFT_BUTTON);
-    bool mouse_pressed = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
-    bool mouse_released = IsMouseButtonReleased(MOUSE_LEFT_BUTTON);
-
-    // Check if mouse is over a waveform panel (not FFT)
-    int hover_channel = -1;
-    for (int ch = 0; ch < 2; ch++) {
-        for (int p = 0; p < s_waveform_panel_count[ch]; p++) {
-            if (s_waveform_bounds[ch][p].valid) {
-                Rectangle bounds = s_waveform_bounds[ch][p].bounds;
-                if (mouse.x >= bounds.x && mouse.x < bounds.x + bounds.width &&
-                    mouse.y >= bounds.y && mouse.y < bounds.y + bounds.height) {
-                    hover_channel = ch;
-                    break;
-                }
-            }
-        }
-        if (hover_channel >= 0) break;
-    }
-
-    // Start dragging on mouse press over waveform panel
-    if (mouse_pressed && hover_channel >= 0) {
-        s_dragging_channel = hover_channel;
-        // Enable trigger when starting to drag
-        channel_trigger_t *trig = (hover_channel == 0) ? &app->trigger_a : &app->trigger_b;
-        trig->enabled = true;
-    }
-
-    // Update trigger level while dragging
-    if (mouse_down && s_dragging_channel >= 0) {
-        int ch = s_dragging_channel;
-        // Use the first waveform panel bounds for this channel (they all share the same height)
-        if (s_waveform_panel_count[ch] > 0 && s_waveform_bounds[ch][0].valid) {
-            Rectangle bounds = s_waveform_bounds[ch][0].bounds;
-            channel_trigger_t *trig = (ch == 0) ? &app->trigger_a : &app->trigger_b;
-
-            // Convert mouse Y to trigger level
-            // bounds.y is top (level = +2047)
-            // bounds.y + bounds.height is bottom (level = -2048)
-            // center is level = 0
-
-            float center_y = bounds.y + bounds.height / 2.0f;
-            float half_height = (bounds.height / 2.0f) * app->settings.amplitude_scale;
-
-            // Calculate normalized level (-1 to +1)
-            float level_norm = (center_y - mouse.y) / half_height;
-
-            // Clamp to valid range
-            if (level_norm > 1.0f) level_norm = 1.0f;
-            if (level_norm < -1.0f) level_norm = -1.0f;
-
-            // Convert to 12-bit signed value
-            trig->level = (int16_t)(level_norm * 2047.0f);
-        }
-    }
-
-    // Stop dragging on mouse release
-    if (mouse_released) {
-        s_dragging_channel = -1;
-    }
-
-    // Note: Mouse wheel zoom is now handled via vtable (waveform_handle_scroll)
-    // through the unified panel scroll handling system (panel_handle_all_scrolls)
-
-    // Change cursor when hovering over oscilloscope (but not when popup is open)
-    if (gui_popup_is_open()) {
-        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-    } else if (hover_channel >= 0 || s_dragging_channel >= 0) {
-        SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
-    } else {
-        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-    }
-}
+// Note: Mouse interaction (click/drag, scroll) is now handled via vtable
+// (waveform_handle_click, waveform_handle_scroll) and dispatched through
+// the unified panel handling system (panel_handle_all_clicks, panel_handle_all_scrolls)
 
 //-----------------------------------------------------------------------------
 // Trigger Detection (wrappers to gui_trigger module)
@@ -869,8 +751,80 @@ static bool waveform_handle_scroll(void *state, float delta, Rectangle bounds) {
     return true;
 }
 
-// Global app pointer for waveform scroll handler (set during render)
+// Global app pointer for waveform scroll/click handlers (set during render)
 gui_app_t *g_app_ptr = NULL;
+
+// Drag state for trigger level adjustment
+static int s_vtable_dragging_channel = -1;  // -1 = not dragging, 0/1 = channel being dragged
+static Rectangle s_vtable_drag_bounds = {0};  // Bounds of the panel being dragged
+
+//-----------------------------------------------------------------------------
+// Waveform Panel Click Handler (shared by line and phosphor)
+//-----------------------------------------------------------------------------
+
+static bool waveform_handle_click(void *state, struct gui_app *app, int channel,
+                                   Vector2 click, Rectangle bounds) {
+    (void)state;  // Waveform uses app->trigger state, not per-panel state
+
+    if (!app) return false;
+
+    // Check if click is within bounds
+    if (!CheckCollisionPointRec(click, bounds)) {
+        return false;
+    }
+
+    // Start dragging on mouse press
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        s_vtable_dragging_channel = channel;
+        s_vtable_drag_bounds = bounds;
+
+        // Enable trigger when starting to drag
+        channel_trigger_t *trig = (channel == 0) ? &app->trigger_a : &app->trigger_b;
+        trig->enabled = true;
+
+        return true;
+    }
+
+    return false;
+}
+
+// Update drag state for trigger level (call from render to handle continuous drag)
+static void waveform_update_drag(gui_app_t *app) {
+    if (!app || s_vtable_dragging_channel < 0) return;
+
+    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        Vector2 mouse = GetMousePosition();
+        int ch = s_vtable_dragging_channel;
+        Rectangle bounds = s_vtable_drag_bounds;
+        channel_trigger_t *trig = (ch == 0) ? &app->trigger_a : &app->trigger_b;
+
+        // Convert mouse Y to trigger level
+        // bounds.y is top (level = +2047)
+        // bounds.y + bounds.height is bottom (level = -2048)
+        // center is level = 0
+
+        float center_y = bounds.y + bounds.height / 2.0f;
+        float half_height = (bounds.height / 2.0f) * app->settings.amplitude_scale;
+
+        // Calculate normalized level (-1 to +1)
+        float level_norm = (center_y - mouse.y) / half_height;
+
+        // Clamp to valid range
+        if (level_norm > 1.0f) level_norm = 1.0f;
+        if (level_norm < -1.0f) level_norm = -1.0f;
+
+        // Convert to 12-bit signed value
+        trig->level = (int16_t)(level_norm * 2047.0f);
+    } else {
+        // Mouse released - stop dragging
+        s_vtable_dragging_channel = -1;
+    }
+}
+
+// Check if waveform is currently being dragged (for cursor management)
+static bool waveform_is_dragging(void) {
+    return s_vtable_dragging_channel >= 0;
+}
 
 //-----------------------------------------------------------------------------
 // Waveform Line Panel Vtable
@@ -895,8 +849,19 @@ static void waveform_line_render(void *state, gui_app_t *app, int channel,
 
     if (!app) return;
 
-    // Set global app pointer for scroll handler
+    // Set global app pointer for scroll/click handlers
     g_app_ptr = app;
+
+    // Update drag state for trigger level (continuous while mouse is held)
+    waveform_update_drag(app);
+
+    // Set cursor when hovering over waveform panel or dragging
+    Vector2 mouse = GetMousePosition();
+    if (!gui_popup_is_open()) {
+        if (CheckCollisionPointRec(mouse, bounds) || waveform_is_dragging()) {
+            SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+        }
+    }
 
     // Delegate to existing render function
     render_waveform_line(app, channel, bounds.x, bounds.y,
@@ -911,7 +876,7 @@ static const panel_vtable_t s_waveform_line_vtable = {
     .process = NULL,  // Waveform uses resampled display samples
     .render = waveform_line_render,
     .render_overlay = NULL,
-    .handle_click = NULL,  // Trigger drag handled by handle_oscilloscope_interaction()
+    .handle_click = waveform_handle_click,    // Trigger level drag
     .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
     .get_menu_count = NULL,
     .get_menu = NULL,
@@ -944,8 +909,19 @@ static void waveform_phosphor_render(void *state, gui_app_t *app, int channel,
 
     if (!app) return;
 
-    // Set global app pointer for scroll handler
+    // Set global app pointer for scroll/click handlers
     g_app_ptr = app;
+
+    // Update drag state for trigger level (continuous while mouse is held)
+    waveform_update_drag(app);
+
+    // Set cursor when hovering over waveform panel or dragging
+    Vector2 mouse = GetMousePosition();
+    if (!gui_popup_is_open()) {
+        if (CheckCollisionPointRec(mouse, bounds) || waveform_is_dragging()) {
+            SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+        }
+    }
 
     // Delegate to existing render function
     render_waveform_phosphor(app, channel, bounds.x, bounds.y,
@@ -960,7 +936,7 @@ static const panel_vtable_t s_waveform_phosphor_vtable = {
     .process = NULL,
     .render = waveform_phosphor_render,
     .render_overlay = NULL,
-    .handle_click = NULL,  // Trigger drag handled by handle_oscilloscope_interaction()
+    .handle_click = waveform_handle_click,    // Trigger level drag
     .handle_scroll = waveform_handle_scroll,  // Time-axis zoom
     .get_menu_count = NULL,
     .get_menu = NULL,

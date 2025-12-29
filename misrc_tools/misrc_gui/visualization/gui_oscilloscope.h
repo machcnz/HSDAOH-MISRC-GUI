@@ -68,13 +68,8 @@ void render_waveform_phosphor(gui_app_t *app, int channel,
 void render_oscilloscope_channel(gui_app_t *app, float x, float y, float width, float height,
                                   int channel, const char *label, Color channel_color);
 
-// Clear waveform panel bounds for a channel (called before rendering)
-void gui_oscilloscope_clear_bounds(int channel);
-
-// Handle oscilloscope mouse interaction (drag to set trigger level, scroll to zoom)
-// Only responds to clicks on waveform panels, not FFT panels
-// Call this each frame after rendering
-void handle_oscilloscope_interaction(gui_app_t *app);
+// Note: Mouse interaction (click/drag, scroll) is now handled via panel vtable
+// system - see panel_handle_all_clicks() and panel_handle_all_scrolls()
 
 //-----------------------------------------------------------------------------
 // Trigger Detection

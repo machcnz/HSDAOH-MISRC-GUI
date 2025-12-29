@@ -20,7 +20,6 @@
 #include "../visualization/gui_text.h"
 #include "../input/gui_capture.h"
 #include "../processing/gui_extract.h"
-#include "../visualization/gui_oscilloscope.h"
 #include "../visualization/gui_panel.h"
 #include "../ui/gui_dropdown.h"
 #include "../ui/gui_popup.h"
@@ -243,10 +242,7 @@ int main(int argc, char **argv) {
         // Handle Clay interactions
         gui_handle_interactions(&app);
 
-        // Handle oscilloscope mouse interaction (drag to set trigger level)
-        handle_oscilloscope_interaction(&app);
-
-        // Handle panel scroll events (e.g., FFT zoom)
+        // Handle panel scroll events (e.g., waveform/FFT zoom)
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) {
             panel_handle_all_scrolls(&app, wheel);
@@ -254,6 +250,10 @@ int main(int argc, char **argv) {
 
         // Render
         BeginDrawing();
+
+        // Reset cursor to default at start of frame
+        // (Panels will set crosshair cursor when hovering/dragging via their render functions)
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
         ClearBackground(COLOR_BG);
 
         // Render Clay UI (custom elements are handled via CLAY_RENDER_COMMAND_TYPE_CUSTOM)
