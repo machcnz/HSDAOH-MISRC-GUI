@@ -132,15 +132,15 @@ static void histogram_vtable_process(void *state_ptr, const int16_t *samples, si
 // Rendering Functions
 //-----------------------------------------------------------------------------
 
-// Internal render function (shared by legacy and vtable paths)
+// Internal render function
 static void histogram_render_internal(histogram_state_t *hist, Rectangle bounds, Color color) {
     if (!hist || !hist->initialized) {
         // Draw "No Histogram" message if state is invalid
         const char *text = "No Histogram";
-        int text_width = MeasureText(text, FONT_SIZE_OSC_MSG);
-        DrawText(text, (int)(bounds.x + bounds.width/2 - text_width/2),
-                 (int)(bounds.y + bounds.height/2 - 12),
-                 FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
+        int text_width = gui_text_measure(text, FONT_SIZE_OSC_MSG);
+        gui_text_draw(text, bounds.x + bounds.width/2 - text_width/2,
+                      bounds.y + bounds.height/2 - 12,
+                      FONT_SIZE_OSC_MSG, COLOR_TEXT_DIM);
         return;
     }
 
@@ -148,14 +148,15 @@ static void histogram_render_internal(histogram_state_t *hist, Rectangle bounds,
 
     // Draw background
     DrawRectangle((int)x, (int)y, (int)w, (int)h, COLOR_METER_BG);
-    DrawRectangleLinesEx(bounds, 1, COLOR_GRID_MAJOR);
 
-    // Calculate bin rendering parameters
+    // Calculate bin rendering parameters - labels drawn inside panel at bottom
     int panel_width = (int)w;
     int num_bins = hist->num_bins;
-    float margin_bottom = 20.0f;
-    float margin_top = 10.0f;
-    float drawable_height = h - margin_bottom - margin_top;
+    float label_height = 18.0f;  // Height reserved for bottom labels
+    float top_margin = 1.0f;     // Small margin at top for border
+    float bottom_margin = 1.0f;  // Small margin at bottom above labels
+    float drawable_height = h - label_height - top_margin - bottom_margin;
+    float draw_y_start = y + top_margin;  // Y position where bars start (top)
 
     // Find actual maximum
     float actual_max = 0.0f;
@@ -164,17 +165,32 @@ static void histogram_render_internal(histogram_state_t *hist, Rectangle bounds,
     }
     if (actual_max < 0.001f) actual_max = 1.0f;
 
-    // Calculate scaling
+    // Calculate scaling - limit to 95% of drawable height for headroom
+    float max_height_ratio = 0.95f;
     float height_scale, log_max = 0.0f;
     if (s_use_log_scale) {
         log_max = log10f(1.0f + actual_max * 1000.0f);
         if (log_max < 0.001f) log_max = 1.0f;
-        height_scale = drawable_height / log_max;
+        height_scale = (drawable_height * max_height_ratio) / log_max;
     } else {
-        height_scale = drawable_height / actual_max;
+        height_scale = (drawable_height * max_height_ratio) / actual_max;
     }
 
-    // Draw bars
+    // Draw vertical grid lines (matching FFT/oscilloscope style)
+    // Center line (0V position) - major grid
+    float center_x = x + w / 2.0f;
+    float draw_y_end = draw_y_start + drawable_height;
+    DrawLineV((Vector2){center_x, draw_y_start}, (Vector2){center_x, draw_y_end}, COLOR_GRID_MAJOR);
+
+    // Quarter grid lines (at -0.5 and +0.5)
+    float quarter_x = x + w / 4.0f;
+    float three_quarter_x = x + 3.0f * w / 4.0f;
+    DrawLineV((Vector2){quarter_x, draw_y_start}, (Vector2){quarter_x, draw_y_end}, COLOR_GRID);
+    DrawLineV((Vector2){three_quarter_x, draw_y_start}, (Vector2){three_quarter_x, draw_y_end}, COLOR_GRID);
+
+    // Draw bars - bars grow upward from draw_y_end
+    int max_bar_height = (int)drawable_height;  // Clamp to drawable area
+
     if (num_bins <= panel_width) {
         float bar_width = (float)panel_width / (float)num_bins;
         for (int bin = 0; bin < num_bins; bin++) {
@@ -186,13 +202,14 @@ static void histogram_render_internal(histogram_state_t *hist, Rectangle bounds,
                 bar_height = (int)(intensity * height_scale);
             }
             if (bar_height < 1 && intensity > 0.0001f) bar_height = 1;
+            if (bar_height > max_bar_height) bar_height = max_bar_height;  // Clamp
 
             if (bar_height > 0) {
                 int bar_x = (int)(x + bin * bar_width);
                 int bar_x_next = (int)(x + (bin + 1) * bar_width);
                 int actual_width = bar_x_next - bar_x;
                 if (actual_width < 1) actual_width = 1;
-                int bar_y = (int)(y + margin_top + drawable_height - bar_height);
+                int bar_y = (int)(draw_y_end - bar_height);
                 DrawRectangle(bar_x, bar_y, actual_width, bar_height, color);
             }
         }
@@ -215,42 +232,47 @@ static void histogram_render_internal(histogram_state_t *hist, Rectangle bounds,
                 bar_height = (int)(max_val * height_scale);
             }
             if (bar_height < 1 && max_val > 0.0001f) bar_height = 1;
+            if (bar_height > max_bar_height) bar_height = max_bar_height;  // Clamp
 
             if (bar_height > 0) {
                 int bar_x = (int)x + px;
-                int bar_y = (int)(y + margin_top + drawable_height - bar_height);
+                int bar_y = (int)(draw_y_end - bar_height);
                 DrawRectangle(bar_x, bar_y, 1, bar_height, color);
             }
         }
     }
 
-    // Draw center line
-    int center_x = (int)(x + w / 2);
-    DrawLine(center_x, (int)(y + margin_top), center_x,
-             (int)(y + margin_top + drawable_height), COLOR_GRID);
+    // Draw horizontal line at bottom of histogram area (above labels)
+    DrawLine((int)x, (int)draw_y_end, (int)(x + w), (int)draw_y_end, COLOR_GRID);
 
-    // Draw quarter grid lines
-    for (int i = 1; i < 4; i++) {
-        int grid_x = (int)(x + (w * i) / 4);
-        DrawLine(grid_x, (int)(y + margin_top), grid_x,
-                 (int)(y + margin_top + drawable_height),
-                 (Color){COLOR_GRID.r, COLOR_GRID.g, COLOR_GRID.b, 60});
-    }
+    // Border (matching FFT/oscilloscope style)
+    DrawRectangleLinesEx(bounds, 1, COLOR_GRID_MAJOR);
 
-    // Draw axis labels
-    Font font = GetFontDefault();
-    int font_size = FONT_SIZE_OSC_SCALE;
+    // Draw axis labels with monospace font (matching FFT style)
+    // Labels are drawn at the bottom inside the panel, below the separator line
+    float label_y = draw_y_end + 2;
 
-    DrawTextEx(font, "-1", (Vector2){x + 2, y + h - margin_bottom + 2},
-               font_size, 1, COLOR_TEXT_DIM);
+    // "-1" label at left
+    gui_text_draw_mono("-1", x + 4, label_y, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
 
-    Vector2 zero_size = MeasureTextEx(font, "0", font_size, 1);
-    DrawTextEx(font, "0", (Vector2){x + w/2 - zero_size.x/2, y + h - margin_bottom + 2},
-               font_size, 1, COLOR_TEXT_DIM);
+    // "-0.5" label at quarter
+    int half_neg_w = gui_text_measure_mono("-0.5", FONT_SIZE_OSC_SCALE);
+    gui_text_draw_mono("-0.5", quarter_x - half_neg_w / 2, label_y, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
 
-    Vector2 pos_size = MeasureTextEx(font, "+1", font_size, 1);
-    DrawTextEx(font, "+1", (Vector2){x + w - pos_size.x - 2, y + h - margin_bottom + 2},
-               font_size, 1, COLOR_TEXT_DIM);
+    // "0" label at center
+    int zero_w = gui_text_measure_mono("0", FONT_SIZE_OSC_SCALE);
+    gui_text_draw_mono("0", center_x - zero_w / 2, label_y, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
+
+    // "+0.5" label at three-quarter
+    int half_pos_w = gui_text_measure_mono("+0.5", FONT_SIZE_OSC_SCALE);
+    gui_text_draw_mono("+0.5", three_quarter_x - half_pos_w / 2, label_y, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
+
+    // "+1" label at right
+    int pos_w = gui_text_measure_mono("+1", FONT_SIZE_OSC_SCALE);
+    gui_text_draw_mono("+1", x + w - pos_w - 4, label_y, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
+
+    // Draw "Histogram" label in top-left corner
+    gui_text_draw("Histogram", x + 8, y + 4, FONT_SIZE_OSC_LABEL, COLOR_TEXT);
 }
 
 static void histogram_vtable_render(void *state_ptr, gui_app_t *app, int channel,
@@ -278,6 +300,13 @@ static void histogram_vtable_render_overlay(void *state_ptr, Rectangle bounds) {
     float btn_w = 55, btn_h = 18;
     float btn_x = bounds.x + bounds.width - btn_w - 8;
     float btn_y = bounds.y + 8;
+
+    // Draw "Bins:" label before the dropdown button
+    const char *bins_label = "Bins:";
+    int bins_label_w = gui_text_measure(bins_label, FONT_SIZE_DROPDOWN_OPT);
+    float label_x = btn_x - bins_label_w - 6;
+    float label_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+    gui_text_draw(bins_label, label_x, label_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT_DIM);
 
     state->button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
 

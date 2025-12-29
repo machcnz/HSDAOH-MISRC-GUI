@@ -11,12 +11,8 @@
 #include "../core/gui_app.h"
 #include "gui_oscilloscope.h"
 #include "gui_fft.h"
-#include "gui_histogram_panel.h"
-#include "../signal/gui_cvbs.h"
-#include "../signal/gui_histogram.h"
 #include "../ui/gui_ui.h"
 #include <stdio.h>
-#include <stdlib.h>
 
 //-----------------------------------------------------------------------------
 // View Type Names (for UI dropdowns)
@@ -54,102 +50,48 @@ bool panel_view_type_available(panel_view_type_t type) {
 //-----------------------------------------------------------------------------
 
 void* panel_create_view_state(panel_view_type_t type) {
-    switch (type) {
-        case PANEL_VIEW_WAVEFORM_LINE:
-        case PANEL_VIEW_WAVEFORM_PHOSPHOR:
-            // Waveform views use shared phosphor from app, no per-panel state
-            return NULL;
-        case PANEL_VIEW_FFT: {
-            fft_state_t *fft = malloc(sizeof(fft_state_t));
-            if (fft) {
-                if (gui_fft_init(fft)) {
-                    return fft;
-                }
-                free(fft);
-            }
-            return NULL;
-        }
-        case PANEL_VIEW_CVBS: {
-            // Use vtable factory to create CVBS decoder state
-            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
-            if (vtable && vtable->create) {
-                return vtable->create();
-            }
-            return NULL;
-        }
-        case PANEL_VIEW_HISTOGRAM: {
-            histogram_state_t *hist = malloc(sizeof(histogram_state_t));
-            if (hist) {
-                if (histogram_init(hist, HISTOGRAM_DEFAULT_NUM_BINS)) {
-                    return hist;
-                }
-                free(hist);
-            }
-            return NULL;
-        }
-        default:
-            return NULL;
+    // Waveform views use shared phosphor from app, no per-panel state
+    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
+        return NULL;
     }
+
+    // Use vtable factory if registered (preferred path for all panel types)
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+    if (vtable && vtable->create) {
+        return vtable->create();
+    }
+
+    // Fallback for legacy panels without vtable (should not be reached)
+    return NULL;
 }
 
 void panel_destroy_view_state(panel_view_type_t type, void *state) {
     if (!state) return;
 
-    switch (type) {
-        case PANEL_VIEW_WAVEFORM_LINE:
-        case PANEL_VIEW_WAVEFORM_PHOSPHOR:
-            // No state to destroy
-            break;
-        case PANEL_VIEW_FFT: {
-            fft_state_t *fft = (fft_state_t*)state;
-            gui_fft_cleanup(fft);
-            free(fft);
-            break;
-        }
-        case PANEL_VIEW_CVBS: {
-            // Use vtable destroy to cleanup CVBS decoder state
-            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
-            if (vtable && vtable->destroy) {
-                vtable->destroy(state);
-            }
-            break;
-        }
-        case PANEL_VIEW_HISTOGRAM: {
-            histogram_state_t *hist = (histogram_state_t*)state;
-            histogram_cleanup(hist);
-            free(hist);
-            break;
-        }
-        default:
-            break;
+    // Waveform views have no state to destroy
+    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
+        return;
+    }
+
+    // Use vtable destroy if registered (handles proper cleanup)
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+    if (vtable && vtable->destroy) {
+        vtable->destroy(state);
     }
 }
 
 void panel_clear_view_state(panel_view_type_t type, void *state) {
     if (!state) return;
 
-    switch (type) {
-        case PANEL_VIEW_WAVEFORM_LINE:
-        case PANEL_VIEW_WAVEFORM_PHOSPHOR:
-            break;
-        case PANEL_VIEW_FFT: {
-            fft_state_t *fft = (fft_state_t*)state;
-            gui_fft_clear(fft);
-            break;
-        }
-        case PANEL_VIEW_CVBS: {
-            // Use vtable clear to reset CVBS decoder state
-            const panel_vtable_t *vtable = panel_get_vtable(PANEL_VIEW_CVBS);
-            if (vtable && vtable->clear) {
-                vtable->clear(state);
-            }
-            break;
-        }
-        case PANEL_VIEW_HISTOGRAM:
-            histogram_clear((histogram_state_t*)state);
-            break;
-        default:
-            break;
+    // Waveform views have no state to clear
+    if (type == PANEL_VIEW_WAVEFORM_LINE || type == PANEL_VIEW_WAVEFORM_PHOSPHOR) {
+        return;
+    }
+
+    // Use vtable clear if registered
+    const panel_vtable_t *vtable = panel_get_vtable(type);
+    if (vtable && vtable->clear) {
+        vtable->clear(state);
     }
 }
 
