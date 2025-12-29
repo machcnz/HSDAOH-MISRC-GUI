@@ -217,12 +217,11 @@ void draw_channel_grid(float x, float y, float width, float height,
                 division_count++;
             }
 
-            // Show time per division in top-right corner (below channel label)
+            // Show time per division in top-left corner (below channel label)
             format_time_label(time_buf, sizeof(time_buf), time_division);
             char div_label[48];
             snprintf(div_label, sizeof(div_label), "%s/div", time_buf);
-            int div_label_w = gui_text_measure_mono(div_label, FONT_SIZE_OSC_DIV);
-            gui_text_draw_mono(div_label, x + width - div_label_w - 8, y + 26, FONT_SIZE_OSC_DIV, COLOR_TEXT);
+            gui_text_draw_mono(div_label, x + 8, y + 26, FONT_SIZE_OSC_DIV, COLOR_TEXT);
         } else {
             // Fallback: fixed divisions when no sample rate available
             const int fixed_divisions = 10;
@@ -256,9 +255,8 @@ void draw_channel_grid(float x, float y, float width, float height,
         gui_text_draw_mono(tick_labels[i], x + 6, tick_y - 7, FONT_SIZE_OSC_SCALE, COLOR_TEXT_DIM);
     }
 
-    // Channel label in top-right corner
-    int label_width = gui_text_measure(label, FONT_SIZE_OSC_LABEL);
-    gui_text_draw(label, x + width - label_width - 8, y + 4, FONT_SIZE_OSC_LABEL, channel_color);
+    // Channel label in top-left corner
+    gui_text_draw(label, x + 8, y + 4, FONT_SIZE_OSC_LABEL, channel_color);
 }
 
 //-----------------------------------------------------------------------------

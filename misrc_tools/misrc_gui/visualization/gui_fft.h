@@ -48,7 +48,7 @@ void gui_fft_panel_register(void);
 #define FFT_DECAY_RATE        0.6f   // Per-frame decay (higher = slower fade)
 #define FFT_HIT_INCREMENT     0.1f    // Intensity added per FFT hit
 #define FFT_BLOOM             1.0f    // Bloom Factor
-#define FFT_EMA_ALPHA         0.70f
+#define FFT_EMA_ALPHA         0.75f
 
 //-----------------------------------------------------------------------------
 // FFT State Structure
