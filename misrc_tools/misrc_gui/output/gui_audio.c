@@ -4,6 +4,7 @@
 #include "../../common/wave.h"
 #include "../../common/threading.h"
 #include "../../common/buffer.h"
+#include "../../common/buffer_manager.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +16,7 @@ extern atomic_int do_exit;
 #define BUFFER_AUDIO_READ_SIZE  (65536 * 3)
 
 typedef struct {
-    ringbuffer_t *rb;
+    buffer_manager_t *bufmgr;
     gui_app_t *app;
 
     FILE *f_4ch;
@@ -100,15 +101,33 @@ static int audio_thread_main(void *ctx)
     }
 
     while (1) {
-        while (((buf = rb_read_ptr(a->rb, len)) == NULL) && !atomic_load(&do_exit) && !atomic_load(&s_audio_stop)) {
-            thrd_sleep_ms(10);
-        }
+        // Read from buffer manager with timeout
+        buf = bufmgr_read_begin(a->bufmgr, BUF_CAPTURE_AUDIO, len, 10);
+        if (!buf) {
+            if (atomic_load(&do_exit) || atomic_load(&s_audio_stop) || !a->app || !a->app->is_capturing) {
+                // Drain any remaining data before exiting
+                size_t remaining = bufmgr_fill_level(a->bufmgr, BUF_CAPTURE_AUDIO);
+                while (remaining > 0) {
+                    size_t drain_len = (remaining < len) ? remaining : len;
+                    buf = bufmgr_read_begin(a->bufmgr, BUF_CAPTURE_AUDIO, drain_len, 0);
+                    if (!buf) break;
 
-        if (atomic_load(&do_exit) || atomic_load(&s_audio_stop) || !a->app || !a->app->is_capturing) {
-            len = a->rb->tail - a->rb->head;
-            if (len == 0) break;
-            buf = rb_read_ptr(a->rb, len);
-            if (!buf) break;
+                    audio_update_peaks(a->app, (const uint8_t *)buf, drain_len);
+                    if (a->f_4ch) fwrite(buf, 1, drain_len, a->f_4ch);
+                    if (a->convert_1ch) extract_audio_1ch_C((uint8_t *)buf, drain_len, a->buffer_1ch[0], a->buffer_1ch[1], a->buffer_1ch[2], a->buffer_1ch[3]);
+                    if (a->convert_2ch) extract_audio_2ch_C((uint16_t *)buf, drain_len, (uint16_t *)a->buffer_2ch[0], (uint16_t *)a->buffer_2ch[1]);
+
+                    bufmgr_read_end(a->bufmgr, BUF_CAPTURE_AUDIO, drain_len);
+
+                    for (int i = 0; i < 2; i++) if (a->f_2ch[i]) fwrite(a->buffer_2ch[i], 1, drain_len / 2, a->f_2ch[i]);
+                    for (int i = 0; i < 4; i++) if (a->f_1ch[i]) fwrite(a->buffer_1ch[i], 1, drain_len / 4, a->f_1ch[i]);
+
+                    a->total_bytes += drain_len;
+                    remaining = bufmgr_fill_level(a->bufmgr, BUF_CAPTURE_AUDIO);
+                }
+                break;
+            }
+            continue;
         }
 
         // Update monitoring peaks
@@ -119,7 +138,7 @@ static int audio_thread_main(void *ctx)
         if (a->convert_1ch) extract_audio_1ch_C((uint8_t *)buf, len, a->buffer_1ch[0], a->buffer_1ch[1], a->buffer_1ch[2], a->buffer_1ch[3]);
         if (a->convert_2ch) extract_audio_2ch_C((uint16_t *)buf, len, (uint16_t *)a->buffer_2ch[0], (uint16_t *)a->buffer_2ch[1]);
 
-        rb_read_finished(a->rb, len);
+        bufmgr_read_end(a->bufmgr, BUF_CAPTURE_AUDIO, len);
 
         for (int i = 0; i < 2; i++) if (a->f_2ch[i]) fwrite(a->buffer_2ch[i], 1, len / 2, a->f_2ch[i]);
         for (int i = 0; i < 4; i++) if (a->f_1ch[i]) fwrite(a->buffer_1ch[i], 1, len / 4, a->f_1ch[i]);
@@ -162,10 +181,16 @@ bool gui_audio_is_running(void)
     return s_audio_running;
 }
 
-int gui_audio_start(gui_app_t *app, ringbuffer_t *audio_rb)
+int gui_audio_start(gui_app_t *app, buffer_manager_t *bufmgr)
 {
-    if (!app || !audio_rb) return -1;
+    if (!app || !bufmgr) return -1;
     if (s_audio_running) return 0;
+
+    // Ensure audio buffer is initialized
+    if (bufmgr_ensure_init(bufmgr, BUF_CAPTURE_AUDIO) < 0) {
+        gui_app_set_status(app, "Failed to initialize audio buffer");
+        return -1;
+    }
 
     // Decide if any audio outputs are enabled
     bool want_4ch = app->settings.enable_audio_4ch;
@@ -179,7 +204,7 @@ int gui_audio_start(gui_app_t *app, ringbuffer_t *audio_rb)
     }
 
     memset(&s_audio_ctx, 0, sizeof(s_audio_ctx));
-    s_audio_ctx.rb = audio_rb;
+    s_audio_ctx.bufmgr = bufmgr;
     s_audio_ctx.app = app;
 
     // Open files under output_path

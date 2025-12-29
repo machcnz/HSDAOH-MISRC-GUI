@@ -43,10 +43,7 @@ static int8_t *s_tmp8_b = NULL;
 static int32_t *s_tmp32_a = NULL;
 static int32_t *s_tmp32_b = NULL;
 
-// Recording ringbuffers (extracted samples -> file writers)
-static ringbuffer_t s_record_rb_a;
-static ringbuffer_t s_record_rb_b;
-static bool s_record_rb_initialized = false;
+// Note: Record ringbuffers now managed by buffer manager (BUF_RECORD_A, BUF_RECORD_B)
 
 // Extraction thread state
 static thrd_t s_extract_thread;
@@ -68,9 +65,7 @@ static rb_event_t s_data_event;       // Signaled when new data is available in 
 static rb_event_t s_space_event;      // Signaled when space becomes available in ringbuffer
 static bool s_events_initialized = false;
 
-// Event signaling for record ringbuffers (extraction thread waits, file writers signal)
-static rb_event_t s_record_space_event;  // Signaled when record buffer space becomes available
-static bool s_record_events_initialized = false;
+// Note: Record buffer events now managed by buffer manager
 
 // Flag to indicate new samples are available for display (set by extract thread, cleared by render thread)
 static atomic_bool s_display_samples_ready = false;
@@ -153,7 +148,7 @@ static int extraction_thread(void *ctx) {
         // Note: FFT is now processed from display samples in the render thread
         // (see gui_oscilloscope.c render_oscilloscope_channel split mode)
 
-        // Conditionally write to record ringbuffers
+        // Conditionally write to record buffers via buffer manager
         if (atomic_load(&s_recording_enabled)) {
             bool use_flac = atomic_load(&s_use_flac);
             uint8_t bits_a = (uint8_t)atomic_load(&s_rf_bits_a);
@@ -163,19 +158,19 @@ static int extraction_thread(void *ctx) {
                 // FLAC: write int32 samples (BUFFER_READ_SIZE samples)
                 size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int32_t);
 
-                int32_t *write_a;
-                int32_t *write_b;
-                while ((write_a = (int32_t *)rb_write_ptr(&s_record_rb_a, sample_bytes)) == NULL ||
-                       (write_b = (int32_t *)rb_write_ptr(&s_record_rb_b, sample_bytes)) == NULL) {
-                    if (atomic_load(&do_exit)) {
-                        goto exit_thread;
-                    }
-                    // Wait on event instead of polling (file writers signal when space available)
-                    if (s_record_events_initialized) {
-                        rb_event_wait_timeout(&s_record_space_event, 10);
-                    } else {
-                        thrd_sleep_ms(1);
-                    }
+                // Use default lossless backpressure policy from buffer_manager.c
+                int32_t *write_a = (int32_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                                  BUF_RECORD_A, sample_bytes, NULL);
+                int32_t *write_b = (int32_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                                  BUF_RECORD_B, sample_bytes, NULL);
+
+                if (!write_a || !write_b) {
+                    // Buffer full after waiting - this shouldn't happen with lossless policy
+                    // but handle gracefully
+                    if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
+                    if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
+                    if (atomic_load(&do_exit)) goto exit_thread;
+                    continue;
                 }
 
                 // Channel A
@@ -223,26 +218,25 @@ static int extraction_thread(void *ctx) {
                     }
                 }
 
-                rb_write_finished(&s_record_rb_a, sample_bytes);
-                rb_write_finished(&s_record_rb_b, sample_bytes);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
             } else {
                 // RAW: write either int16 or int8 bytes
                 size_t bytes_a = BUFFER_READ_SIZE * ((bits_a == 8) ? sizeof(int8_t) : sizeof(int16_t));
                 size_t bytes_b = BUFFER_READ_SIZE * ((bits_b == 8) ? sizeof(int8_t) : sizeof(int16_t));
 
-                void *write_a;
-                void *write_b;
-                while ((write_a = rb_write_ptr(&s_record_rb_a, bytes_a)) == NULL ||
-                       (write_b = rb_write_ptr(&s_record_rb_b, bytes_b)) == NULL) {
-                    if (atomic_load(&do_exit)) {
-                        goto exit_thread;
-                    }
-                    // Wait on event instead of polling (file writers signal when space available)
-                    if (s_record_events_initialized) {
-                        rb_event_wait_timeout(&s_record_space_event, 10);
-                    } else {
-                        thrd_sleep_ms(1);
-                    }
+                // Use default lossless backpressure policy from buffer_manager.c
+                void *write_a = bufmgr_write_begin(&s_extract_app->buffers,
+                                                    BUF_RECORD_A, bytes_a, NULL);
+                void *write_b = bufmgr_write_begin(&s_extract_app->buffers,
+                                                    BUF_RECORD_B, bytes_b, NULL);
+
+                if (!write_a || !write_b) {
+                    // Buffer full after waiting - handle gracefully
+                    if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
+                    if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
+                    if (atomic_load(&do_exit)) goto exit_thread;
+                    continue;
                 }
 
                 if (bits_a == 8) {
@@ -275,8 +269,8 @@ static int extraction_thread(void *ctx) {
                     memcpy(write_b, s_buf_b, bytes_b);
                 }
 
-                rb_write_finished(&s_record_rb_a, bytes_a);
-                rb_write_finished(&s_record_rb_b, bytes_b);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, bytes_a);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, bytes_b);
             }
         }
     }
@@ -316,15 +310,7 @@ void gui_extract_init(void) {
         }
     }
 
-    // Initialize record buffer space event (for event-based backpressure during recording)
-    if (!s_record_events_initialized) {
-        if (rb_event_init(&s_record_space_event) == 0) {
-            s_record_events_initialized = true;
-            fprintf(stderr, "[EXTRACT] Record buffer event initialized\n");
-        } else {
-            fprintf(stderr, "[EXTRACT] Warning: Failed to initialize record event, falling back to polling\n");
-        }
-    }
+    // Note: Record buffer events now managed by buffer manager
 
     s_initialized = true;
 }
@@ -333,24 +319,13 @@ void gui_extract_cleanup(void) {
     // Stop extraction thread if running
     gui_extract_stop();
 
-    // Close record ringbuffers
-    if (s_record_rb_initialized) {
-        rb_close(&s_record_rb_a);
-        rb_close(&s_record_rb_b);
-        s_record_rb_initialized = false;
-    }
+    // Note: Record buffers now managed by buffer manager (cleanup via bufmgr_cleanup)
 
     // Destroy synchronization events
     if (s_events_initialized) {
         rb_event_destroy(&s_data_event);
         rb_event_destroy(&s_space_event);
         s_events_initialized = false;
-    }
-
-    // Destroy record buffer event
-    if (s_record_events_initialized) {
-        rb_event_destroy(&s_record_space_event);
-        s_record_events_initialized = false;
     }
 
     // Free extraction buffers
@@ -395,21 +370,22 @@ int gui_extract_start(gui_app_t *app) {
     // Initialize extraction if needed
     gui_extract_init();
 
-    // Initialize record ringbuffers if needed
-    if (!s_record_rb_initialized) {
-        rb_init(&s_record_rb_a, "record_a_rb", BUFFER_RECORD_SIZE);
-        rb_init(&s_record_rb_b, "record_b_rb", BUFFER_RECORD_SIZE);
-        s_record_rb_initialized = true;
-    }
-
     // Store context (uses app->buffers for capture ringbuffer via buffer manager)
     s_extract_app = app;
     atomic_store(&s_recording_enabled, false);
     atomic_store(&s_use_flac, false);
 
-    // Ensure BUF_CAPTURE_RF is initialized in buffer manager
+    // Ensure buffers are initialized in buffer manager
     if (bufmgr_ensure_init(&app->buffers, BUF_CAPTURE_RF) < 0) {
         fprintf(stderr, "[EXTRACT] Failed to initialize capture buffer\n");
+        return -1;
+    }
+    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_A) < 0) {
+        fprintf(stderr, "[EXTRACT] Failed to initialize record buffer A\n");
+        return -1;
+    }
+    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_B) < 0) {
+        fprintf(stderr, "[EXTRACT] Failed to initialize record buffer B\n");
         return -1;
     }
 
@@ -444,13 +420,8 @@ bool gui_extract_is_running(void) {
     return s_extract_thread_running;
 }
 
-ringbuffer_t *gui_extract_get_record_rb_a(void) {
-    return &s_record_rb_a;
-}
-
-ringbuffer_t *gui_extract_get_record_rb_b(void) {
-    return &s_record_rb_b;
-}
+// Note: Record ringbuffers now accessed via app->buffers (buffer_manager)
+// Use BUF_RECORD_A and BUF_RECORD_B with bufmgr_read_begin/bufmgr_read_end
 
 void gui_extract_set_recording(bool enabled, bool use_flac, uint8_t rf_bits_a, uint8_t rf_bits_b) {
     atomic_store(&s_use_flac, use_flac);
@@ -463,21 +434,21 @@ void gui_extract_set_recording(bool enabled, bool use_flac, uint8_t rf_bits_a, u
             (unsigned)rf_bits_a, (unsigned)rf_bits_b);
 }
 
-void gui_extract_reset_record_rbs(void) {
-    if (s_record_rb_initialized) {
-        atomic_store(&s_record_rb_a.head, 0);
-        atomic_store(&s_record_rb_a.tail, 0);
-        atomic_store(&s_record_rb_b.head, 0);
-        atomic_store(&s_record_rb_b.tail, 0);
+void gui_extract_reset_record_rbs(gui_app_t *app) {
+    // Reset record buffers via buffer manager
+    if (app) {
+        bufmgr_reset(&app->buffers, BUF_RECORD_A);
+        bufmgr_reset(&app->buffers, BUF_RECORD_B);
     }
 }
 
-void gui_extract_init_record_rbs(void) {
-    if (!s_record_rb_initialized) {
-        rb_init(&s_record_rb_a, "record_a_rb", BUFFER_RECORD_SIZE);
-        rb_init(&s_record_rb_b, "record_b_rb", BUFFER_RECORD_SIZE);
-        s_record_rb_initialized = true;
-        fprintf(stderr, "[EXTRACT] Record ringbuffers initialized (for simulated capture)\n");
+void gui_extract_init_record_rbs(gui_app_t *app) {
+    // Initialize record buffers via buffer manager (for simulated capture that
+    // doesn't go through gui_extract_start)
+    if (app) {
+        bufmgr_ensure_init(&app->buffers, BUF_RECORD_A);
+        bufmgr_ensure_init(&app->buffers, BUF_RECORD_B);
+        fprintf(stderr, "[EXTRACT] Record buffers initialized (for simulated capture)\n");
     }
 }
 
@@ -558,10 +529,7 @@ rb_event_t *gui_extract_get_space_event(void) {
     return &s_space_event;
 }
 
-rb_event_t *gui_extract_get_record_space_event(void) {
-    if (!s_record_events_initialized) return NULL;
-    return &s_record_space_event;
-}
+// Note: Record space events now managed by buffer manager - use bufmgr_get_space_event()
 
 // Called by the render thread to update oscilloscope display when ready to draw a frame
 // Returns true if new samples were processed, false if no new samples available

@@ -16,6 +16,7 @@
 
 #include "../../common/ringbuffer.h"
 #include "../../common/rb_event.h"
+#include "../../common/buffer_manager.h"
 #include "../../common/flac_writer.h"
 #include "../../common/threading.h"
 
@@ -76,7 +77,8 @@ static uint32_t s_start_drop_count = 0;
 
 // File writer context
 typedef struct {
-    ringbuffer_t *rb;
+    buffer_manager_t *bufmgr;  // Buffer manager pointer
+    buffer_id_t buf_id;        // BUF_RECORD_A or BUF_RECORD_B
     FILE *file;
     int channel;  // 0 = A, 1 = B
 
@@ -122,31 +124,30 @@ static int flac_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
     size_t len = BUFFER_READ_SIZE * sizeof(int32_t);
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
-    void *buf;
-
-    // Get record space event for signaling
-    rb_event_t *record_space_event = gui_extract_get_record_space_event();
 
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
-        buf = rb_read_ptr(wctx->rb, len);
+        // Read from buffer manager with timeout
+        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 10);
         if (!buf) {
             // No data available - check if we should exit
             if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain any remaining partial data before exiting
-                size_t remaining = wctx->rb->tail - wctx->rb->head;
-                if (remaining > 0 && remaining < len) {
-                    size_t remaining_samples = remaining / sizeof(int32_t);
-                    buf = rb_read_ptr(wctx->rb, remaining);
-                    if (buf && remaining_samples > 0) {
-                        flac_writer_process(wctx->writer, (const int32_t *)buf, remaining_samples);
-                        rb_read_finished(wctx->rb, remaining);
+                // Drain any remaining data before exiting
+                size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
+                while (remaining > 0) {
+                    size_t drain_len = (remaining < len) ? remaining : len;
+                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, drain_len, 0);
+                    if (!buf) break;
+                    size_t drain_samples = drain_len / sizeof(int32_t);
+                    if (drain_samples > 0) {
+                        flac_writer_process(wctx->writer, (const int32_t *)buf, drain_samples);
                     }
+                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, drain_len);
+                    remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
                 }
                 break;
             }
-            thrd_sleep_ms(1);
             continue;
         }
 
@@ -155,12 +156,8 @@ static int flac_writer_thread(void *ctx) {
             fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
         }
 
-        rb_read_finished(wctx->rb, len);
-
-        // Signal that space is now available (for extraction thread waiting on full buffer)
-        if (record_space_event) {
-            rb_event_signal(record_space_event);
-        }
+        // Mark as consumed - buffer manager signals space event automatically
+        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
 
         if (s_recording_app) {
             atomic_fetch_add(&s_recording_app->recording_bytes, len);
@@ -183,38 +180,33 @@ static int raw_writer_thread(void *ctx) {
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
     size_t len = BUFFER_READ_SIZE * bps;
 
-    // Get record space event for signaling
-    rb_event_t *record_space_event = gui_extract_get_record_space_event();
-
     fprintf(stderr, "[RAW] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
-        void *buf = rb_read_ptr(wctx->rb, len);
+        // Read from buffer manager with timeout
+        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 10);
         if (!buf) {
             // No data available - check if we should exit
             if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain any remaining partial data before exiting
-                size_t remaining = wctx->rb->tail - wctx->rb->head;
-                if (remaining > 0 && remaining < len) {
-                    buf = rb_read_ptr(wctx->rb, remaining);
-                    if (buf) {
-                        fwrite(buf, 1, remaining, wctx->file);
-                        rb_read_finished(wctx->rb, remaining);
-                    }
+                // Drain any remaining data before exiting
+                size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
+                while (remaining > 0) {
+                    size_t drain_len = (remaining < len) ? remaining : len;
+                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, drain_len, 0);
+                    if (!buf) break;
+                    fwrite(buf, 1, drain_len, wctx->file);
+                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, drain_len);
+                    remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
                 }
                 break;
             }
-            thrd_sleep_ms(1);
             continue;
         }
 
         size_t written = fwrite(buf, 1, len, wctx->file);
-        rb_read_finished(wctx->rb, len);
 
-        // Signal that space is now available (for extraction thread waiting on full buffer)
-        if (record_space_event) {
-            rb_event_signal(record_space_event);
-        }
+        // Mark as consumed - buffer manager signals space event automatically
+        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
 
         if (s_recording_app) {
             atomic_fetch_add(&s_recording_app->recording_bytes, written);
@@ -361,16 +353,14 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         return RECORD_ERROR;
     }
 
-    // For simulated capture, ensure record ringbuffers are initialized
+    // For simulated capture, ensure record buffers are initialized
     if (is_simulated) {
-        gui_extract_init_record_rbs();
+        gui_extract_init_record_rbs(app);
     }
 
-    // Get record ringbuffers from gui_extract
-    ringbuffer_t *rb_a = gui_extract_get_record_rb_a();
-    ringbuffer_t *rb_b = gui_extract_get_record_rb_b();
-
-    if (!rb_a || !rb_b) {
+    // Ensure record buffers are initialized in buffer manager
+    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_A) < 0 ||
+        bufmgr_ensure_init(&app->buffers, BUF_RECORD_B) < 0) {
         gui_app_set_status(app, "Record buffers not initialized");
         return RECORD_ERROR;
     }
@@ -382,8 +372,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
     atomic_store(&app->recording_compressed_a, 0);
     atomic_store(&app->recording_compressed_b, 0);
 
-    // Reset record ringbuffers before starting
-    gui_extract_reset_record_rbs();
+    // Reset record buffers before starting
+    gui_extract_reset_record_rbs(app);
 
 #if LIBFLAC_ENABLED == 1
     if (app->settings.use_flac) {
@@ -404,14 +394,16 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         uint8_t bits_b = app->settings.reduce_8bit_b ? 8 : (app->settings.flac_12bit ? 12 : 16);
 
         // Setup writer contexts
-        s_ctx_a.rb = rb_a;
+        s_ctx_a.bufmgr = &app->buffers;
+        s_ctx_a.buf_id = BUF_RECORD_A;
         s_ctx_a.file = s_file_a;
         s_ctx_a.channel = 0;
         s_ctx_a.compressed_bytes = &app->recording_compressed_a;
         s_ctx_a.flac_bits_per_sample = bits_a;
         s_ctx_a.app = app;
 
-        s_ctx_b.rb = rb_b;
+        s_ctx_b.bufmgr = &app->buffers;
+        s_ctx_b.buf_id = BUF_RECORD_B;
         s_ctx_b.file = s_file_b;
         s_ctx_b.channel = 1;
         s_ctx_b.compressed_bytes = &app->recording_compressed_b;
@@ -488,7 +480,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_writer_threads_running = true;
 
         // Start audio output/monitoring (if enabled)
-        gui_audio_start(app, gui_capture_get_audio_ringbuffer());
+        gui_audio_start(app, &app->buffers);
 
         gui_app_set_status(app, "Recording (FLAC)...");
     } else
@@ -509,12 +501,14 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         uint8_t bits_a = app->settings.reduce_8bit_a ? 8 : 16;
         uint8_t bits_b = app->settings.reduce_8bit_b ? 8 : 16;
 
-        s_ctx_a.rb = rb_a;
+        s_ctx_a.bufmgr = &app->buffers;
+        s_ctx_a.buf_id = BUF_RECORD_A;
         s_ctx_a.file = s_file_a;
         s_ctx_a.channel = 0;
         s_ctx_a.raw_bytes_per_sample = (bits_a == 8) ? 1 : 2;
 
-        s_ctx_b.rb = rb_b;
+        s_ctx_b.bufmgr = &app->buffers;
+        s_ctx_b.buf_id = BUF_RECORD_B;
         s_ctx_b.file = s_file_b;
         s_ctx_b.channel = 1;
         s_ctx_b.raw_bytes_per_sample = (bits_b == 8) ? 1 : 2;
@@ -539,7 +533,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_writer_threads_running = true;
 
         // Start audio output/monitoring (if enabled)
-        gui_audio_start(app, gui_capture_get_audio_ringbuffer());
+        gui_audio_start(app, &app->buffers);
 
         gui_app_set_status(app, "Recording (RAW)...");
     }

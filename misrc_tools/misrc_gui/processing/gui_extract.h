@@ -36,9 +36,8 @@ void gui_extract_stop(void);
 // Check if extraction thread is running
 bool gui_extract_is_running(void);
 
-// Get record ringbuffers (for writer threads)
-ringbuffer_t *gui_extract_get_record_rb_a(void);
-ringbuffer_t *gui_extract_get_record_rb_b(void);
+// Note: Record buffers now accessed via app->buffers (buffer_manager)
+// Use BUF_RECORD_A and BUF_RECORD_B with bufmgr_read_begin/bufmgr_read_end
 
 // Enable/disable recording mode
 // When enabled, extraction thread writes to record ringbuffers
@@ -47,11 +46,11 @@ ringbuffer_t *gui_extract_get_record_rb_b(void);
 // - If use_flac=false: bits per sample for RAW output (8/16)
 void gui_extract_set_recording(bool enabled, bool use_flac, uint8_t rf_bits_a, uint8_t rf_bits_b);
 
-// Reset record ringbuffers (call before starting writer threads)
-void gui_extract_reset_record_rbs(void);
+// Reset record buffers via buffer manager (call before starting writer threads)
+void gui_extract_reset_record_rbs(gui_app_t *app);
 
-// Initialize record ringbuffers (for simulated capture that doesn't use extraction thread)
-void gui_extract_init_record_rbs(void);
+// Initialize record buffers via buffer manager (for simulated capture that doesn't use extraction thread)
+void gui_extract_init_record_rbs(gui_app_t *app);
 
 // Check if recording is enabled and get FLAC mode
 bool gui_extract_is_recording(bool *use_flac);
@@ -85,8 +84,7 @@ rb_event_t *gui_extract_get_data_event(void);
 // Returns NULL if extraction is not initialized
 rb_event_t *gui_extract_get_space_event(void);
 
-// Get the "record space available" event (file writers signal this after consuming from record ringbuffer)
-// Returns NULL if extraction is not initialized
-rb_event_t *gui_extract_get_record_space_event(void);
+// Note: Record space events now managed by buffer manager
+// Use bufmgr_get_space_event(&app->buffers, BUF_RECORD_A/B) if needed
 
 #endif // GUI_EXTRACT_H

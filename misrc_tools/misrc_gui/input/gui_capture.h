@@ -2,7 +2,6 @@
 #define GUI_CAPTURE_H
 
 #include "../core/gui_app.h"
-#include "../../common/ringbuffer.h"
 
 // Global exit flag (defined in misrc_gui.c)
 extern volatile atomic_int do_exit;
@@ -10,8 +9,8 @@ extern volatile atomic_int do_exit;
 // Capture callback function
 void gui_capture_callback(void *data_info);
 
-// Get audio ringbuffer (may be NULL if not initialized)
-ringbuffer_t *gui_capture_get_audio_ringbuffer(void);
+// Note: Audio buffer now accessed via app->buffers (buffer_manager)
+// Use BUF_CAPTURE_AUDIO with bufmgr_read_begin/bufmgr_read_end
 
 // Check if device has timed out (no callbacks for too long)
 // Returns true if device appears disconnected

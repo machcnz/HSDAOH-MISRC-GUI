@@ -44,10 +44,7 @@
 #define BUFFER_TOTAL_SIZE (65536 * 1024)  // Same as reference: 64MB
 #define BUFFER_AUDIO_TOTAL_SIZE (65536 * 256)
 
-// Ringbuffers for capture data
-// Note: RF capture now uses buffer manager (BUF_CAPTURE_RF), audio still uses legacy ringbuffer
-static ringbuffer_t s_capture_audio_rb;
-static bool s_audio_rb_initialized = false;
+// Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
 
 // Capture handler context (includes frame parser state)
 static capture_handler_ctx_t s_capture_handler;
@@ -196,8 +193,8 @@ void gui_capture_callback(void *data_info_ptr) {
         return;
     }
 
-    // If audio capture enabled, reserve space in audio ringbuffer too
-    if (s_capture_handler.capture_audio && s_audio_rb_initialized && result.stream1_bytes > 0) {
+    // If audio capture enabled, reserve space in audio buffer via buffer manager
+    if (s_capture_handler.capture_audio && result.stream1_bytes > 0) {
         buf_out_audio = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, result.stream1_bytes, NULL);
         // buf_out_audio may be NULL if buffer full - best-effort audio
     }
@@ -318,25 +315,13 @@ void gui_app_init(gui_app_t *app) {
     app->cvbs_a = NULL;
     app->cvbs_b = NULL;
 
-    // Initialize capture ringbuffers via buffer manager
-    // BUF_CAPTURE_RF is initialized by buffer manager automatically on first use
-    // We still track s_audio_rb_initialized for compatibility during migration
-    if (!s_audio_rb_initialized) {
-        int r = rb_init(&s_capture_audio_rb, "gui_capture_audio", BUFFER_AUDIO_TOTAL_SIZE);
-        if (r != 0) {
-            fprintf(stderr, "Failed to initialize audio ringbuffer: %d\n", r);
-        } else {
-            s_audio_rb_initialized = true;
-            fprintf(stderr, "Audio ringbuffer initialized (%d bytes)\n", BUFFER_AUDIO_TOTAL_SIZE);
-        }
-    }
+    // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
+    // by buffer manager automatically on first use
 
     // Initialize capture handler (includes frame parser state)
     capture_handler_init(&s_capture_handler);
-    // Legacy: capture_handler still needs rb_rf pointer for simulated device
-    // This will be migrated when buffer manager is fully integrated
-    s_capture_handler.rb_rf = NULL;  // Will be set when needed
-    s_capture_handler.rb_audio = s_audio_rb_initialized ? &s_capture_audio_rb : NULL;
+    s_capture_handler.rb_rf = NULL;    // RF uses buffer manager
+    s_capture_handler.rb_audio = NULL; // Audio uses buffer manager
     s_capture_handler.capture_rf = true;
 
     // Enable audio capture if any audio outputs are enabled (mirrors CLI audio options)
@@ -344,7 +329,7 @@ void gui_app_init(gui_app_t *app) {
     for (int i = 0; i < 4; i++) {
         if (app->settings.enable_audio_1ch[i]) want_audio = true;
     }
-    s_capture_handler.capture_audio = want_audio && s_audio_rb_initialized;
+    s_capture_handler.capture_audio = want_audio;
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
 
@@ -377,11 +362,7 @@ void gui_app_cleanup(gui_app_t *app) {
         gui_app_stop_capture(app);
     }
 
-    // Close legacy audio ringbuffer (RF is now managed by buffer manager)
-    if (s_audio_rb_initialized) {
-        rb_close(&s_capture_audio_rb);
-        s_audio_rb_initialized = false;
-    }
+    // Note: All buffers now managed by buffer manager (cleanup via bufmgr_cleanup)
 
     // Cleanup extraction subsystem
     gui_extract_cleanup();
@@ -587,16 +568,16 @@ int gui_app_start_capture(gui_app_t *app) {
     // Reset callback counter and capture handler state
     s_callback_count = 0;
     capture_handler_init(&s_capture_handler);
-    // Note: rb_rf is no longer used - capture callback uses buffer manager directly
+    // Note: All buffers now use buffer manager directly
     s_capture_handler.rb_rf = NULL;
-    s_capture_handler.rb_audio = s_audio_rb_initialized ? &s_capture_audio_rb : NULL;
+    s_capture_handler.rb_audio = NULL;
     s_capture_handler.capture_rf = true;
 
     bool want_audio = app->settings.enable_audio_4ch || app->settings.enable_audio_2ch_12 || app->settings.enable_audio_2ch_34;
     for (int i = 0; i < 4; i++) {
         if (app->settings.enable_audio_1ch[i]) want_audio = true;
     }
-    s_capture_handler.capture_audio = want_audio && s_audio_rb_initialized;
+    s_capture_handler.capture_audio = want_audio;
 
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
@@ -719,9 +700,8 @@ void gui_app_stop_capture(gui_app_t *app) {
     gui_app_set_status(app, "Capture stopped");
 }
 
-ringbuffer_t *gui_capture_get_audio_ringbuffer(void) {
-    return s_audio_rb_initialized ? &s_capture_audio_rb : NULL;
-}
+// Note: Audio buffer now accessed via app->buffers (buffer_manager)
+// Use BUF_CAPTURE_AUDIO with bufmgr_read_begin/bufmgr_read_end
 
 // Recording wrappers - delegate to gui_record module
 int gui_app_start_recording(gui_app_t *app) {

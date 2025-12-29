@@ -70,8 +70,8 @@ static const backpressure_policy_t s_default_policies[BUF_COUNT] = {
         .log_drops = true,
     },
     [BUF_DISPLAY] = {
-        .max_wait_attempts = 0,    /* Never wait - drop immediately */
-        .wait_timeout_ms = 0,
+        .max_wait_attempts = 3,    /* Don't really care if this drops */
+        .wait_timeout_ms = 1,
         .log_first_wait = true,
         .log_drops = true,
     },
