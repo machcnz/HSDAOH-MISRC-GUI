@@ -98,16 +98,20 @@ typedef struct {
     bool in_vsync;                 // Currently in V-sync region
 } cvbs_vsync_state_t;
 
-// Adaptive threshold state (percentile-based)
+// Histogram-based level detection buffer size
+#define CVBS_LEVEL_SAMPLE_BUFFER_SIZE  16384  // ~0.4ms of samples at 40 MSPS
+
+// Adaptive threshold state (histogram-based)
 typedef struct {
     int16_t sync_tip;              // Estimated sync tip level (lowest ~5%)
     int16_t blanking;              // Estimated blanking level (~30%)
     int16_t black;                 // Estimated black level
     int16_t white;                 // Estimated white level (highest ~95%)
     int16_t threshold;             // Current sync threshold
-    // Per-field accumulators (to avoid mid-field level changes causing shimmer)
-    int16_t field_min;             // Minimum sample value in current field
-    int16_t field_max;             // Maximum sample value in current field
+    // Per-field sample buffer for histogram analysis
+    int16_t *level_sample_buf;     // Buffer for histogram samples (allocated)
+    size_t level_sample_count;     // Current count of samples in buffer
+    int subsample_counter;         // Counter for subsampling
 } cvbs_adaptive_levels_t;
 
 // Line buffer size - stores one complete line of samples for decoding

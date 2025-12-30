@@ -28,7 +28,7 @@
 #define CVBS_VSYNC_MAX_WIDTH  1200   // Maximum V-sync broad pulse (~30µs)
 
 // Histogram-based level detection
-#define CVBS_HIST_BINS        256    // Number of histogram bins for level detection
+#define CVBS_HIST_BINS        128    // Number of histogram bins for level detection
 #define CVBS_HIST_MIN_PEAK    0.005f // Minimum peak height (0.5% of samples)
 
 // Line timing at 40 MSPS

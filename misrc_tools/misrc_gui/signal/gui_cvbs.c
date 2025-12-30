@@ -239,8 +239,26 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
     }
     decoder->line_buffer_count = 0;
 
-    // Initialize adaptive levels
+    // Initialize adaptive levels and allocate histogram sample buffer
     memset(&decoder->adaptive, 0, sizeof(decoder->adaptive));
+    decoder->adaptive.level_sample_buf = (int16_t *)calloc(CVBS_LEVEL_SAMPLE_BUFFER_SIZE, sizeof(int16_t));
+    if (!decoder->adaptive.level_sample_buf) {
+        free(decoder->field_buffer[0]);
+        free(decoder->field_buffer[1]);
+        free(decoder->frame_buffer);
+        free(decoder->display_front);
+        free(decoder->display_back);
+        free(decoder->frame_image.data);
+        free(decoder->line_buffer);
+        decoder->field_buffer[0] = NULL;
+        decoder->field_buffer[1] = NULL;
+        decoder->frame_buffer = NULL;
+        decoder->display_front = NULL;
+        decoder->display_back = NULL;
+        decoder->frame_image.data = NULL;
+        decoder->line_buffer = NULL;
+        return false;
+    }
 
     // Initialize software PLL with PAL default
     decoder->pll.phase = 0;
@@ -308,6 +326,7 @@ void gui_cvbs_cleanup(cvbs_decoder_t *decoder) {
     free(decoder->display_front);
     free(decoder->display_back);
     free(decoder->line_buffer);
+    free(decoder->adaptive.level_sample_buf);
 
     decoder->field_buffer[0] = NULL;
     decoder->field_buffer[1] = NULL;
@@ -315,6 +334,7 @@ void gui_cvbs_cleanup(cvbs_decoder_t *decoder) {
     decoder->display_front = NULL;
     decoder->display_back = NULL;
     decoder->line_buffer = NULL;
+    decoder->adaptive.level_sample_buf = NULL;
 }
 
 void gui_cvbs_reset(cvbs_decoder_t *decoder) {
@@ -345,8 +365,10 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
     // Reset line buffer
     decoder->line_buffer_count = 0;
 
-    // Reset adaptive levels
+    // Reset adaptive levels (preserve allocated buffer pointer)
+    int16_t *level_buf = decoder->adaptive.level_sample_buf;
     memset(&decoder->adaptive, 0, sizeof(decoder->adaptive));
+    decoder->adaptive.level_sample_buf = level_buf;
 
     // Reset software PLL (keep line period consistent with selected system)
     decoder->pll.phase = 0;
@@ -406,68 +428,77 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
 }
 
 //-----------------------------------------------------------------------------
-// Adaptive Level Estimation
+// Adaptive Level Estimation (Histogram-Based)
 //-----------------------------------------------------------------------------
 
-// Update min/max from a filtered sample (called from main processing loop)
-// Uses the already-filtered signal from sync detection to reject noise
-static inline void accumulate_filtered_level(cvbs_decoder_t *decoder, int16_t filtered) {
-    if (decoder->adaptive.field_min == 0 && decoder->adaptive.field_max == 0) {
-        // First sample of field
-        decoder->adaptive.field_min = filtered;
-        decoder->adaptive.field_max = filtered;
-    } else {
-        if (filtered < decoder->adaptive.field_min)
-            decoder->adaptive.field_min = filtered;
-        if (filtered > decoder->adaptive.field_max)
-            decoder->adaptive.field_max = filtered;
+// Accumulate samples for histogram analysis (called from main processing loop)
+// Subsamples to keep buffer size manageable while capturing signal distribution
+// Uses per-decoder buffer to support multiple simultaneous decoders
+static inline void accumulate_level_sample(cvbs_decoder_t *decoder, int16_t sample) {
+    if (!decoder->adaptive.level_sample_buf) return;
+
+    // Subsample: collect every 16th sample to spread across the field
+    if (++decoder->adaptive.subsample_counter >= 16) {
+        decoder->adaptive.subsample_counter = 0;
+        if (decoder->adaptive.level_sample_count < CVBS_LEVEL_SAMPLE_BUFFER_SIZE) {
+            decoder->adaptive.level_sample_buf[decoder->adaptive.level_sample_count++] = sample;
+        }
     }
 }
 
-// Commit accumulated levels at end of field (called from start_new_field_pll)
+// Commit levels at end of field using histogram-based detection
+// Uses trigger_analyze_cvbs_levels() for robust sync tip and blanking detection
 static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
-    // Only update if we accumulated valid data
-    if (decoder->adaptive.field_min == 0 && decoder->adaptive.field_max == 0) return;
+    if (!decoder->adaptive.level_sample_buf) return;
 
-    int16_t field_min = decoder->adaptive.field_min;
-    int16_t field_max = decoder->adaptive.field_max;
-
-    // Reset accumulators for next field
-    decoder->adaptive.field_min = 0;
-    decoder->adaptive.field_max = 0;
-
-    // Exponential moving average for stability (update once per field)
-    const float alpha = 0.1f;  // ~10 fields to converge (~200ms)
-
-    if (decoder->adaptive.sync_tip == 0 && decoder->adaptive.white == 0) {
-        // First time - initialize directly
-        decoder->adaptive.sync_tip = field_min;
-        decoder->adaptive.white = field_max;
-    } else {
-        // Smooth update
-        decoder->adaptive.sync_tip = (int16_t)(decoder->adaptive.sync_tip * (1.0f - alpha) +
-                                               field_min * alpha);
-        decoder->adaptive.white = (int16_t)(decoder->adaptive.white * (1.0f - alpha) +
-                                            field_max * alpha);
+    // Need minimum samples for reliable histogram
+    if (decoder->adaptive.level_sample_count < 1000) {
+        decoder->adaptive.level_sample_count = 0;
+        return;
     }
 
-    // Derive other levels
-    int16_t range = decoder->adaptive.white - decoder->adaptive.sync_tip;
-    if (range < 100) range = 100;  // Minimum range to avoid division issues
+    // Analyze collected samples using histogram-based detection
+    cvbs_levels_t detected;
+    trigger_analyze_cvbs_levels(decoder->adaptive.level_sample_buf,
+                                decoder->adaptive.level_sample_count, &detected);
 
-    // For CVBS, the sync tip is at IRE -40, blanking at IRE 0, black at IRE ~7.5, white at IRE 100
-    // So sync is about 40/140 = 28.5% of the range below blanking
-    // Threshold at 25% above sync tip (matching gui_trigger.h CVBS_SYNC_MARGIN)
-    // This is well into the sync pulse region for reliable edge detection
-    decoder->adaptive.threshold = decoder->adaptive.sync_tip + (int16_t)(range * CVBS_SYNC_MARGIN);
+    // Reset sample buffer for next field
+    decoder->adaptive.level_sample_count = 0;
 
-    // Blanking level: ~28% of range (above sync, at black level start)
-    decoder->adaptive.blanking = decoder->adaptive.sync_tip + (int16_t)(range * 0.28f);
+    // Check if detection succeeded (range > 0 means valid peaks found)
+    if (detected.range < 100) {
+        // Detection failed - keep previous levels
+        return;
+    }
 
-    // Black level: ~32% of range (just above blanking)
-    decoder->adaptive.black = decoder->adaptive.sync_tip + (int16_t)(range * 0.32f);
+    // Exponential moving average for stability (update once per field)
+    const float alpha = 0.15f;  // Slightly faster convergence with histogram reliability
+
+    if (decoder->adaptive.sync_tip == 0 && decoder->adaptive.white == 0) {
+        // First time - initialize directly from detected levels
+        decoder->adaptive.sync_tip = detected.sig_min;
+        decoder->adaptive.blanking = detected.black_level;  // Histogram finds actual blanking
+        decoder->adaptive.black = detected.black_level;
+        decoder->adaptive.white = detected.white_level;
+        decoder->adaptive.threshold = detected.sync_threshold;
+    } else {
+        // Smooth update using detected histogram peaks
+        decoder->adaptive.sync_tip = (int16_t)(decoder->adaptive.sync_tip * (1.0f - alpha) +
+                                               detected.sig_min * alpha);
+        decoder->adaptive.blanking = (int16_t)(decoder->adaptive.blanking * (1.0f - alpha) +
+                                               detected.black_level * alpha);
+        decoder->adaptive.black = (int16_t)(decoder->adaptive.black * (1.0f - alpha) +
+                                            detected.black_level * alpha);
+        decoder->adaptive.white = (int16_t)(decoder->adaptive.white * (1.0f - alpha) +
+                                            detected.white_level * alpha);
+        decoder->adaptive.threshold = (int16_t)(decoder->adaptive.threshold * (1.0f - alpha) +
+                                                detected.sync_threshold * alpha);
+    }
 
     // Update legacy levels for compatibility
+    int16_t range = decoder->adaptive.white - decoder->adaptive.sync_tip;
+    if (range < 100) range = 100;
+
     decoder->levels.sig_min = decoder->adaptive.sync_tip;
     decoder->levels.sig_max = decoder->adaptive.white;
     decoder->levels.range = range;
@@ -915,10 +946,9 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
         // Apply lowpass filter for cleaner sync detection (fixed-point)
         int16_t filtered = apply_lowpass(decoder, sample);
 
-        // Accumulate min/max from filtered signal (every 16th sample for efficiency)
-        if ((i & 0xF) == 0) {
-            accumulate_filtered_level(decoder, filtered);
-        }
+        // Accumulate samples for histogram-based level detection
+        // Use raw sample (not filtered) to capture full signal distribution
+        accumulate_level_sample(decoder, sample);
 
         // Store UNFILTERED sample in line buffer (for video decoding)
         if (line_buffer_count < CVBS_LINE_BUFFER_SIZE) {

@@ -40,74 +40,70 @@ static void build_sample_histogram(const int16_t *buf, size_t count,
     }
 }
 
+// Minimum peak separation as fraction of total bins (5% = sync-to-blanking gap)
+#define CVBS_MIN_PEAK_SEPARATION 0.05f
+
 // Find two lowest peaks in histogram (sync tip and blanking level)
 // Returns true if both peaks found, false otherwise
 static bool find_two_lowest_peaks(const uint32_t *hist, int num_bins,
                                   size_t sample_count,
                                   int *peak1_bin, int *peak2_bin) {
-    // Minimum count for a peak (based on sample count, accounting for subsampling)
-    uint32_t min_count = (uint32_t)((sample_count / 4) * CVBS_HIST_MIN_PEAK);
-    if (min_count < 2) min_count = 2;
+    (void)sample_count;
 
-    // Find first peak (lowest bin index with significant count)
-    int p1 = -1;
-    uint32_t p1_count = 0;
-
-    // Scan upward to find first peak
+    // Calculate mean of histogram
+    uint64_t sum = 0;
     for (int i = 0; i < num_bins; i++) {
-        if (hist[i] >= min_count) {
-            // Found start of a peak region, find local maximum
-            uint32_t max_count = hist[i];
-            int max_bin = i;
+        sum += hist[i];
+    }
+    uint32_t mean = (uint32_t)(sum / num_bins);
 
-            // Scan to find peak maximum
-            while (i < num_bins && hist[i] >= min_count / 2) {
-                if (hist[i] > max_count) {
-                    max_count = hist[i];
-                    max_bin = i;
+    // Find first peak above mean (sync tip)
+    int p1 = -1;
+    for (int i = 0; i < num_bins; i++) {
+        if (hist[i] > mean) {
+            // Found start of peak region, find local maximum
+            uint32_t max_val = hist[i];
+            int max_idx = i;
+            while (i < num_bins && hist[i] > mean) {
+                if (hist[i] > max_val) {
+                    max_val = hist[i];
+                    max_idx = i;
                 }
                 i++;
             }
-
-            p1 = max_bin;
-            p1_count = max_count;
+            p1 = max_idx;
             break;
         }
     }
 
     if (p1 < 0) return false;
 
-    // Find second peak (must be above first peak with a valley in between)
+    // Find second peak above mean (blanking level)
     int p2 = -1;
-    bool in_valley = false;
-
     for (int i = p1 + 1; i < num_bins; i++) {
-        // Detect valley (count drops significantly below peak)
-        if (!in_valley && hist[i] < p1_count / 4) {
-            in_valley = true;
-        }
-
-        // After valley, look for second peak
-        if (in_valley && hist[i] >= min_count) {
-            // Found start of second peak region
-            uint32_t max_count = hist[i];
-            int max_bin = i;
-
-            while (i < num_bins && hist[i] >= min_count / 2) {
-                if (hist[i] > max_count) {
-                    max_count = hist[i];
-                    max_bin = i;
+        if (hist[i] > mean) {
+            // Found start of peak region, find local maximum
+            uint32_t max_val = hist[i];
+            int max_idx = i;
+            while (i < num_bins && hist[i] > mean) {
+                if (hist[i] > max_val) {
+                    max_val = hist[i];
+                    max_idx = i;
                 }
                 i++;
             }
-
-            p2 = max_bin;
-            (void)max_count;  // Peak count available for future use
+            p2 = max_idx;
             break;
         }
     }
 
     if (p2 < 0) return false;
+
+    // Validate peak separation (must be at least 5% of range apart)
+    int min_separation = (int)(num_bins * CVBS_MIN_PEAK_SEPARATION);
+    if ((p2 - p1) < min_separation) {
+        return false;  // Peaks too close together, likely noise
+    }
 
     *peak1_bin = p1;
     *peak2_bin = p2;
