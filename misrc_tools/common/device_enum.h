@@ -21,7 +21,10 @@
 
 typedef enum {
     MISRC_DEVICE_TYPE_HSDAOH,         /* hsdaoh/libusb device */
-    MISRC_DEVICE_TYPE_SIMPLE_CAPTURE  /* OS-native capture (V4L2, MediaFoundation, AVFoundation) */
+    MISRC_DEVICE_TYPE_SIMPLE_CAPTURE, /* OS-native capture (V4L2, MediaFoundation, AVFoundation) */
+#ifdef ENABLE_FX3
+    MISRC_DEVICE_TYPE_FX3             /* Cypress FX3 USB device */
+#endif
 } misrc_device_type_t;
 
 typedef struct {
@@ -69,6 +72,19 @@ void misrc_device_list_free(misrc_device_list_t *list);
  * are included (matching CLI behavior).
  */
 int misrc_device_enumerate(misrc_device_list_t *list, bool include_hsdaoh, bool include_simple_capture);
+
+#ifdef ENABLE_FX3
+/* Enumerate all available capture devices including FX3
+ *
+ * @param list          Device list to populate (will be cleared first)
+ * @param include_hsdaoh        Include hsdaoh devices
+ * @param include_simple_capture Include simple_capture devices
+ * @param include_fx3           Include FX3 devices
+ * @return Number of devices found, or negative on error
+ */
+int misrc_device_enumerate_fx3(misrc_device_list_t *list, bool include_hsdaoh,
+                                bool include_simple_capture, bool include_fx3);
+#endif
 
 /* Get implementation name for simple_capture
  *

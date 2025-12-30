@@ -126,7 +126,10 @@ typedef enum {
     DEVICE_TYPE_HSDAOH,         // Hardware device via hsdaoh
     DEVICE_TYPE_SIMPLE_CAPTURE, // OS video capture
     DEVICE_TYPE_SIMULATED,      // Simulated device for testing
-    DEVICE_TYPE_PLAYBACK        // Playback from recorded FLAC files
+    DEVICE_TYPE_PLAYBACK,       // Playback from recorded FLAC files
+#ifdef ENABLE_FX3
+    DEVICE_TYPE_FX3             // Cypress FX3 USB device
+#endif
 } device_type_t;
 
 typedef struct {
@@ -212,6 +215,13 @@ typedef struct gui_app {
 
     // Playback device state
     atomic_bool playback_running;  // Flag for playback mode
+
+#ifdef ENABLE_FX3
+    // FX3 device state
+    void *fx3_dev;                 // FX3 device handle (cyusb_handle *)
+    void *fx3_thread;              // FX3 capture thread handle
+    atomic_bool fx3_running;       // Flag for FX3 capture mode
+#endif
 
     // Capture state
     bool is_capturing;

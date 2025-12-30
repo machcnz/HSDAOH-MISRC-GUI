@@ -138,6 +138,31 @@ else
   message('FFTW3 not found, building without FFT support')
 endif
 
+# FX3 support (optional, Linux uses cyusb, others use libusb)
+fx3_enabled = false
+if host_system == 'linux'
+  cyusb_dep = dependency('libcyusb', required : false)
+  if cyusb_dep.found()
+    deps += [ cyusb_dep ]
+    cflags += ['-DENABLE_FX3=1']
+    fx3_enabled = true
+    message('libcyusb found, building with FX3 support')
+  else
+    message('libcyusb not found, building without FX3 support')
+  endif
+else
+  # On non-Linux platforms, use libusb for FX3
+  libusb_dep = dependency('libusb-1.0', required : false)
+  if libusb_dep.found()
+    deps += [ libusb_dep ]
+    cflags += ['-DENABLE_FX3=1']
+    fx3_enabled = true
+    message('libusb found, building with FX3 support')
+  else
+    message('libusb not found, building without FX3 support')
+  endif
+endif
+
 
 if host_system == 'windows' or host_system == 'cygwin'
   if meson.get_compiler('c').get_id() != 'gcc' and meson.get_compiler('c').get_id() != 'clang'
@@ -223,6 +248,11 @@ if raylib_dep.found()
 
   if host_cpu_family == 'x86_64'
     sources_gui += nasm_genb
+  endif
+
+  # Add FX3 support to GUI if available
+  if fx3_enabled
+    sources_gui += 'misrc_gui/input/gui_fx3.c'
   endif
 
   gui_deps = deps + [ raylib_dep ]
