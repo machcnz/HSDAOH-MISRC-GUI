@@ -9,7 +9,7 @@
 
 // Clay UI library (header-only, implementation here)
 #define CLAY_IMPLEMENTATION
-#include <clay.h>
+#include "../ui/clay.h"
 
 #include "raylib.h"
 #include "../assets/inter_font_data.h"

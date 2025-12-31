@@ -289,9 +289,12 @@ if raylib_dep.found()
     sources_gui += 'misrc_capture/simple_capture/simple_capture_avfoundation.m'
   endif
 
+  gui_includes = include_directories('misrc_gui/ui')
+
   executable('misrc_gui',
               sources_gui,
               dependencies: gui_deps,
+              include_directories: gui_includes,
               link_args: gui_ldflags,
               c_args: gui_cflags,
               install: true)
