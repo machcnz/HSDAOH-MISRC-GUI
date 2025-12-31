@@ -71,6 +71,7 @@ static CustomLayoutElement s_osc_a_element;
 static CustomLayoutElement s_osc_b_element;
 static CustomLayoutElement s_vu_a_element;
 static CustomLayoutElement s_vu_b_element;
+static CustomLayoutElement s_settings_icon_element;
 
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
@@ -488,9 +489,11 @@ static void render_toolbar(gui_app_t *app) {
             .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            // Try to use a gear glyph; if the font lacks it, user will see fallback/missing glyph.
-            CLAY_TEXT(CLAY_STRING("⚙"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_HEADING, .textColor = to_clay_color(COLOR_TEXT) }));
+            // Font-independent settings icon (rendered as a custom Clay element)
+            CLAY(CLAY_ID("SettingsIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_settings_icon_element }
+            }) {}
         }
 
     }
@@ -812,6 +815,8 @@ static void render_channels_panel(gui_app_t *app) {
     s_osc_b_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL;
     s_osc_b_element.customData.channel_panel.app = app;
     s_osc_b_element.customData.channel_panel.channel = 1;
+
+    s_settings_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON;
 
     CLAY(CLAY_ID("ChannelsPanel"), {
         .layout = {

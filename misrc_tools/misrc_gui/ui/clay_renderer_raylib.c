@@ -197,6 +197,28 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                                         vu->is_clipping_neg, vu->channel_color);
                         break;
                     }
+                    case CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON: {
+                        // Simple gear icon drawn with primitives (no font dependency)
+                        float cx = boundingBox.x + boundingBox.width * 0.5f;
+                        float cy = boundingBox.y + boundingBox.height * 0.5f;
+                        float r_outer = (boundingBox.width < boundingBox.height ? boundingBox.width : boundingBox.height) * 0.45f;
+                        float r_inner = r_outer * 0.55f;
+                        Color col = COLOR_TEXT;
+
+                        DrawCircleLines((int)roundf(cx), (int)roundf(cy), r_outer, col);
+                        DrawCircleLines((int)roundf(cx), (int)roundf(cy), r_inner, col);
+
+                        // 8 teeth/spokes
+                        for (int i = 0; i < 8; i++) {
+                            float a = (float)i * (PI / 4.0f);
+                            float x0 = cx + cosf(a) * r_inner;
+                            float y0 = cy + sinf(a) * r_inner;
+                            float x1 = cx + cosf(a) * r_outer;
+                            float y1 = cy + sinf(a) * r_outer;
+                            DrawLineEx((Vector2){x0, y0}, (Vector2){x1, y1}, 2.0f, col);
+                        }
+                        break;
+                    }
                     default: break;
                 }
                 break;
