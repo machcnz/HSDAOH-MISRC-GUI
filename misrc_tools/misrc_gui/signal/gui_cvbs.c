@@ -59,10 +59,12 @@ static const int16_t luma_kernel[LUMA_LPF_TAPS] = {
 static int16_t g_filtered_line[FILTERED_LINE_MAX];
 
 // Decode a single video line from samples to grayscale pixels
-// Optimized: pre-filters entire line, then resamples to output width
-static void decode_line_to_pixels(const int16_t *samples, size_t sample_count,
+// Optimized: pre-filters entire line, then resamples to output width.
+static void decode_line_to_pixels(const cvbs_decoder_t *decoder,
+                                  const int16_t *samples, size_t sample_count,
                                   const cvbs_levels_t *levels,
                                   uint8_t *pixels, int pixel_width) {
+    (void)decoder; // decoder currently unused; kept for API consistency
     if (!samples || !levels || !pixels || pixel_width <= 0) return;
     if (sample_count < (size_t)(BACK_PORCH_SAMPLES + pixel_width)) return;
 
@@ -900,8 +902,9 @@ static void decode_current_line(cvbs_decoder_t *decoder) {
             // Use samples from line buffer
             int samples_available = decoder->line_buffer_count;
             if (samples_available > 100) {  // Need minimum samples
-                decode_line_to_pixels(decoder->line_buffer, samples_available,
-                                     &decoder->levels, row_ptr, CVBS_FRAME_WIDTH);
+                decode_line_to_pixels(decoder,
+                                      decoder->line_buffer, samples_available,
+                                      &decoder->levels, row_ptr, CVBS_FRAME_WIDTH);
             }
         }
     }
@@ -1080,6 +1083,55 @@ void gui_cvbs_swap_buffers(cvbs_decoder_t *decoder) {
     }
 }
 
+// Draw on-screen status text depending on decoder->osd_mode.
+static void gui_cvbs_render_osd(cvbs_decoder_t *decoder,
+                                float draw_x, float draw_y,
+                                float draw_w, float draw_h) {
+    if (!decoder) return;
+
+    if (decoder->osd_mode == CVBS_OSD_OFF) {
+        return;
+    }
+
+    const char *deint_mode = (decoder->field_ready[0] && decoder->field_ready[1])
+                             ? "weave" : "bob";
+
+    float text_x = draw_x + 8.0f;
+    float text_y = draw_y + draw_h - 24.0f;
+
+    char osd_text[96];
+
+    if (decoder->osd_mode == CVBS_OSD_MINIMAL) {
+        // Minimal: deinterlacer + timing (existing behaviour)
+        snprintf(osd_text, sizeof(osd_text), "%s | %.2f ms", deint_mode, g_field_decode_avg_ms);
+        gui_text_draw_mono(osd_text, text_x + 1, text_y + 1, 14, BLACK);
+        gui_text_draw_mono(osd_text, text_x, text_y, 14, (Color){255, 255, 100, 255});
+        return;
+    }
+
+    // Detailed stats: include format, frames decoded and sync statistics.
+    const char *fmt_name = gui_cvbs_get_format_name(decoder);
+
+    // Line 1: format + deinterlacer + timing
+    snprintf(osd_text, sizeof(osd_text), "%s | %s | %.2f ms",
+             fmt_name, deint_mode, g_field_decode_avg_ms);
+    gui_text_draw_mono(osd_text, text_x + 1, text_y + 1, 14, BLACK);
+    gui_text_draw_mono(osd_text, text_x, text_y, 14, (Color){255, 255, 220, 255});
+
+    // Line 2: frames + sync stats
+    char osd_text2[96];
+    snprintf(osd_text2, sizeof(osd_text2),
+             "frames:%d sync_err:%d vsync:%d hsync/field:%d",
+             decoder->state.frames_decoded,
+             decoder->sync_errors,
+             decoder->debug.vsync_found,
+             decoder->debug.hsyncs_last_field);
+
+    float text2_y = text_y - 18.0f;
+    gui_text_draw_mono(osd_text2, text_x + 1, text2_y + 1, 14, BLACK);
+    gui_text_draw_mono(osd_text2, text_x, text2_y, 14, (Color){200, 255, 200, 255});
+}
+
 void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
                             float x, float y, float width, float height) {
     if (!decoder || !decoder->display_front) {
@@ -1140,18 +1192,8 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
     Rectangle dst = {draw_x, draw_y, draw_w, draw_h};
     DrawTexturePro(decoder->frame_texture, src, dst, (Vector2){0, 0}, 0, WHITE);
 
-    // Draw OSD overlay in bottom-left corner of video
-    const char *deint_mode = (decoder->field_ready[0] && decoder->field_ready[1]) ? "weave" : "bob";
-
-    float text_x = draw_x + 8;
-    float text_y = draw_y + draw_h - 24;
-
-    // Format: "weave | 5.2 ms"
-    char osd_text[64];
-    snprintf(osd_text, sizeof(osd_text), "%s | %.2f ms", deint_mode, g_field_decode_avg_ms);
-
-    gui_text_draw_mono(osd_text, text_x + 1, text_y + 1, 14, BLACK);  // Shadow
-    gui_text_draw_mono(osd_text, text_x, text_y, 14, (Color){255, 255, 100, 255});  // Yellow
+    // Draw OSD overlay (mode-controlled)
+    gui_cvbs_render_osd(decoder, draw_x, draw_y, draw_w, draw_h);
 }
 
 //-----------------------------------------------------------------------------
@@ -1213,86 +1255,128 @@ void gui_cvbs_set_format(cvbs_decoder_t *decoder, int format_select) {
 #include "../ui/gui_dropdown.h"
 #include "../ui/gui_ui.h"
 
-// Render the CVBS system selector overlay in the top-right corner of the panel
+// Render the CVBS overlay controls in the top-right corner of the panel
 // Uses the same style as sidebar dropdowns (FONT_SIZE_DROPDOWN_OPT, COLOR_BUTTON, etc.)
-// Overlay hitbox state is stored in decoder->overlay for click detection
+// Overlay hitbox state is stored in decoder->overlay for click detection.
+// Layout (right-aligned): [Decoder][OSD][System]
 static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
                                         float panel_x, float panel_y, float panel_w) {
     if (!decoder) return;
 
-    int sys = decoder->overlay.selected_system;
-    const char *sys_name = (sys == 0) ? "PAL" : (sys == 2) ? "SECAM" : "NTSC";
-
-    // Button dimensions matching sidebar style (65x18 with corner radius 3)
-    float btn_w = 65;
-    float btn_h = 18;
-    float btn_x = panel_x + panel_w - btn_w - 8;
-    float btn_y = panel_y + 8;
-
-    // Store hit box for click detection in decoder state
-    decoder->overlay.button_rect = (Rectangle){btn_x, btn_y, btn_w, btn_h};
     decoder->overlay.is_visible = true;
 
-    // Draw dropdown button (matching sidebar style)
-    bool is_open = decoder->overlay.dropdown_open;
-    Color btn_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    // Button dimensions
+    float btn_h = 18.0f;
+    float gap = 6.0f;
 
-    DrawRectangleRounded((Rectangle){btn_x, btn_y, btn_w, btn_h}, 0.15f, 4, btn_bg);
+    // System selector label (PAL/SECAM vs NTSC)
+    const char *system_labels[] = {"PAL/SECAM", "NTSC"};
+    int sys = decoder->overlay.selected_system; // 0=PAL/SECAM, 1=NTSC
+    if (sys < 0 || sys > 1) sys = 0;
+    const char *sys_name = system_labels[sys];
 
-    // Draw text centered, leaving room for arrow
-    int text_w = gui_text_measure(sys_name, FONT_SIZE_DROPDOWN_OPT);
-    float arrow_w = 8;  // Space for arrow
-    float total_w = text_w + arrow_w + 4;  // text + gap + arrow
-    float text_x = btn_x + (btn_w - total_w) / 2;
-    float text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2;
-    gui_text_draw(sys_name, text_x, text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+    // Compute button width large enough for both labels so the box
+    // does not change size when switching between PAL and NTSC.
+    float sys_text_w0 = (float)gui_text_measure(system_labels[0], FONT_SIZE_DROPDOWN_OPT);
+    float sys_text_w1 = (float)gui_text_measure(system_labels[1], FONT_SIZE_DROPDOWN_OPT);
+    float sys_text_w_max = (sys_text_w0 > sys_text_w1) ? sys_text_w0 : sys_text_w1;
+    float sys_btn_w = sys_text_w_max + 28.0f; // padding + arrow
+    if (sys_btn_w < 140.0f) sys_btn_w = 140.0f;
 
-    // Draw small triangle arrow indicator
+    const char *osd_labels[] = {"OSD: Off", "OSD: Minimal", "OSD: Stats"};
+    const char *osd_label = osd_labels[decoder->osd_mode];
+    float osd_text_w = (float)gui_text_measure(osd_label, FONT_SIZE_DROPDOWN_OPT);
+    float osd_btn_w = osd_text_w + 16.0f;
+    if (osd_btn_w < 90.0f) osd_btn_w = 90.0f;
+
+    const char *dec_label = (decoder->decoder_mode == CVBS_DECODER_MONO)
+                            ? "Decoder: Mono"
+                            : "Decoder: Basic";
+    float dec_text_w = (float)gui_text_measure(dec_label, FONT_SIZE_DROPDOWN_OPT);
+    float dec_btn_w = dec_text_w + 16.0f;
+    if (dec_btn_w < 110.0f) dec_btn_w = 110.0f;
+
+    // Position buttons from right to left
+    float x_right = panel_x + panel_w - 8.0f;
+    float btn_y = panel_y + 8.0f;
+
+    float sys_btn_x = x_right - sys_btn_w;
+    float osd_btn_x = sys_btn_x - gap - osd_btn_w;
+    float dec_btn_x = osd_btn_x - gap - dec_btn_w;
+
+    // Store hit boxes for click detection
+    decoder->overlay.decoder_btn_rect = (Rectangle){dec_btn_x, btn_y, dec_btn_w, btn_h};
+    decoder->overlay.osd_btn_rect     = (Rectangle){osd_btn_x, btn_y, osd_btn_w, btn_h};
+    decoder->overlay.system_btn_rect  = (Rectangle){sys_btn_x, btn_y, sys_btn_w, btn_h};
+
+    // Decoder mode button (cycles BASIC/MONO)
+    Color dec_bg = COLOR_BUTTON;
+    DrawRectangleRounded(decoder->overlay.decoder_btn_rect, 0.15f, 4, dec_bg);
+    float dec_text_x = dec_btn_x + (dec_btn_w - dec_text_w) / 2.0f;
+    float dec_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    gui_text_draw(dec_label, dec_text_x, dec_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // OSD mode button (cycles Off/Minimal/Stats)
+    Color osd_bg = COLOR_BUTTON;
+    DrawRectangleRounded(decoder->overlay.osd_btn_rect, 0.15f, 4, osd_bg);
+    float osd_text_x = osd_btn_x + (osd_btn_w - osd_text_w) / 2.0f;
+    float osd_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    gui_text_draw(osd_label, osd_text_x, osd_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // System selector button with dropdown arrow
+    bool is_open = decoder->overlay.system_dropdown_open;
+    Color sys_bg = is_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+    Rectangle sys_btn_rect = decoder->overlay.system_btn_rect;
+    DrawRectangleRounded(sys_btn_rect, 0.15f, 4, sys_bg);
+
+    int sys_label_w = gui_text_measure(sys_name, FONT_SIZE_DROPDOWN_OPT);
+    float arrow_w = 8.0f;
+    float total_w = (float)sys_label_w + arrow_w + 4.0f;
+    float sys_text_x = sys_btn_rect.x + (sys_btn_rect.width - total_w) / 2.0f;
+    float sys_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    gui_text_draw(sys_name, sys_text_x, sys_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // Arrow
     float arrow_size = 5.0f;
-    float arrow_x = text_x + text_w + 6;
-    float arrow_cy = btn_y + btn_h / 2;
+    float arrow_x = sys_text_x + sys_label_w + 6.0f;
+    float arrow_cy = btn_y + btn_h / 2.0f;
     if (is_open) {
-        // Up arrow (triangle pointing up)
         Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
         Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
         Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
         DrawTriangle(top, left, right, COLOR_TEXT);
     } else {
-        // Down arrow (triangle pointing down)
         Vector2 bottom = { arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
         Vector2 left = { arrow_x, arrow_cy - arrow_size/2 };
         Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
         DrawTriangle(bottom, right, left, COLOR_TEXT);
     }
 
-    // Draw dropdown options if open
+    // Draw dropdown options for system if open
     if (is_open) {
         float opt_y = btn_y + btn_h;
-        const char *options[] = {"PAL", "NTSC", "SECAM"};
-        int sys_values[] = {0, 1, 2};  // PAL=0, NTSC=1, SECAM=2
-        float opt_h = 20;  // Option height matching sidebar
+        const char *options[] = {"PAL/SECAM", "NTSC"};
+        int sys_values[] = {0, 1};
+        float opt_h = 20.0f;
 
         // Background for dropdown container
-        DrawRectangleRounded((Rectangle){btn_x, opt_y, btn_w, opt_h * 3}, 0.1f, 4, COLOR_PANEL_BG);
+        DrawRectangleRounded((Rectangle){sys_btn_rect.x, opt_y, sys_btn_rect.width, opt_h * 2.0f},
+                             0.1f, 4, COLOR_PANEL_BG);
 
-        for (int i = 0; i < 3; i++) {
-            Rectangle opt_rect = {btn_x, opt_y + i * opt_h, btn_w, opt_h};
-            decoder->overlay.options_rect[i] = opt_rect;
+        for (int i = 0; i < 2; i++) {
+            Rectangle opt_rect = {sys_btn_rect.x, opt_y + i * opt_h, sys_btn_rect.width, opt_h};
+            decoder->overlay.system_options_rect[i] = opt_rect;
 
             bool is_selected = (sys == sys_values[i]);
-
-            // Check hover
             Vector2 mouse = GetMousePosition();
             bool hover = CheckCollisionPointRec(mouse, opt_rect);
 
-            // Use gui_dropdown_option_color for consistent styling
             Color opt_bg = gui_dropdown_option_color(is_selected, hover);
             DrawRectangleRec(opt_rect, opt_bg);
 
-            // Center text in option using app font
             int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
-            float opt_text_x = btn_x + btn_w/2 - opt_text_w/2;
-            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2;
+            float opt_text_x = sys_btn_rect.x + sys_btn_rect.width/2.0f - opt_text_w/2.0f;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
             gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
         }
     }
@@ -1319,8 +1403,13 @@ static void *cvbs_vtable_create(void) {
         return NULL;
     }
 
-    // Default to NTSC (matches original simulated test signal)
-    decoder->overlay.selected_system = 1;  // 0=PAL, 1=NTSC, 2=SECAM
+    // Default decoder/OSD modes
+    decoder->decoder_mode = CVBS_DECODER_BASIC;
+    decoder->osd_mode = CVBS_OSD_MINIMAL;
+
+    // Default to 525-line NTSC (matches original simulated test signal)
+    decoder->overlay.selected_system = 1;  // 0=625-line PAL/SECAM, 1=525-line NTSC
+    decoder->overlay.system_dropdown_open = false;
     gui_cvbs_set_format(decoder, 1);
 
     return decoder;
@@ -1396,26 +1485,45 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     if (!decoder) return false;
     if (!decoder->overlay.is_visible) return false;
 
-    // Check button click - toggle dropdown
-    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.button_rect)) {
-        decoder->overlay.dropdown_open = !decoder->overlay.dropdown_open;
+    // Decoder mode button: cycle BASIC <-> MONO
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.decoder_btn_rect)) {
+        decoder->decoder_mode = (decoder->decoder_mode == CVBS_DECODER_BASIC)
+                                ? CVBS_DECODER_MONO
+                                : CVBS_DECODER_BASIC;
         return true;
     }
 
-    // Check option clicks if dropdown is open
-    if (decoder->overlay.dropdown_open) {
-        int sys_values[] = {0, 1, 2};  // PAL, NTSC, SECAM
-        for (int i = 0; i < 3; i++) {
-            if (CheckCollisionPointRec(mouse_pos, decoder->overlay.options_rect[i])) {
+    // OSD mode button: cycle OFF -> MINIMAL -> STATS -> OFF
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.osd_btn_rect)) {
+        if (decoder->osd_mode == CVBS_OSD_OFF) {
+            decoder->osd_mode = CVBS_OSD_MINIMAL;
+        } else if (decoder->osd_mode == CVBS_OSD_MINIMAL) {
+            decoder->osd_mode = CVBS_OSD_STATS;
+        } else {
+            decoder->osd_mode = CVBS_OSD_OFF;
+        }
+        return true;
+    }
+
+    // System button: toggle dropdown
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.system_btn_rect)) {
+        decoder->overlay.system_dropdown_open = !decoder->overlay.system_dropdown_open;
+        return true;
+    }
+
+    // System dropdown options
+    if (decoder->overlay.system_dropdown_open) {
+        int sys_values[] = {0, 1};  // 0=625-line PAL/SECAM, 1=525-line NTSC
+        for (int i = 0; i < 2; i++) {
+            if (CheckCollisionPointRec(mouse_pos, decoder->overlay.system_options_rect[i])) {
                 decoder->overlay.selected_system = sys_values[i];
-                // Apply the format change to the decoder
                 gui_cvbs_set_format(decoder, sys_values[i]);
-                decoder->overlay.dropdown_open = false;
+                decoder->overlay.system_dropdown_open = false;
                 return true;
             }
         }
         // Click outside dropdown closes it
-        decoder->overlay.dropdown_open = false;
+        decoder->overlay.system_dropdown_open = false;
     }
 
     return false;

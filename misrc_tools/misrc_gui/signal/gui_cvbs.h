@@ -43,9 +43,9 @@ typedef enum {
 #define CVBS_NTSC_HEIGHT      486   // NTSC (D1) active lines
 #define CVBS_MAX_HEIGHT       576   // Maximum (PAL/SECAM)
 
-// Line counts
-#define CVBS_PAL_TOTAL_LINES  625
-#define CVBS_NTSC_TOTAL_LINES 525
+// Line counts (used for 625-line / 525-line mode naming)
+#define CVBS_PAL_TOTAL_LINES  625   // 625-line PAL/SECAM
+#define CVBS_NTSC_TOTAL_LINES 525   // 525-line NTSC
 #define CVBS_PAL_ACTIVE_LINES 576
 #define CVBS_NTSC_ACTIVE_LINES 480
 
@@ -68,6 +68,22 @@ typedef struct {
     bool frame_complete;           // A complete frame is ready for display
     int frames_decoded;            // Total frames decoded
 } cvbs_frame_state_t;
+
+// Decoder/OSD modes
+// Decoder mode controls how aggressively we remove the colour subcarrier.
+// BASIC  = current behaviour (light luma LPF)
+// MONO   = stronger luma filtering to suppress checkerboard/chroma patterns.
+typedef enum {
+    CVBS_DECODER_BASIC = 0,
+    CVBS_DECODER_MONO  = 1,
+} cvbs_decoder_mode_t;
+
+// OSD mode controls how much status text is overlaid on the video.
+typedef enum {
+    CVBS_OSD_OFF     = 0,  // no overlay
+    CVBS_OSD_MINIMAL = 1,  // deinterlacer + timing
+    CVBS_OSD_STATS   = 2,  // detailed statistics
+} cvbs_osd_mode_t;
 
 // Software PLL state for H-sync tracking
 typedef struct {
@@ -124,6 +140,10 @@ typedef struct cvbs_decoder {
     bool field_ready[2];
     // Frame state
     cvbs_frame_state_t state;
+
+    // Decoder configuration
+    cvbs_decoder_mode_t decoder_mode;   // BASIC vs MONO
+    cvbs_osd_mode_t osd_mode;           // Off / Minimal / Stats
 
     // Field buffers (grayscale, 720 x field_height each)
     // Each field buffer stores half the vertical resolution
@@ -186,13 +206,19 @@ typedef struct cvbs_decoder {
         int log_counter;               // Per-instance debug log counter
     } debug;
 
-    // UI overlay state (for system selector dropdown)
+    // UI overlay state (for panel-top controls)
     struct {
-        Rectangle button_rect;         // Hit box for system selector button
-        Rectangle options_rect[3];     // Hit boxes for PAL, NTSC, SECAM options
+        // Buttons (right-aligned): [Decoder][OSD][System]
+        Rectangle decoder_btn_rect;    // Hit box for decoder mode button
+        Rectangle osd_btn_rect;        // Hit box for OSD mode button
+        Rectangle system_btn_rect;     // Hit box for system selector button
+
+        // Dropdown options for system selector (0=625-line PAL/SECAM, 1=525-line NTSC)
+        Rectangle system_options_rect[2];
+
         bool is_visible;               // Whether overlay was rendered (for click detection)
-        bool dropdown_open;            // Whether dropdown is currently open
-        int selected_system;           // Currently selected system (0=PAL, 1=NTSC, 2=SECAM)
+        bool system_dropdown_open;     // Whether system dropdown is currently open
+        int selected_system;           // 0=625-line PAL/SECAM, 1=525-line NTSC
     } overlay;
 } cvbs_decoder_t;
 
