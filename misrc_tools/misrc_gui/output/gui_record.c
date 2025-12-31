@@ -43,15 +43,15 @@
 #define BUFFER_READ_SIZE 65536
 
 // Format file size into human-readable string
-static void format_file_size(off_t size, char *buf, size_t buf_size) {
-    if (size >= 1073741824) {  // >= 1 GB
+static void format_file_size_u64(uint64_t size, char *buf, size_t buf_size) {
+    if (size >= 1073741824ULL) {  // >= 1 GB
         snprintf(buf, buf_size, "%.2f GB", (double)size / 1073741824.0);
-    } else if (size >= 1048576) {  // >= 1 MB
+    } else if (size >= 1048576ULL) {  // >= 1 MB
         snprintf(buf, buf_size, "%.2f MB", (double)size / 1048576.0);
-    } else if (size >= 1024) {  // >= 1 KB
+    } else if (size >= 1024ULL) {  // >= 1 KB
         snprintf(buf, buf_size, "%.2f KB", (double)size / 1024.0);
     } else {
-        snprintf(buf, buf_size, "%lld bytes", (long long)size);
+        snprintf(buf, buf_size, "%llu bytes", (unsigned long long)size);
     }
 }
 
@@ -289,13 +289,13 @@ int gui_record_start(gui_app_t *app) {
             "The following files will be overwritten:\n\n");
 
         if (file_a_exists) {
-            format_file_size(stat_a.st_size, size_buf, sizeof(size_buf));
+            format_file_size_u64((uint64_t)stat_a.st_size, size_buf, sizeof(size_buf));
             offset += snprintf(message + offset, sizeof(message) - offset,
                 "CH A: %s (%s)\n", path_a, size_buf);
         }
 
         if (file_b_exists) {
-            format_file_size(stat_b.st_size, size_buf, sizeof(size_buf));
+            format_file_size_u64((uint64_t)stat_b.st_size, size_buf, sizeof(size_buf));
             offset += snprintf(message + offset, sizeof(message) - offset,
                 "CH B: %s (%s)\n", path_b, size_buf);
         }
@@ -621,8 +621,8 @@ void gui_record_stop(gui_app_t *app) {
     uint32_t rec_drops = end_drop - s_start_drop_count;
 
     char size_a[32], size_b[32];
-    format_file_size((off_t)raw_a, size_a, sizeof(size_a));
-    format_file_size((off_t)raw_b, size_b, sizeof(size_b));
+    format_file_size_u64(raw_a, size_a, sizeof(size_a));
+    format_file_size_u64(raw_b, size_b, sizeof(size_b));
 
     fprintf(stderr, "[REC] Recording stopped: %.1fs, A=%s, B=%s, waits=%u, drops=%u\n",
             duration, size_a, size_b, rec_waits, rec_drops);

@@ -2,6 +2,11 @@
  * MISRC Common - Ringbuffer Event Primitives Implementation
  */
 
+/* Feature test macros for POSIX functions */
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "rb_event.h"
 
 #ifdef _WIN32

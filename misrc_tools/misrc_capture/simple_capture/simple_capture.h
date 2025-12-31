@@ -18,11 +18,13 @@
 
 #ifndef SIMPLE_CAPTURE_H
 #define SIMPLE_CAPTURE_H
-
 #include <stdint.h>
 
 #if defined(__linux__)
+	/* linux/videodev2.h depends on struct timeval/timespec; ensure they're declared first. */
+	#include <sys/time.h>
 	#include <time.h>
+	#include <stddef.h>
 	#include <linux/videodev2.h>
 	typedef uint32_t sc_codec_t;
 	#define SC_CODEC_GREY  V4L2_PIX_FMT_GREY

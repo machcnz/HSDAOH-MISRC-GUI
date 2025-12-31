@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <stddef.h>
+#include <time.h>
 #include "raylib.h"
 #include "../../common/buffer_manager.h"
 

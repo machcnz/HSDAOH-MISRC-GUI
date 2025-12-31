@@ -22,6 +22,18 @@
         #define le32toh(x) letoh32(x)
     #else
         #include <endian.h>
+        /* Some libcs only expose leXXtoh when certain feature macros are enabled.
+         * Provide a fallback to avoid implicit-declaration + link errors. */
+        #ifndef le16toh
+            #if __BYTE_ORDER == __LITTLE_ENDIAN
+                #define le16toh(x) (x)
+                #define le32toh(x) (x)
+            #else
+                #include <byteswap.h>
+                #define le16toh(x) bswap_16(x)
+                #define le32toh(x) bswap_32(x)
+            #endif
+        #endif
     #endif
 #else
     /* Windows is always little-endian */
