@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <io.h>
@@ -251,6 +252,84 @@ bool gui_record_is_pending(void) {
 // Forward declaration of actual recording start (after confirmation)
 static int gui_record_start_confirmed(gui_app_t *app);
 
+static uint8_t clamp_rf_bits_flac(uint8_t bits) {
+    if (bits == 8 || bits == 12 || bits == 16) return bits;
+    return 16;
+}
+
+static uint8_t rf_bits_for_raw(uint8_t requested) {
+    // RAW supports 8/16 only; treat 12 as 16.
+    return (requested == 8) ? 8 : 16;
+}
+
+static void format_msps_from_khz(char *dst, size_t dst_len, float khz) {
+    if (!dst || dst_len == 0) return;
+    double msps = (double)khz / 1000.0;
+    // Render without trailing .0 when possible.
+    if (fabs(msps - (double)((int)msps)) < 1e-6) {
+        snprintf(dst, dst_len, "%dmsps", (int)msps);
+    } else {
+        snprintf(dst, dst_len, "%.1fmsps", msps);
+    }
+}
+
+static void gui_record_apply_auto_names(gui_app_t *app) {
+    if (!app) return;
+    if (!app->settings.auto_names_enabled) return;
+
+    const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
+
+    // RF filenames
+    if (app->settings.use_flac) {
+        uint8_t bits_a = clamp_rf_bits_flac(app->settings.rf_bits_a);
+        uint8_t bits_b = clamp_rf_bits_flac(app->settings.rf_bits_b);
+
+        char tag_a[32] = {0};
+        char tag_b[32] = {0};
+        if (app->settings.enable_resample_a) format_msps_from_khz(tag_a, sizeof(tag_a), app->settings.resample_rate_a);
+        if (app->settings.enable_resample_b) format_msps_from_khz(tag_b, sizeof(tag_b), app->settings.resample_rate_b);
+
+        if (tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_%s_chA.flac", base, (unsigned)bits_a, tag_a);
+        } else {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_chA.flac", base, (unsigned)bits_a);
+        }
+        if (tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_%s_chB.flac", base, (unsigned)bits_b, tag_b);
+        } else {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_chB.flac", base, (unsigned)bits_b);
+        }
+    } else {
+        // RAW: 8/16 only
+        uint8_t bits_a = rf_bits_for_raw(app->settings.rf_bits_a);
+        uint8_t bits_b = rf_bits_for_raw(app->settings.rf_bits_b);
+
+        char tag_a[32] = {0};
+        char tag_b[32] = {0};
+        if (app->settings.enable_resample_a) format_msps_from_khz(tag_a, sizeof(tag_a), app->settings.resample_rate_a);
+        if (app->settings.enable_resample_b) format_msps_from_khz(tag_b, sizeof(tag_b), app->settings.resample_rate_b);
+
+        if (tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_%s_chA.raw", base, (unsigned)bits_a, tag_a);
+        } else {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_chA.raw", base, (unsigned)bits_a);
+        }
+        if (tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_%s_chB.raw", base, (unsigned)bits_b, tag_b);
+        } else {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_chB.raw", base, (unsigned)bits_b);
+        }
+    }
+
+    // Audio filenames (WAV)
+    snprintf(app->settings.audio_4ch_filename, MAX_FILENAME_LEN, "%s_quad_4ch.wav", base);
+    snprintf(app->settings.audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_stereo_ch1_ch2.wav", base);
+    snprintf(app->settings.audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_stereo_ch3_ch4.wav", base);
+    for (int i = 0; i < 4; i++) {
+        snprintf(app->settings.audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_audio_ch%d.wav", base, i + 1);
+    }
+}
+
 // Start recording - checks for file existence first
 int gui_record_start(gui_app_t *app) {
 
@@ -267,6 +346,9 @@ int gui_record_start(gui_app_t *app) {
     if (s_overwrite_pending) {
         return RECORD_PENDING;
     }
+
+    // Apply auto naming (must happen before overwrite checks)
+    gui_record_apply_auto_names(app);
 
     // Build full output paths (output_path + filenames)
     char path_a[512];
@@ -395,9 +477,9 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             return RECORD_ERROR;
         }
 
-        // Determine per-channel RF bit depth (matches CLI: --8bit-* overrides)
-        uint8_t bits_a = app->settings.reduce_8bit_a ? 8 : (app->settings.flac_12bit ? 12 : 16);
-        uint8_t bits_b = app->settings.reduce_8bit_b ? 8 : (app->settings.flac_12bit ? 12 : 16);
+        // Determine per-channel RF bit depth
+        uint8_t bits_a = clamp_rf_bits_flac(app->settings.rf_bits_a);
+        uint8_t bits_b = clamp_rf_bits_flac(app->settings.rf_bits_b);
 
         // Setup writer contexts
         s_ctx_a.bufmgr = &app->buffers;
@@ -512,8 +594,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             return RECORD_ERROR;
         }
 
-        uint8_t bits_a = app->settings.reduce_8bit_a ? 8 : 16;
-        uint8_t bits_b = app->settings.reduce_8bit_b ? 8 : 16;
+        uint8_t bits_a = rf_bits_for_raw(app->settings.rf_bits_a);
+        uint8_t bits_b = rf_bits_for_raw(app->settings.rf_bits_b);
 
         s_ctx_a.bufmgr = &app->buffers;
         s_ctx_a.buf_id = BUF_RECORD_A;

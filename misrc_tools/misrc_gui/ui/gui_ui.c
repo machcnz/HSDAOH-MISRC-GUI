@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <math.h>
 
 #ifndef MIRSC_TOOLS_VERSION
 #define MIRSC_TOOLS_VERSION "dev"
@@ -24,6 +26,10 @@
 
 // Track if UI consumed the current frame's click (prevents click-through)
 static bool s_ui_consumed_click = false;
+
+// Simple in-place text editing state (settings panel)
+static bool s_edit_output_base_name = false;
+static double s_base_name_backspace_repeat_at = 0.0;
 
 bool gui_ui_click_consumed(void) {
     return s_ui_consumed_click;
@@ -62,8 +68,58 @@ static char stat_b_errors[16];
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
 
+// Settings panel stable display buffers (avoid reuse of temp_buf* across layout)
+static char settings_base_name_display[256];
+static char settings_rf_bits_a_display[16];
+static char settings_rf_bits_b_display[16];
+static char settings_flac_level_display[64];
+static char settings_flac_threads_display[64];
+static char settings_resample_a_display[32];
+static char settings_resample_b_display[32];
+
 static Clay_String make_string(const char *str) {
     return (Clay_String){ .isStaticallyAllocated = false, .length = (int32_t)strlen(str), .chars = str };
+}
+
+static Color ui_disabled_color(Color c) {
+    // Dim and slightly transparent.
+    return (Color){ (unsigned char)(c.r * 0.55f), (unsigned char)(c.g * 0.55f), (unsigned char)(c.b * 0.55f), (unsigned char)(c.a * 0.80f) };
+}
+
+static const char *rf_bits_label(uint8_t bits) {
+    switch (bits) {
+        case 8: return "8";
+        case 12: return "12";
+        default: return "16";
+    }
+}
+
+static void format_msps_label(char *dst, size_t dst_len, float khz) {
+    if (!dst || dst_len == 0) return;
+    double msps = (double)khz / 1000.0;
+    // Trim trailing .0
+    if (fabs(msps - (double)((int)msps)) < 1e-6) {
+        snprintf(dst, dst_len, "%d MSPS", (int)msps);
+    } else {
+        snprintf(dst, dst_len, "%.1f MSPS", msps);
+    }
+}
+
+static float cycle_resample_khz(float current_khz) {
+    // User-facing presets: 5/10/14.3/17.9/20 MSPS, stored as kHz.
+    static const float presets_khz[] = { 5000.0f, 10000.0f, 14300.0f, 17900.0f, 20000.0f };
+    const int n = (int)(sizeof(presets_khz) / sizeof(presets_khz[0]));
+
+    // Find nearest preset (within 1 kHz), otherwise start from first.
+    int idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (fabsf(current_khz - presets_khz[i]) < 1.0f) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) return presets_khz[0];
+    return presets_khz[(idx + 1) % n];
 }
 
 // Static storage for custom element data (persists during render)
@@ -92,7 +148,7 @@ static void render_settings_panel(gui_app_t *app) {
     // Panel
     CLAY(CLAY_ID("SettingsPanel"), {
         .layout = {
-            .sizing = { CLAY_SIZING_FIT(.min = 520, .max = 900), CLAY_SIZING_PERCENT(0.90f) },
+            .sizing = { CLAY_SIZING_FIT(.min = 520, .max = 900), CLAY_SIZING_PERCENT(0.75f) },
             .layoutDirection = CLAY_TOP_TO_BOTTOM,
             .padding = { 14, 14, 14, 14 },
             .childGap = 10
@@ -130,6 +186,43 @@ static void render_settings_panel(gui_app_t *app) {
             }) {
                 CLAY_TEXT(CLAY_STRING("X"),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+        }
+
+        // Auto naming (moved to top segment, above Output folder)
+        CLAY_TEXT(CLAY_STRING("Auto naming:"),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+        CLAY(CLAY_ID("AutoNameToggleRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+            CLAY(CLAY_ID("ToggleAutoNames"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.auto_names_enabled ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                CLAY_TEXT(app->settings.auto_names_enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+            CLAY_TEXT(CLAY_STRING("Generate filenames automatically"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        CLAY(CLAY_ID("BaseNameRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+            CLAY_TEXT(CLAY_STRING("Capture Name:"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+            Color base_box_bg = (Color){25,25,30,255};
+            Color base_box_fg = COLOR_TEXT;
+            if (!app->settings.auto_names_enabled) {
+                base_box_bg = ui_disabled_color(base_box_bg);
+                base_box_fg = ui_disabled_color(base_box_fg);
+            }
+
+            CLAY(CLAY_ID("OutputBaseNameField"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(base_box_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
+                // Visual caret indicator when editing.
+                if (s_edit_output_base_name && app->settings.auto_names_enabled) {
+                    snprintf(settings_base_name_display, sizeof(settings_base_name_display), "%s_", base);
+                    CLAY_TEXT(make_string(settings_base_name_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(base_box_fg) }));
+                } else {
+                    CLAY_TEXT(make_string(base), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(base_box_fg) }));
+                }
+            }
+
+            CLAY(CLAY_ID("OutputBaseNameHint"), { .layout = { .sizing = { CLAY_SIZING_FIXED(90), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER } } }) {
+                CLAY_TEXT(CLAY_STRING("(click to edit)"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
             }
         }
 
@@ -217,6 +310,13 @@ static void render_settings_panel(gui_app_t *app) {
                             CLAY_TEXT(app->settings.capture_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
                         CLAY_TEXT(CLAY_STRING("Capture RF ADC A"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+                        // RF bit depth selector (moved up into Capture segment)
+                        CLAY(CLAY_ID("CaptureRowSpacerA"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
+                        snprintf(settings_rf_bits_a_display, sizeof(settings_rf_bits_a_display), "%s-bit", rf_bits_label(app->settings.rf_bits_a));
+                        CLAY(CLAY_ID("RfBitsABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_rf_bits_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
+                        }
                     }
 
                     CLAY(CLAY_ID("ToggleRowCaptureB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
@@ -224,6 +324,12 @@ static void render_settings_panel(gui_app_t *app) {
                             CLAY_TEXT(app->settings.capture_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
                         CLAY_TEXT(CLAY_STRING("Capture RF ADC B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+                        CLAY(CLAY_ID("CaptureRowSpacerB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
+                        snprintf(settings_rf_bits_b_display, sizeof(settings_rf_bits_b_display), "%s-bit", rf_bits_label(app->settings.rf_bits_b));
+                        CLAY(CLAY_ID("RfBitsBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_rf_bits_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
+                        }
                     }
 
                     CLAY(CLAY_ID("ToggleRowFlac"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
@@ -233,34 +339,7 @@ static void render_settings_panel(gui_app_t *app) {
                         CLAY_TEXT(CLAY_STRING("RF FLAC compression"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                     }
 
-                    CLAY(CLAY_ID("ToggleRowOverwrite"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleOverwrite"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.overwrite_files ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.overwrite_files ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                        }
-                        CLAY_TEXT(CLAY_STRING("Overwrite output files"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
-
-                    // Compression section
-                    CLAY_TEXT(CLAY_STRING("Compression (RF):"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-
-                    // FLAC level stepper
-                    CLAY(CLAY_ID("FlacLevelRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("FlacLevelMinus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
-                        snprintf(temp_buf7, sizeof(temp_buf7), "FLAC level: %d", app->settings.flac_level);
-                        CLAY(CLAY_ID("FlacLevelValue"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color((Color){25,25,30,255}), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(make_string(temp_buf7), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
-                        CLAY(CLAY_ID("FlacLevelPlus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
-                    }
-
-                    // FLAC 12-bit toggle
-                    CLAY(CLAY_ID("ToggleRowFlac12"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleFlac12bit"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.flac_12bit ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.flac_12bit ? CLAY_STRING("12-bit") : CLAY_STRING("16-bit"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
-                        }
-                        CLAY_TEXT(CLAY_STRING("FLAC bit depth"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
-
-                    // FLAC verify toggle
+                    // FLAC verify toggle (moved directly under enable)
                     CLAY(CLAY_ID("ToggleRowFlacVerify"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                         CLAY(CLAY_ID("ToggleFlacVerify"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.flac_verification ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.flac_verification ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
@@ -268,11 +347,29 @@ static void render_settings_panel(gui_app_t *app) {
                         CLAY_TEXT(CLAY_STRING("Verify FLAC output"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                     }
 
+                    CLAY(CLAY_ID("ToggleRowOverwrite"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                        CLAY(CLAY_ID("ToggleOverwrite"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.overwrite_files ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(app->settings.overwrite_files ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        }
+                        CLAY_TEXT(CLAY_STRING("Overwrite output files"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                    }
+                    // Compression section
+                    CLAY_TEXT(CLAY_STRING("Compression (RF):"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+                    // FLAC level stepper
+                    CLAY(CLAY_ID("FlacLevelRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                        CLAY(CLAY_ID("FlacLevelMinus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
+                        snprintf(settings_flac_level_display, sizeof(settings_flac_level_display), "FLAC level: %d", app->settings.flac_level);
+                        CLAY(CLAY_ID("FlacLevelValue"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color((Color){25,25,30,255}), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(make_string(settings_flac_level_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
+                        CLAY(CLAY_ID("FlacLevelPlus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
+                    }
+
                     // FLAC threads stepper (0=auto)
                     CLAY(CLAY_ID("FlacThreadsRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                         CLAY(CLAY_ID("FlacThreadsMinus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
-                        snprintf(temp_buf8, sizeof(temp_buf8), "FLAC threads: %d", app->settings.flac_threads);
-                        CLAY(CLAY_ID("FlacThreadsValue"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color((Color){25,25,30,255}), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(make_string(temp_buf8), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
+                        snprintf(settings_flac_threads_display, sizeof(settings_flac_threads_display), "FLAC threads: %d", app->settings.flac_threads);
+                        CLAY(CLAY_ID("FlacThreadsValue"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color((Color){25,25,30,255}), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(make_string(settings_flac_threads_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
                         CLAY(CLAY_ID("FlacThreadsPlus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
                     }
 
@@ -284,33 +381,31 @@ static void render_settings_panel(gui_app_t *app) {
                         CLAY(CLAY_ID("ToggleResampleA"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_resample_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_resample_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("Enable resample A"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Resample A"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+                        // Rate selector (kHz stored; display MSPS)
+                        format_msps_label(settings_resample_a_display, sizeof(settings_resample_a_display), app->settings.resample_rate_a);
+                        Color rate_bg = app->settings.enable_resample_a ? COLOR_BUTTON : ui_disabled_color(COLOR_BUTTON);
+                        Color rate_fg = app->settings.enable_resample_a ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        CLAY(CLAY_ID("ResampleRateABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_resample_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
+                        }
                     }
 
                     CLAY(CLAY_ID("ToggleRowResampleB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                         CLAY(CLAY_ID("ToggleResampleB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_resample_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_resample_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("Enable resample B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
+                        CLAY_TEXT(CLAY_STRING("Resample B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
 
-                    // 8-bit section
-                    CLAY_TEXT(CLAY_STRING("8-bit mode (RF):"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-
-                    CLAY(CLAY_ID("ToggleRow8bitA"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("Toggle8bitA"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.reduce_8bit_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.reduce_8bit_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        format_msps_label(settings_resample_b_display, sizeof(settings_resample_b_display), app->settings.resample_rate_b);
+                        Color rate_bg = app->settings.enable_resample_b ? COLOR_BUTTON : ui_disabled_color(COLOR_BUTTON);
+                        Color rate_fg = app->settings.enable_resample_b ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        CLAY(CLAY_ID("ResampleRateBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_resample_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("Reduce RF A to 8-bit"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                     }
 
-                    CLAY(CLAY_ID("ToggleRow8bitB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("Toggle8bitB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.reduce_8bit_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.reduce_8bit_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                        }
-                        CLAY_TEXT(CLAY_STRING("Reduce RF B to 8-bit"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
                 }
 
                 // Right column
@@ -329,21 +424,46 @@ static void render_settings_panel(gui_app_t *app) {
                         CLAY(CLAY_ID("ToggleAudio4ch"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_audio_4ch ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_audio_4ch ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        CLAY_TEXT(make_string(app->settings.audio_4ch_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Quad Ch1-4"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(make_string(app->settings.audio_4ch_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                     }
 
                     CLAY(CLAY_ID("ToggleRowAudio2ch12"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                         CLAY(CLAY_ID("ToggleAudio2ch12"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_audio_2ch_12 ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_audio_2ch_12 ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        CLAY_TEXT(make_string(app->settings.audio_2ch_12_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Stereo Ch1/Ch2"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(make_string(app->settings.audio_2ch_12_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                     }
 
                     CLAY(CLAY_ID("ToggleRowAudio2ch34"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                         CLAY(CLAY_ID("ToggleAudio2ch34"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_audio_2ch_34 ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_audio_2ch_34 ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        CLAY_TEXT(make_string(app->settings.audio_2ch_34_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Stereo Ch3/Ch4"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(make_string(app->settings.audio_2ch_34_filename), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                    }
+
+                    // Audio 1ch (WAV) - mono CH1/CH2/CH3/CH4 list (do not alter)
+                    CLAY_TEXT(CLAY_STRING("Audio 1ch (WAV):"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+                    for (int i = 0; i < 4; i++) {
+                        Clay_ElementId row_id = CLAY_IDI("ToggleRowAudio1ch", i);
+                        Clay_ElementId toggle_id = CLAY_IDI("ToggleAudio1ch", i);
+
+                        CLAY(row_id, { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                            CLAY(toggle_id, { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_audio_1ch[i] ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                                CLAY_TEXT(app->settings.enable_audio_1ch[i] ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                            }
+
+                            if (i == 0) CLAY_TEXT(CLAY_STRING("CH1"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                            else if (i == 1) CLAY_TEXT(CLAY_STRING("CH2"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                            else if (i == 2) CLAY_TEXT(CLAY_STRING("CH3"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                            else CLAY_TEXT(CLAY_STRING("CH4"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+                            CLAY_TEXT(make_string(app->settings.audio_1ch_filenames[i]), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                        }
                     }
 
                     // Playback files section
@@ -393,9 +513,6 @@ static void render_settings_panel(gui_app_t *app) {
                     }
                 }
             }
-
-            CLAY_TEXT(CLAY_STRING("Changes are saved automatically."),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
         }
     }
 }
@@ -1203,6 +1320,48 @@ void gui_handle_interactions(gui_app_t *app) {
     // Reset click consumed flag at start of each frame
     s_ui_consumed_click = false;
 
+    // Handle simple text input when editing capture name
+    if (app->settings_panel_open && s_edit_output_base_name) {
+        // Append printable ASCII chars (avoid locale/undefined behavior with ctype on >255)
+        int ch = GetCharPressed();
+        while (ch > 0) {
+            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
+                size_t len = strlen(app->settings.output_base_name);
+                if (len + 1 < sizeof(app->settings.output_base_name)) {
+                    app->settings.output_base_name[len] = (char)ch;
+                    app->settings.output_base_name[len + 1] = '\0';
+                    gui_settings_save(&app->settings);
+                }
+            }
+            ch = GetCharPressed();
+        }
+
+        // Backspace with repeat
+        if (IsKeyPressed(KEY_BACKSPACE)) {
+            s_base_name_backspace_repeat_at = GetTime() + 0.25; // initial delay
+            size_t len = strlen(app->settings.output_base_name);
+            if (len > 0) {
+                app->settings.output_base_name[len - 1] = '\0';
+                gui_settings_save(&app->settings);
+            }
+        } else if (IsKeyDown(KEY_BACKSPACE)) {
+            double now = GetTime();
+            if (now >= s_base_name_backspace_repeat_at) {
+                s_base_name_backspace_repeat_at = now + 0.05;
+                size_t len = strlen(app->settings.output_base_name);
+                if (len > 0) {
+                    app->settings.output_base_name[len - 1] = '\0';
+                    gui_settings_save(&app->settings);
+                }
+            }
+        }
+
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+            s_edit_output_base_name = false;
+            gui_settings_save(&app->settings);
+        }
+    }
+
     // Handle popup interactions first (modal behavior)
     if (gui_popup_handle_interactions()) {
         s_ui_consumed_click = true;
@@ -1259,10 +1418,6 @@ void gui_handle_interactions(gui_app_t *app) {
                 app->settings.overwrite_files = !app->settings.overwrite_files;
                 gui_settings_save(&app->settings);
             }
-            if (Clay_PointerOver(CLAY_ID("ToggleFlac12bit"))) {
-                app->settings.flac_12bit = !app->settings.flac_12bit;
-                gui_settings_save(&app->settings);
-            }
             if (Clay_PointerOver(CLAY_ID("ToggleFlacVerify"))) {
                 app->settings.flac_verification = !app->settings.flac_verification;
                 gui_settings_save(&app->settings);
@@ -1287,31 +1442,80 @@ void gui_handle_interactions(gui_app_t *app) {
                 app->settings.enable_resample_a = !app->settings.enable_resample_a;
                 gui_settings_save(&app->settings);
             }
+            if (Clay_PointerOver(CLAY_ID("ResampleRateABox"))) {
+                app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
+                gui_settings_save(&app->settings);
+            }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
                 app->settings.enable_resample_b = !app->settings.enable_resample_b;
                 gui_settings_save(&app->settings);
             }
-
-            if (Clay_PointerOver(CLAY_ID("Toggle8bitA"))) {
-                app->settings.reduce_8bit_a = !app->settings.reduce_8bit_a;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("Toggle8bitB"))) {
-                app->settings.reduce_8bit_b = !app->settings.reduce_8bit_b;
+            if (Clay_PointerOver(CLAY_ID("ResampleRateBBox"))) {
+                app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
                 gui_settings_save(&app->settings);
             }
 
-            if (Clay_PointerOver(CLAY_ID("ToggleAudio4ch"))) {
-                app->settings.enable_audio_4ch = !app->settings.enable_audio_4ch;
+            // Auto naming controls
+            if (Clay_PointerOver(CLAY_ID("ToggleAutoNames"))) {
+                app->settings.auto_names_enabled = !app->settings.auto_names_enabled;
+                if (!app->settings.output_base_name[0]) {
+                    snprintf(app->settings.output_base_name, sizeof(app->settings.output_base_name), "%s", "capture");
+                }
                 gui_settings_save(&app->settings);
             }
+            if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
+                s_edit_output_base_name = true;
+                s_base_name_backspace_repeat_at = 0.0;
+            }
+
+            // RF bit depth selection (cycle)
+            // If user switches to RAW and a channel was set to 12-bit, treat it as 16-bit.
+            if (!app->settings.use_flac) {
+                if (app->settings.rf_bits_a == 12) app->settings.rf_bits_a = 16;
+                if (app->settings.rf_bits_b == 12) app->settings.rf_bits_b = 16;
+            }
+
+            if (Clay_PointerOver(CLAY_ID("RfBitsABox"))) {
+                uint8_t b = app->settings.rf_bits_a;
+                if (app->settings.use_flac) {
+                    // 8 -> 12 -> 16 -> 8
+                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                } else {
+                    // RAW: 8 <-> 16
+                    b = (b == 8) ? 16 : 8;
+                }
+                app->settings.rf_bits_a = b;
+                gui_settings_save(&app->settings);
+            }
+            if (Clay_PointerOver(CLAY_ID("RfBitsBBox"))) {
+                uint8_t b = app->settings.rf_bits_b;
+                if (app->settings.use_flac) {
+                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                } else {
+                    b = (b == 8) ? 16 : 8;
+                }
+                app->settings.rf_bits_b = b;
+                gui_settings_save(&app->settings);
+            }
+
             if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch12"))) {
                 app->settings.enable_audio_2ch_12 = !app->settings.enable_audio_2ch_12;
+                gui_settings_save(&app->settings);
+            }
+            if (Clay_PointerOver(CLAY_ID("ToggleAudio4ch"))) {
+                app->settings.enable_audio_4ch = !app->settings.enable_audio_4ch;
                 gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch34"))) {
                 app->settings.enable_audio_2ch_34 = !app->settings.enable_audio_2ch_34;
                 gui_settings_save(&app->settings);
+            }
+
+            for (int i = 0; i < 4; i++) {
+                if (Clay_PointerOver(CLAY_IDI("ToggleAudio1ch", i))) {
+                    app->settings.enable_audio_1ch[i] = !app->settings.enable_audio_1ch[i];
+                    gui_settings_save(&app->settings);
+                }
             }
 
             if (Clay_PointerOver(CLAY_ID("ChooseOutputFolderButton"))) {

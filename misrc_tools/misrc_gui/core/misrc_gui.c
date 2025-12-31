@@ -58,7 +58,9 @@ int main(int argc, char **argv) {
 
     // Initialize raylib window
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-    InitWindow(1280, 720, "MISRC Capture");
+    // Larger default so the Settings panel is usable without manual resizing.
+    InitWindow(1600, 900, "MISRC Capture");
+    SetWindowMinSize(1200, 750);
     SetTraceLogLevel(LOG_INFO);  // Enable debug logging (phosphor perf traces)
     SetTargetFPS(60);
     SetExitKey(0);  // Disable escape key auto-close

@@ -150,28 +150,39 @@ typedef struct {
     char output_path[MAX_FILENAME_LEN];        // Default save path (Desktop)
     bool capture_a;
     bool capture_b;
-    
+
+    // Auto naming
+    bool auto_names_enabled;                   // If true, derive filenames from output_base_name + parameters
+    char output_base_name[MAX_FILENAME_LEN];   // Base name for outputs (no extension)
+
+    // RF bit depth selection (per-channel)
+    // FLAC supports 8/12/16; RAW supports 8/16 (12 is disabled in RAW UI).
+    uint8_t rf_bits_a;
+    uint8_t rf_bits_b;
+
     // Capture control
     uint64_t sample_count;                     // Number of samples (0 = infinite)
     char capture_time[32];                     // Time string (e.g., "5:30" or "1:30:00")
     bool overwrite_files;                      // Overwrite without asking
-    
-    // Output files
+
+    // Output files (used when auto_names_enabled=false, or as fallbacks)
     char aux_filename[MAX_FILENAME_LEN];
     char raw_filename[MAX_FILENAME_LEN];
     char audio_4ch_filename[MAX_FILENAME_LEN];
     char audio_2ch_12_filename[MAX_FILENAME_LEN];
     char audio_2ch_34_filename[MAX_FILENAME_LEN];
     char audio_1ch_filenames[4][MAX_FILENAME_LEN]; // Individual channel files
-    
+
     // Processing options
     bool pad_lower_bits;                       // Pad lower 4 bits instead of upper
     bool show_peak_levels;                     // Display peak levels
     bool suppress_clip_a;                      // Suppress clipping messages A
     bool suppress_clip_b;                      // Suppress clipping messages B
+
+    // Legacy flags (kept for backward-compatible settings load)
     bool reduce_8bit_a;                        // Reduce A to 8-bit
     bool reduce_8bit_b;                        // Reduce B to 8-bit
-    
+
     // Resampling (if SOXR enabled)
     bool enable_resample_a;
     bool enable_resample_b;
@@ -181,20 +192,20 @@ typedef struct {
     int resample_quality_b;                    // 0-4
     float resample_gain_a;                     // dB
     float resample_gain_b;                     // dB
-    
+
     // FLAC compression
     bool use_flac;
-    bool flac_12bit;                           // 12-bit instead of 16-bit FLAC
+    bool flac_12bit;                           // Legacy (kept for backward-compatible load)
     int flac_level;                            // 0-8
     bool flac_verification;                    // Verify encoder output
     int flac_threads;                          // Number of threads
-    
+
     // Audio output options
     bool enable_audio_4ch;
     bool enable_audio_2ch_12;
     bool enable_audio_2ch_34;
     bool enable_audio_1ch[4];                  // Individual channel enables
-    
+
     // Display settings (existing)
     bool show_grid;
     float time_scale;         // Time per division (ms)

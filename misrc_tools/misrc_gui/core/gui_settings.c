@@ -106,14 +106,22 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     strncpy(settings->output_path, gui_settings_get_desktop_path(), MAX_FILENAME_LEN - 1);
     settings->output_path[MAX_FILENAME_LEN - 1] = '\0';
     
-    // Default filenames
+    // Auto naming defaults
+    settings->auto_names_enabled = true;
+    strcpy(settings->output_base_name, "capture");
+
+    // Default filenames (used when auto naming is disabled)
     strcpy(settings->output_filename_a, "capture_a.flac");
     strcpy(settings->output_filename_b, "capture_b.flac");
     strcpy(settings->aux_filename, "aux_data.bin");
     strcpy(settings->raw_filename, "raw_data.bin");
-    strcpy(settings->audio_4ch_filename, "audio_4ch.wav");
-    strcpy(settings->audio_2ch_12_filename, "audio_12.wav");
-    strcpy(settings->audio_2ch_34_filename, "audio_34.wav");
+    strcpy(settings->audio_4ch_filename, "quad_4ch.wav");
+    strcpy(settings->audio_2ch_12_filename, "stereo_ch1_ch2.wav");
+    strcpy(settings->audio_2ch_34_filename, "stereo_ch3_ch4.wav");
+
+    // RF bit depth defaults (per-channel)
+    settings->rf_bits_a = 16;
+    settings->rf_bits_b = 16;
     
     // Individual channel filenames
     for (int i = 0; i < 4; i++) {
@@ -175,6 +183,10 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "{\n");
     fprintf(f, "  \"device_index\": %d,\n", settings->device_index);
     fprintf(f, "  \"output_path\": \"%s\",\n", settings->output_path);
+    fprintf(f, "  \"auto_names_enabled\": %s,\n", settings->auto_names_enabled ? "true" : "false");
+    fprintf(f, "  \"output_base_name\": \"%s\",\n", settings->output_base_name);
+    fprintf(f, "  \"rf_bits_a\": %u,\n", (unsigned)settings->rf_bits_a);
+    fprintf(f, "  \"rf_bits_b\": %u,\n", (unsigned)settings->rf_bits_b);
     fprintf(f, "  \"output_filename_a\": \"%s\",\n", settings->output_filename_a);
     fprintf(f, "  \"output_filename_b\": \"%s\",\n", settings->output_filename_b);
     fprintf(f, "  \"capture_a\": %s,\n", settings->capture_a ? "true" : "false");
@@ -433,11 +445,26 @@ void gui_settings_load(gui_settings_t *settings) {
         settings->output_path[MAX_FILENAME_LEN - 1] = '\0';
     }
     
+    // Auto naming
+    if ((value = find_value(content, "auto_names_enabled")) != NULL) {
+        settings->auto_names_enabled = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "output_base_name")) != NULL) {
+        strncpy(settings->output_base_name, value, MAX_FILENAME_LEN - 1);
+        settings->output_base_name[MAX_FILENAME_LEN - 1] = '\0';
+    }
+    if ((value = find_value(content, "rf_bits_a")) != NULL) {
+        settings->rf_bits_a = (uint8_t)atoi(value);
+    }
+    if ((value = find_value(content, "rf_bits_b")) != NULL) {
+        settings->rf_bits_b = (uint8_t)atoi(value);
+    }
+
     if ((value = find_value(content, "output_filename_a")) != NULL) {
         strncpy(settings->output_filename_a, value, MAX_FILENAME_LEN - 1);
         settings->output_filename_a[MAX_FILENAME_LEN - 1] = '\0';
     }
-    
+
     if ((value = find_value(content, "output_filename_b")) != NULL) {
         strncpy(settings->output_filename_b, value, MAX_FILENAME_LEN - 1);
         settings->output_filename_b[MAX_FILENAME_LEN - 1] = '\0';
@@ -586,6 +613,21 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "playback_file_b")) != NULL) {
         strncpy(settings->playback_file_b, value, MAX_FILENAME_LEN - 1);
         settings->playback_file_b[MAX_FILENAME_LEN - 1] = '\0';
+    }
+
+    // Backward-compat migration:
+    // - If rf_bits_* not present, derive from legacy flags.
+    if (settings->rf_bits_a != 8 && settings->rf_bits_a != 12 && settings->rf_bits_a != 16) {
+        settings->rf_bits_a = settings->reduce_8bit_a ? 8 : (settings->use_flac && settings->flac_12bit ? 12 : 16);
+    }
+    if (settings->rf_bits_b != 8 && settings->rf_bits_b != 12 && settings->rf_bits_b != 16) {
+        settings->rf_bits_b = settings->reduce_8bit_b ? 8 : (settings->use_flac && settings->flac_12bit ? 12 : 16);
+    }
+
+    // Default auto naming to ON if missing.
+    // (If the key is not present, defaults already set it true.)
+    if (settings->output_base_name[0] == '\0') {
+        strcpy(settings->output_base_name, "capture");
     }
 
     free(content);
