@@ -488,8 +488,9 @@ static void render_toolbar(gui_app_t *app) {
             .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            CLAY_TEXT(CLAY_STRING("*"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_TITLE, .textColor = to_clay_color(COLOR_TEXT) }));
+            // Try to use a gear glyph; if the font lacks it, user will see fallback/missing glyph.
+            CLAY_TEXT(CLAY_STRING("⚙"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_HEADING, .textColor = to_clay_color(COLOR_TEXT) }));
         }
 
     }
@@ -1315,14 +1316,20 @@ void gui_handle_interactions(gui_app_t *app) {
                 }
             }
 
-            // Playback file selection buttons
+        // Playback file selection buttons
             if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseA"))) {
-                // TODO: Implement native file picker for FLAC files
-                // For now, user can edit settings file or use command line
-                gui_app_set_status(app, "Edit settings.json to set playback file A");
+                if (gui_settings_choose_playback_file(&app->settings, 0)) {
+                    gui_settings_save(&app->settings);
+                } else {
+                    gui_app_set_status(app, "No file selected (or file picker unavailable)");
+                }
             }
             if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseB"))) {
-                gui_app_set_status(app, "Edit settings.json to set playback file B");
+                if (gui_settings_choose_playback_file(&app->settings, 1)) {
+                    gui_settings_save(&app->settings);
+                } else {
+                    gui_app_set_status(app, "No file selected (or file picker unavailable)");
+                }
             }
             if (Clay_PointerOver(CLAY_ID("PlaybackFileClearA"))) {
                 app->settings.playback_file_a[0] = '\0';

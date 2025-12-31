@@ -9,7 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+#if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
+#endif
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -21,20 +24,29 @@ static const char* get_settings_file_path(void) {
     static bool initialized = false;
     
     if (!initialized) {
-#ifdef __APPLE__
+#if defined(__APPLE__)
         // Use ~/Library/Preferences on macOS
         const char* home = getenv("HOME");
         if (home) {
-            snprintf(settings_path, sizeof(settings_path), 
+            snprintf(settings_path, sizeof(settings_path),
                     "%s/Library/Preferences/com.misrc.gui.json", home);
         } else {
             strcpy(settings_path, "./misrc_gui_settings.json");
         }
+#elif defined(_WIN32) || defined(_WIN64)
+        // Use %APPDATA% on Windows, fall back to current directory.
+        const char* appdata = getenv("APPDATA");
+        if (appdata) {
+            snprintf(settings_path, sizeof(settings_path),
+                    "%s\\MISRC\\misrc_gui_settings.json", appdata);
+        } else {
+            strcpy(settings_path, "./misrc_gui_settings.json");
+        }
 #else
-        // Use ~/.config on Linux, current dir on Windows
+        // Use ~/.config on Linux
         const char* home = getenv("HOME");
         if (home) {
-            snprintf(settings_path, sizeof(settings_path), 
+            snprintf(settings_path, sizeof(settings_path),
                     "%s/.config/misrc_gui_settings.json", home);
         } else {
             strcpy(settings_path, "./misrc_gui_settings.json");
@@ -51,10 +63,17 @@ const char* gui_settings_get_desktop_path(void) {
     static bool initialized = false;
     
     if (!initialized) {
-#ifdef __APPLE__
+#if defined(__APPLE__)
         const char* home = getenv("HOME");
         if (home) {
             snprintf(desktop_path, sizeof(desktop_path), "%s/Desktop", home);
+        } else {
+            strcpy(desktop_path, ".");
+        }
+#elif defined(_WIN32) || defined(_WIN64)
+        const char* userprofile = getenv("USERPROFILE");
+        if (userprofile) {
+            snprintf(desktop_path, sizeof(desktop_path), "%s\\Desktop", userprofile);
         } else {
             strcpy(desktop_path, ".");
         }
@@ -263,6 +282,15 @@ static char* find_value(const char* content, const char* key) {
     }
 }
 
+// Helpers
+static void trim_newlines(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
+        s[--len] = '\0';
+    }
+}
+
 // macOS folder picker using osascript. Returns true if output_path changed.
 bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     if (!settings) return false;
@@ -279,17 +307,13 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
         pclose(fp);
         return false;
     }
-    int rc = pclose(fp);
-    (void)rc;
+    (void)pclose(fp);
 
-    // Trim newline
-    size_t len = strlen(buf);
-    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
-        buf[--len] = '\0';
-    }
-    if (len == 0) return false;
+    trim_newlines(buf);
+    if (buf[0] == '\0') return false;
 
     // Remove trailing slash
+    size_t len = strlen(buf);
     while (len > 1 && buf[len - 1] == '/') {
         buf[--len] = '\0';
     }
@@ -305,6 +329,66 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     (void)settings;
     return false;
 #endif
+}
+
+// Cross-platform (best-effort) playback file picker.
+bool gui_settings_choose_playback_file(gui_settings_t *settings, int channel) {
+    if (!settings) return false;
+    if (channel != 0 && channel != 1) return false;
+
+    char picked[512] = {0};
+
+#if defined(__APPLE__)
+    // choose file, return POSIX path
+    const char *cmd = "osascript -e 'POSIX path of (choose file with prompt \"Select FLAC playback file\")'";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    if (!fgets(picked, sizeof(picked), fp)) {
+        pclose(fp);
+        return false;
+    }
+    (void)pclose(fp);
+    trim_newlines(picked);
+#elif defined(_WIN32) || defined(_WIN64)
+    // PowerShell OpenFileDialog (requires Windows Forms)
+    const char *cmd =
+        "powershell -NoProfile -Command "
+        "\"Add-Type -AssemblyName System.Windows.Forms; "
+        "$f=New-Object System.Windows.Forms.OpenFileDialog; "
+        "$f.Filter='FLAC files (*.flac)|*.flac|All files (*.*)|*.*'; "
+        "if($f.ShowDialog() -eq 'OK'){ $f.FileName }\"";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    if (!fgets(picked, sizeof(picked), fp)) {
+        pclose(fp);
+        return false;
+    }
+    (void)pclose(fp);
+    trim_newlines(picked);
+#else
+    // Linux/BSD: try zenity
+    // NOTE: if zenity is not installed, this returns false and the UI should tell user to edit settings.
+    const char *cmd = "sh -c 'command -v zenity >/dev/null 2>&1 && zenity --file-selection --title=\"Select FLAC playback file\" --file-filter=\"*.flac\"'";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    if (!fgets(picked, sizeof(picked), fp)) {
+        pclose(fp);
+        return false;
+    }
+    (void)pclose(fp);
+    trim_newlines(picked);
+#endif
+
+    if (picked[0] == '\0') return false;
+
+    char *dst = (channel == 0) ? settings->playback_file_a : settings->playback_file_b;
+    if (strncmp(dst, picked, MAX_FILENAME_LEN) == 0) {
+        return false;
+    }
+
+    strncpy(dst, picked, MAX_FILENAME_LEN - 1);
+    dst[MAX_FILENAME_LEN - 1] = '\0';
+    return true;
 }
 
 void gui_settings_load(gui_settings_t *settings) {

@@ -352,6 +352,10 @@ const char* gui_settings_get_desktop_path(void);
 // Best-effort folder picker for output_path. Returns true if changed.
 bool gui_settings_choose_output_folder(gui_settings_t *settings);
 
+// Best-effort file picker for playback_file_{a,b}. channel: 0=A, 1=B.
+// Returns true if changed.
+bool gui_settings_choose_playback_file(gui_settings_t *settings, int channel);
+
 // Constants for VU meter
 #define VU_ATTACK_TIME 0.01f      // 10ms attack
 #define VU_RELEASE_TIME 0.3f      // 300ms release
