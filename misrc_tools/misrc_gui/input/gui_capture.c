@@ -314,6 +314,9 @@ void gui_app_init(gui_app_t *app) {
         memcpy(app->phosphor_b->config.channel_color, PHOSPHOR_CHANNEL_COLOR_B, sizeof(float) * 3);
     }
 
+    // Initialize panel configuration lock (must be clear before use)
+    atomic_flag_clear(&app->panel_config_lock);
+
     // Initialize panel configuration (new panel abstraction system)
     app->panel_config_a.split = true;
     app->panel_config_a.left_view = PANEL_VIEW_WAVEFORM;

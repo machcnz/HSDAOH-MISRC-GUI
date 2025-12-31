@@ -178,12 +178,24 @@ static void process_config_panels(channel_panel_config_t *config,
     }
 }
 
+static inline void panel_cfg_lock(gui_app_t *app) {
+    while (atomic_flag_test_and_set(&app->panel_config_lock)) {
+        /* spin */
+    }
+}
+
+static inline void panel_cfg_unlock(gui_app_t *app) {
+    atomic_flag_clear(&app->panel_config_lock);
+}
+
 void panel_process_all(gui_app_t *app,
                        const int16_t *samples_a,
                        const int16_t *samples_b,
                        size_t count,
                        uint32_t sample_rate) {
     if (!app || count == 0) return;
+
+    panel_cfg_lock(app);
 
     // Process channel A panels
     if (samples_a) {
@@ -194,4 +206,6 @@ void panel_process_all(gui_app_t *app,
     if (samples_b) {
         process_config_panels(&app->panel_config_b, samples_b, count, sample_rate);
     }
+
+    panel_cfg_unlock(app);
 }

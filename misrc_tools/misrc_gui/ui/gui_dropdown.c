@@ -112,12 +112,16 @@ static bool handle_layout_dropdown(gui_app_t *app, int ch) {
         clicked = true;
     } else if (gui_dropdown_is_open(DROPDOWN_LAYOUT, ch)) {
         if (Clay_PointerOver(CLAY_IDI("LayoutOptSingle", ch))) {
+            while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
             panel_config_set_split(config, false);
+            atomic_flag_clear(&app->panel_config_lock);
             gui_dropdown_close_all();
             clicked = true;
         }
         if (Clay_PointerOver(CLAY_IDI("LayoutOptSplit", ch))) {
+            while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
             panel_config_set_split(config, true);
+            atomic_flag_clear(&app->panel_config_lock);
             gui_dropdown_close_all();
             clicked = true;
         }
@@ -139,7 +143,9 @@ static bool handle_left_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("LeftViewOpt", ch * 10 + vt))) {
+                while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
                 panel_config_set_left_view(config, (panel_view_type_t)vt);
+                atomic_flag_clear(&app->panel_config_lock);
                 gui_dropdown_close_all();
                 clicked = true;
                 break;
@@ -165,7 +171,9 @@ static bool handle_right_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("RightViewOpt", ch * 10 + vt))) {
+                while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
                 panel_config_set_right_view(config, (panel_view_type_t)vt);
+                atomic_flag_clear(&app->panel_config_lock);
                 gui_dropdown_close_all();
                 clicked = true;
                 break;

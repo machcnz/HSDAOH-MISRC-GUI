@@ -318,7 +318,12 @@ typedef struct gui_app {
     // Panel configuration (per-channel, each panel owns its state)
     // FFT state is now owned by panel_config_*.left_state or right_state
     // CVBS decoder state is also owned by panel's left_state or right_state
+    // NOTE: Accessed from both UI thread and display thread; protect with panel_config_lock.
     channel_panel_config_t panel_config_a, panel_config_b;
+
+    // Protects panel_config_{a,b} and their *state pointers against concurrent access
+    // between UI interactions and the display thread.
+    atomic_flag panel_config_lock;
 
 } gui_app_t;
 
