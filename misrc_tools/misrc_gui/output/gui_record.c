@@ -19,6 +19,7 @@
 #include "../../common/buffer_manager.h"
 #include "../../common/flac_writer.h"
 #include "../../common/threading.h"
+#include "../../common/buffer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,8 +84,24 @@ typedef struct {
     FILE *file;
     int channel;  // 0 = A, 1 = B
 
+    // RF bit depth requested for output
+    // - FLAC: 8/12/16
+    // - RAW:  8/16
+    uint8_t rf_bits;
+
     // For RAW writer: bytes per sample (1=8-bit, 2=16-bit)
     size_t raw_bytes_per_sample;
+
+    // RF resampling (rate in kHz; 0 or disabled = passthrough)
+    bool enable_resample;
+    float resample_rate_khz;
+    int resample_quality;      // 0-4
+    float resample_gain_db;
+
+#if LIBSOXR_ENABLED
+    void *soxr;                // soxr_t (NULL if not initialized)
+    float soxr_rate_khz;       // configured output rate (kHz)
+#endif
 
 #if LIBFLAC_ENABLED == 1
     flac_writer_t *writer;
@@ -93,6 +110,61 @@ typedef struct {
 #endif
     gui_app_t *app;  // For error reporting
 } writer_ctx_t;
+
+#if LIBSOXR_ENABLED
+#include <soxr.h>
+
+static soxr_quality_spec_t soxr_quality_from_setting(int q) {
+    // Map GUI setting 0-4 to soxr quality presets
+    // 0=QQ, 1=LQ, 2=MQ, 3=HQ, 4=VHQ
+    switch (q) {
+        case 0: return soxr_quality_spec(SOXR_QQ, 0);
+        case 1: return soxr_quality_spec(SOXR_LQ, 0);
+        case 2: return soxr_quality_spec(SOXR_MQ, 0);
+        case 3: return soxr_quality_spec(SOXR_HQ, 0);
+        case 4: return soxr_quality_spec(SOXR_VHQ, 0);
+        default: return soxr_quality_spec(SOXR_HQ, 0);
+    }
+}
+
+static soxr_t ensure_soxr(writer_ctx_t *wctx, float out_rate_khz) {
+    if (!wctx) return NULL;
+
+    // Only support downsampling (or passthrough) like CLI
+    if (out_rate_khz <= 0.0f || out_rate_khz >= 40000.0f) {
+        return NULL;
+    }
+
+    // Reuse existing if already configured
+    if (wctx->soxr && fabsf(wctx->soxr_rate_khz - out_rate_khz) < 1e-3f) {
+        return (soxr_t)wctx->soxr;
+    }
+
+    if (wctx->soxr) {
+        soxr_delete((soxr_t)wctx->soxr);
+        wctx->soxr = NULL;
+        wctx->soxr_rate_khz = 0.0f;
+    }
+
+    soxr_error_t err = NULL;
+    soxr_io_spec_t io_spec = soxr_io_spec(SOXR_INT16_I, SOXR_INT16_I);
+
+    // Only apply user gain (no implicit scaling)
+    io_spec.scale = pow(10.0, (double)wctx->resample_gain_db / 20.0);
+
+    soxr_quality_spec_t qual_spec = soxr_quality_from_setting(wctx->resample_quality);
+
+    soxr_t s = soxr_create(40000.0, (double)out_rate_khz, 1, &err, &io_spec, &qual_spec, NULL);
+    if (!s || err) {
+        if (s) soxr_delete(s);
+        return NULL;
+    }
+
+    wctx->soxr = (void *)s;
+    wctx->soxr_rate_khz = out_rate_khz;
+    return s;
+}
+#endif
 
 static writer_ctx_t s_ctx_a;
 static writer_ctx_t s_ctx_b;
@@ -120,14 +192,62 @@ static void gui_flac_bytes_callback(void *user_data, size_t bytes_written) {
     }
 }
 
+static void convert_i16_to_flac_i32(int32_t *dst, const int16_t *src, size_t n, uint8_t bits) {
+    if (!dst || !src || n == 0) return;
+
+    if (bits == 8) {
+        for (size_t i = 0; i < n; i++) {
+            int16_t v = src[i];
+            if (v > 127) v = 127;
+            if (v < -128) v = -128;
+            dst[i] = (int32_t)v;
+        }
+        return;
+    }
+
+    if (bits == 12) {
+        for (size_t i = 0; i < n; i++) {
+            dst[i] = (int32_t)src[i];
+        }
+        return;
+    }
+
+    // 16-bit output: expand 12-bit capture samples to 16-bit range
+    for (size_t i = 0; i < n; i++) {
+        dst[i] = (int32_t)src[i] << 4;
+    }
+}
+
 // FLAC file writer thread
 static int flac_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
-    size_t len = BUFFER_READ_SIZE * sizeof(int32_t);
+    size_t len = BUFFER_READ_SIZE * sizeof(int16_t);
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
 
     // Boost thread priority to avoid backpressure when window is minimized
     thrd_set_priority(THRD_PRIORITY_ABOVE);
+
+    // Scratch buffers
+    int16_t *tmp_i16 = NULL;
+    int32_t *tmp_i32 = NULL;
+    size_t tmp_cap = 0;
+
+#if LIBSOXR_ENABLED
+    // Max output samples per block (downsampling, so <= input, but keep some slack)
+    size_t max_out = BUFFER_READ_SIZE;
+    tmp_i16 = (int16_t *)aligned_alloc(32, max_out * sizeof(int16_t));
+    tmp_i32 = (int32_t *)aligned_alloc(32, max_out * sizeof(int32_t));
+    tmp_cap = max_out;
+#else
+    // No soxr: only need int32 conversion buffer
+    tmp_i32 = (int32_t *)aligned_alloc(32, BUFFER_READ_SIZE * sizeof(int32_t));
+    tmp_cap = BUFFER_READ_SIZE;
+#endif
+
+    if (!tmp_i32) {
+        fprintf(stderr, "[FLAC] Failed to allocate conversion buffers\n");
+        return 0;
+    }
 
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
@@ -137,17 +257,36 @@ static int flac_writer_thread(void *ctx) {
         if (!buf) {
             // No data available - check if we should exit
             if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain any remaining data before exiting
+                // Drain any remaining whole blocks before exiting
                 size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                while (remaining > 0) {
-                    size_t drain_len = (remaining < len) ? remaining : len;
-                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, drain_len, 0);
+                while (remaining >= len) {
+                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 0);
                     if (!buf) break;
-                    size_t drain_samples = drain_len / sizeof(int32_t);
-                    if (drain_samples > 0) {
-                        flac_writer_process(wctx->writer, (const int32_t *)buf, drain_samples);
+
+                    const int16_t *in = (const int16_t *)buf;
+                    size_t out_n = BUFFER_READ_SIZE;
+
+#if LIBSOXR_ENABLED
+                    if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+                        soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
+                        if (s) {
+                            soxr_clear(s);
+                            size_t in_done = 0, out_done = 0;
+                            soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
+                                                           tmp_i16, tmp_cap, &out_done);
+                            if (!err && out_done > 0) {
+                                convert_i16_to_flac_i32(tmp_i32, tmp_i16, out_done, wctx->flac_bits_per_sample);
+                                flac_writer_process(wctx->writer, tmp_i32, (uint32_t)out_done);
+                            }
+                        }
+                    } else
+#endif
+                    {
+                        convert_i16_to_flac_i32(tmp_i32, in, BUFFER_READ_SIZE, wctx->flac_bits_per_sample);
+                        flac_writer_process(wctx->writer, tmp_i32, BUFFER_READ_SIZE);
                     }
-                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, drain_len);
+
+                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
                     remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
                 }
                 break;
@@ -155,9 +294,34 @@ static int flac_writer_thread(void *ctx) {
             continue;
         }
 
-        int result = flac_writer_process(wctx->writer, (const int32_t *)buf, BUFFER_READ_SIZE);
-        if (result < 0) {
-            fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
+        const int16_t *in = (const int16_t *)buf;
+        size_t out_n = BUFFER_READ_SIZE;
+
+#if LIBSOXR_ENABLED
+        if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+            soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
+            if (s) {
+                soxr_clear(s);
+                size_t in_done = 0, out_done = 0;
+                soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
+                                               tmp_i16, tmp_cap, &out_done);
+                if (!err && out_done > 0) {
+                    out_n = out_done;
+                    convert_i16_to_flac_i32(tmp_i32, tmp_i16, out_n, wctx->flac_bits_per_sample);
+                    int result = flac_writer_process(wctx->writer, tmp_i32, (uint32_t)out_n);
+                    if (result < 0) {
+                        fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
+                    }
+                }
+            }
+        } else
+#endif
+        {
+            convert_i16_to_flac_i32(tmp_i32, in, BUFFER_READ_SIZE, wctx->flac_bits_per_sample);
+            int result = flac_writer_process(wctx->writer, tmp_i32, BUFFER_READ_SIZE);
+            if (result < 0) {
+                fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
+            }
         }
 
         // Mark as consumed - buffer manager signals space event automatically
@@ -173,36 +337,107 @@ static int flac_writer_thread(void *ctx) {
         }
     }
 
+#if LIBSOXR_ENABLED
+    if (wctx->soxr) {
+        soxr_delete((soxr_t)wctx->soxr);
+        wctx->soxr = NULL;
+        wctx->soxr_rate_khz = 0.0f;
+    }
+#endif
+
+    if (tmp_i16) aligned_free(tmp_i16);
+    if (tmp_i32) aligned_free(tmp_i32);
+
     fprintf(stderr, "[FLAC] Writer thread %c exiting\n", wctx->channel == 0 ? 'A' : 'B');
     return 0;
 }
 #endif
 
+static void convert_i16_to_raw_bytes(uint8_t *dst, const int16_t *src, size_t n, uint8_t bits) {
+    if (!dst || !src || n == 0) return;
+
+    if (bits == 8) {
+        int8_t *d = (int8_t *)dst;
+        for (size_t i = 0; i < n; i++) {
+            int16_t v = src[i];
+            if (v > 127) v = 127;
+            if (v < -128) v = -128;
+            d[i] = (int8_t)v;
+        }
+        return;
+    }
+
+    // 16-bit raw: write int16 as-is
+    memcpy(dst, src, n * sizeof(int16_t));
+}
+
 // RAW file writer thread
 static int raw_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
+
+    // Input is always int16 blocks from BUF_RECORD
+    size_t in_len = BUFFER_READ_SIZE * sizeof(int16_t);
+
+    // Output bytes per sample (1=8-bit, 2=16-bit)
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
-    size_t len = BUFFER_READ_SIZE * bps;
 
     // Boost thread priority to avoid backpressure when window is minimized
     thrd_set_priority(THRD_PRIORITY_ABOVE);
 
+#if LIBSOXR_ENABLED
+    int16_t *tmp_i16 = (int16_t *)aligned_alloc(32, BUFFER_READ_SIZE * sizeof(int16_t));
+    if (!tmp_i16) {
+        fprintf(stderr, "[RAW] Failed to allocate resample buffer\n");
+        return 0;
+    }
+#endif
+
+    uint8_t *tmp_out = (uint8_t *)aligned_alloc(32, BUFFER_READ_SIZE * bps);
+    if (!tmp_out) {
+        fprintf(stderr, "[RAW] Failed to allocate output buffer\n");
+#if LIBSOXR_ENABLED
+        aligned_free(tmp_i16);
+#endif
+        return 0;
+    }
+
     fprintf(stderr, "[RAW] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
-        // Read from buffer manager with timeout
-        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 10);
+        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, in_len, 10);
         if (!buf) {
-            // No data available - check if we should exit
             if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain any remaining data before exiting
+                // Drain remaining whole blocks
                 size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                while (remaining > 0) {
-                    size_t drain_len = (remaining < len) ? remaining : len;
-                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, drain_len, 0);
+                while (remaining >= in_len) {
+                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, in_len, 0);
                     if (!buf) break;
-                    fwrite(buf, 1, drain_len, wctx->file);
-                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, drain_len);
+
+                    const int16_t *in = (const int16_t *)buf;
+                    size_t out_n = BUFFER_READ_SIZE;
+
+#if LIBSOXR_ENABLED
+                    if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+                        soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
+                        if (s) {
+                            soxr_clear(s);
+                            size_t in_done = 0, out_done = 0;
+                            soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
+                                                           tmp_i16, BUFFER_READ_SIZE, &out_done);
+                            if (!err && out_done > 0) {
+                                out_n = out_done;
+                                convert_i16_to_raw_bytes(tmp_out, tmp_i16, out_n, wctx->rf_bits);
+                                fwrite(tmp_out, 1, out_n * bps, wctx->file);
+                            }
+                        }
+                    } else
+#endif
+                    {
+                        convert_i16_to_raw_bytes(tmp_out, in, out_n, wctx->rf_bits);
+                        fwrite(tmp_out, 1, out_n * bps, wctx->file);
+                    }
+
+                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, in_len);
                     remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
                 }
                 break;
@@ -210,20 +445,52 @@ static int raw_writer_thread(void *ctx) {
             continue;
         }
 
-        size_t written = fwrite(buf, 1, len, wctx->file);
+        const int16_t *in = (const int16_t *)buf;
+        size_t out_n = BUFFER_READ_SIZE;
 
-        // Mark as consumed - buffer manager signals space event automatically
-        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
+#if LIBSOXR_ENABLED
+        if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+            soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
+            if (s) {
+                soxr_clear(s);
+                size_t in_done = 0, out_done = 0;
+                soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
+                                               tmp_i16, BUFFER_READ_SIZE, &out_done);
+                if (!err && out_done > 0) {
+                    out_n = out_done;
+                    convert_i16_to_raw_bytes(tmp_out, tmp_i16, out_n, wctx->rf_bits);
+                    fwrite(tmp_out, 1, out_n * bps, wctx->file);
+                }
+            }
+        } else
+#endif
+        {
+            convert_i16_to_raw_bytes(tmp_out, in, out_n, wctx->rf_bits);
+            fwrite(tmp_out, 1, out_n * bps, wctx->file);
+        }
+
+        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, in_len);
 
         if (s_recording_app) {
-            atomic_fetch_add(&s_recording_app->recording_bytes, written);
+            // Approximate byte accounting: count input bytes consumed
+            atomic_fetch_add(&s_recording_app->recording_bytes, in_len);
             if (wctx->channel == 0) {
-                atomic_fetch_add(&s_recording_app->recording_raw_a, written);
+                atomic_fetch_add(&s_recording_app->recording_raw_a, in_len);
             } else {
-                atomic_fetch_add(&s_recording_app->recording_raw_b, written);
+                atomic_fetch_add(&s_recording_app->recording_raw_b, in_len);
             }
         }
     }
+
+#if LIBSOXR_ENABLED
+    if (wctx->soxr) {
+        soxr_delete((soxr_t)wctx->soxr);
+        wctx->soxr = NULL;
+        wctx->soxr_rate_khz = 0.0f;
+    }
+    aligned_free(tmp_i16);
+#endif
+    aligned_free(tmp_out);
 
     fprintf(stderr, "[RAW] Writer thread %c exiting\n", wctx->channel == 0 ? 'A' : 'B');
     return 0;
@@ -488,6 +755,16 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_ctx_a.channel = 0;
         s_ctx_a.compressed_bytes = &app->recording_compressed_a;
         s_ctx_a.flac_bits_per_sample = bits_a;
+        s_ctx_a.rf_bits = bits_a;
+        s_ctx_a.raw_bytes_per_sample = 2;  // input blocks are int16
+        s_ctx_a.enable_resample = app->settings.enable_resample_a;
+        s_ctx_a.resample_rate_khz = app->settings.resample_rate_a;
+        s_ctx_a.resample_quality = app->settings.resample_quality_a;
+        s_ctx_a.resample_gain_db = app->settings.resample_gain_a;
+#if LIBSOXR_ENABLED
+        s_ctx_a.soxr = NULL;
+        s_ctx_a.soxr_rate_khz = 0.0f;
+#endif
         s_ctx_a.app = app;
 
         s_ctx_b.bufmgr = &app->buffers;
@@ -496,26 +773,50 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_ctx_b.channel = 1;
         s_ctx_b.compressed_bytes = &app->recording_compressed_b;
         s_ctx_b.flac_bits_per_sample = bits_b;
+        s_ctx_b.rf_bits = bits_b;
+        s_ctx_b.raw_bytes_per_sample = 2;  // input blocks are int16
+        s_ctx_b.enable_resample = app->settings.enable_resample_b;
+        s_ctx_b.resample_rate_khz = app->settings.resample_rate_b;
+        s_ctx_b.resample_quality = app->settings.resample_quality_b;
+        s_ctx_b.resample_gain_db = app->settings.resample_gain_b;
+#if LIBSOXR_ENABLED
+        s_ctx_b.soxr = NULL;
+        s_ctx_b.soxr_rate_khz = 0.0f;
+#endif
         s_ctx_b.app = app;
 
         // Configure FLAC writers using shared library
-        flac_writer_config_t config = flac_writer_default_config();
-        config.sample_rate = 40000;
+        flac_writer_config_t config_a = flac_writer_default_config();
+        flac_writer_config_t config_b = flac_writer_default_config();
+
+        // Sample rate is stored in kHz for RF capture (40000 = 40 MSPS)
+        config_a.sample_rate = (app->settings.enable_resample_a && app->settings.resample_rate_a > 0.0f)
+                                 ? (uint32_t)(app->settings.resample_rate_a)
+                                 : 40000;
+        config_b.sample_rate = (app->settings.enable_resample_b && app->settings.resample_rate_b > 0.0f)
+                                 ? (uint32_t)(app->settings.resample_rate_b)
+                                 : 40000;
+
         // bits_per_sample is set per-channel below
-        config.bits_per_sample = 16;
-        config.compression_level = app->settings.flac_level;
-        config.verify = app->settings.flac_verification;
-        config.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto
-        config.enable_seektable = true;
+        config_a.bits_per_sample = 16;
+        config_b.bits_per_sample = 16;
+        config_a.compression_level = app->settings.flac_level;
+        config_b.compression_level = app->settings.flac_level;
+        config_a.verify = app->settings.flac_verification;
+        config_b.verify = app->settings.flac_verification;
+        config_a.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto
+        config_b.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;
+        config_a.enable_seektable = true;
+        config_b.enable_seektable = true;
 
         // Create writer for channel A
-        config.error_cb = gui_flac_error_callback;
-        config.bytes_cb = gui_flac_bytes_callback;
+        config_a.error_cb = gui_flac_error_callback;
+        config_a.bytes_cb = gui_flac_bytes_callback;
 
         if (app->settings.capture_a) {
-            config.bits_per_sample = s_ctx_a.flac_bits_per_sample;
-            config.callback_user_data = &s_ctx_a;
-            s_flac_writer_a = flac_writer_create_stream(s_file_a, &config);
+            config_a.bits_per_sample = s_ctx_a.flac_bits_per_sample;
+            config_a.callback_user_data = &s_ctx_a;
+            s_flac_writer_a = flac_writer_create_stream(s_file_a, &config_a);
             if (!s_flac_writer_a) {
                 gui_app_set_status(app, "Failed to create FLAC encoder A");
                 if (s_file_a) fclose(s_file_a);
@@ -531,9 +832,11 @@ static int gui_record_start_confirmed(gui_app_t *app) {
 
         // Create writer for channel B
         if (app->settings.capture_b) {
-            config.bits_per_sample = s_ctx_b.flac_bits_per_sample;
-            config.callback_user_data = &s_ctx_b;
-            s_flac_writer_b = flac_writer_create_stream(s_file_b, &config);
+            config_b.error_cb = gui_flac_error_callback;
+            config_b.bytes_cb = gui_flac_bytes_callback;
+            config_b.bits_per_sample = s_ctx_b.flac_bits_per_sample;
+            config_b.callback_user_data = &s_ctx_b;
+            s_flac_writer_b = flac_writer_create_stream(s_file_b, &config_b);
             if (!s_flac_writer_b) {
                 gui_app_set_status(app, "Failed to create FLAC encoder B");
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
@@ -601,13 +904,31 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_ctx_a.buf_id = BUF_RECORD_A;
         s_ctx_a.file = s_file_a;
         s_ctx_a.channel = 0;
+        s_ctx_a.rf_bits = bits_a;
         s_ctx_a.raw_bytes_per_sample = (bits_a == 8) ? 1 : 2;
+        s_ctx_a.enable_resample = app->settings.enable_resample_a;
+        s_ctx_a.resample_rate_khz = app->settings.resample_rate_a;
+        s_ctx_a.resample_quality = app->settings.resample_quality_a;
+        s_ctx_a.resample_gain_db = app->settings.resample_gain_a;
+#if LIBSOXR_ENABLED
+        s_ctx_a.soxr = NULL;
+        s_ctx_a.soxr_rate_khz = 0.0f;
+#endif
 
         s_ctx_b.bufmgr = &app->buffers;
         s_ctx_b.buf_id = BUF_RECORD_B;
         s_ctx_b.file = s_file_b;
         s_ctx_b.channel = 1;
+        s_ctx_b.rf_bits = bits_b;
         s_ctx_b.raw_bytes_per_sample = (bits_b == 8) ? 1 : 2;
+        s_ctx_b.enable_resample = app->settings.enable_resample_b;
+        s_ctx_b.resample_rate_khz = app->settings.resample_rate_b;
+        s_ctx_b.resample_quality = app->settings.resample_quality_b;
+        s_ctx_b.resample_gain_db = app->settings.resample_gain_b;
+#if LIBSOXR_ENABLED
+        s_ctx_b.soxr = NULL;
+        s_ctx_b.soxr_rate_khz = 0.0f;
+#endif
 
         // Capture backpressure stats at recording start
         s_start_wait_count = atomic_load(&app->rb_wait_count);

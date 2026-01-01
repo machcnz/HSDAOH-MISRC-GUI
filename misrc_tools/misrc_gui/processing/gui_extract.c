@@ -142,129 +142,29 @@ static int extraction_thread(void *ctx) {
         // (see gui_oscilloscope.c render_oscilloscope_channel split mode)
 
         // Conditionally write to record buffers via buffer manager
+        // Note: we always write raw int16 blocks to BUF_RECORD_A/B.
+        // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
         if (atomic_load(&s_recording_enabled)) {
-            bool use_flac = atomic_load(&s_use_flac);
-            uint8_t bits_a = (uint8_t)atomic_load(&s_rf_bits_a);
-            uint8_t bits_b = (uint8_t)atomic_load(&s_rf_bits_b);
+            size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
 
-            if (use_flac) {
-                // FLAC: write int32 samples (BUFFER_READ_SIZE samples)
-                size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int32_t);
+            int16_t *write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                             BUF_RECORD_A, sample_bytes, NULL);
+            int16_t *write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                             BUF_RECORD_B, sample_bytes, NULL);
 
-                // Use default lossless backpressure policy from buffer_manager.c
-                int32_t *write_a = (int32_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                                  BUF_RECORD_A, sample_bytes, NULL);
-                int32_t *write_b = (int32_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                                  BUF_RECORD_B, sample_bytes, NULL);
-
-                if (!write_a || !write_b) {
-                    // Buffer full after waiting - this shouldn't happen with lossless policy
-                    // but handle gracefully
-                    if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
-                    if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
-                    if (atomic_load(&do_exit)) goto exit_thread;
-                    continue;
-                }
-
-                // Channel A
-                if (bits_a == 8) {
-                    // clamp to int8 range, widen to int32
-                    if (s_conv_16to8to32) s_conv_16to8to32(s_buf_a, write_a, BUFFER_READ_SIZE);
-                    else {
-                        for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                            int16_t v = s_buf_a[i];
-                            if (v > 127) v = 127;
-                            if (v < -128) v = -128;
-                            write_a[i] = (int32_t)v;
-                        }
-                    }
-                } else if (bits_a == 12) {
-                    // already 12-bit range; keep as-is
-                    for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                        write_a[i] = (int32_t)s_buf_a[i];
-                    }
-                } else {
-                    // 16-bit: expand 12-bit to 16-bit by shifting
-                    for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                        write_a[i] = (int32_t)s_buf_a[i] << 4;
-                    }
-                }
-
-                // Channel B
-                if (bits_b == 8) {
-                    if (s_conv_16to8to32) s_conv_16to8to32(s_buf_b, write_b, BUFFER_READ_SIZE);
-                    else {
-                        for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                            int16_t v = s_buf_b[i];
-                            if (v > 127) v = 127;
-                            if (v < -128) v = -128;
-                            write_b[i] = (int32_t)v;
-                        }
-                    }
-                } else if (bits_b == 12) {
-                    for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                        write_b[i] = (int32_t)s_buf_b[i];
-                    }
-                } else {
-                    for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                        write_b[i] = (int32_t)s_buf_b[i] << 4;
-                    }
-                }
-
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
-            } else {
-                // RAW: write either int16 or int8 bytes
-                size_t bytes_a = BUFFER_READ_SIZE * ((bits_a == 8) ? sizeof(int8_t) : sizeof(int16_t));
-                size_t bytes_b = BUFFER_READ_SIZE * ((bits_b == 8) ? sizeof(int8_t) : sizeof(int16_t));
-
-                // Use default lossless backpressure policy from buffer_manager.c
-                void *write_a = bufmgr_write_begin(&s_extract_app->buffers,
-                                                    BUF_RECORD_A, bytes_a, NULL);
-                void *write_b = bufmgr_write_begin(&s_extract_app->buffers,
-                                                    BUF_RECORD_B, bytes_b, NULL);
-
-                if (!write_a || !write_b) {
-                    // Buffer full after waiting - handle gracefully
-                    if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
-                    if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
-                    if (atomic_load(&do_exit)) goto exit_thread;
-                    continue;
-                }
-
-                if (bits_a == 8) {
-                    if (s_conv_16to8) s_conv_16to8(s_buf_a, (int8_t *)write_a, BUFFER_READ_SIZE);
-                    else {
-                        int8_t *dst = (int8_t *)write_a;
-                        for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                            int16_t v = s_buf_a[i];
-                            if (v > 127) v = 127;
-                            if (v < -128) v = -128;
-                            dst[i] = (int8_t)v;
-                        }
-                    }
-                } else {
-                    memcpy(write_a, s_buf_a, bytes_a);
-                }
-
-                if (bits_b == 8) {
-                    if (s_conv_16to8) s_conv_16to8(s_buf_b, (int8_t *)write_b, BUFFER_READ_SIZE);
-                    else {
-                        int8_t *dst = (int8_t *)write_b;
-                        for (size_t i = 0; i < BUFFER_READ_SIZE; i++) {
-                            int16_t v = s_buf_b[i];
-                            if (v > 127) v = 127;
-                            if (v < -128) v = -128;
-                            dst[i] = (int8_t)v;
-                        }
-                    }
-                } else {
-                    memcpy(write_b, s_buf_b, bytes_b);
-                }
-
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, bytes_a);
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, bytes_b);
+            if (!write_a || !write_b) {
+                // Buffer full after waiting - handle gracefully
+                if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
+                if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
+                if (atomic_load(&do_exit)) goto exit_thread;
+                continue;
             }
+
+            memcpy(write_a, s_buf_a, sample_bytes);
+            memcpy(write_b, s_buf_b, sample_bytes);
+
+            bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+            bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
         }
     }
 
