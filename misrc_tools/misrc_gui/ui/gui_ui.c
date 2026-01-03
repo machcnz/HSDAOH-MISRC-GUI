@@ -11,6 +11,7 @@
 #include "../signal/gui_cvbs.h"
 #include "../visualization/gui_panel.h"
 #include "../input/gui_playback.h"
+#include "../output/gui_audio.h"
 #include "version.h"
 #include "../visualization/gui_custom_elements.h"
 #include <clay.h>
@@ -19,6 +20,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <time.h>
 
 #ifndef MIRSC_TOOLS_VERSION
 #define MIRSC_TOOLS_VERSION "dev"
@@ -30,6 +32,11 @@ static bool s_ui_consumed_click = false;
 // Simple in-place text editing state (settings panel)
 static bool s_edit_output_base_name = false;
 static double s_base_name_backspace_repeat_at = 0.0;
+
+// Audio label in-place editing state (settings panel)
+static int s_edit_audio_label_idx = -1; // 0..3, or -1
+static double s_audio_label_backspace_repeat_at = 0.0;
+
 
 bool gui_ui_click_consumed(void) {
     return s_ui_consumed_click;
@@ -68,6 +75,9 @@ static char stat_b_errors[16];
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
 
+// Audio meter channel labels (static buffers)
+static char audio_ch_label[4][8];
+
 // Settings panel stable display buffers (avoid reuse of temp_buf* across layout)
 static char settings_base_name_display[256];
 static char settings_rf_bits_a_display[16];
@@ -76,6 +86,7 @@ static char settings_flac_level_display[64];
 static char settings_flac_threads_display[64];
 static char settings_resample_a_display[32];
 static char settings_resample_b_display[32];
+
 
 static Clay_String make_string(const char *str) {
     return (Clay_String){ .isStaticallyAllocated = false, .length = (int32_t)strlen(str), .chars = str };
@@ -104,6 +115,8 @@ static void format_msps_label(char *dst, size_t dst_len, float khz) {
         snprintf(dst, dst_len, "%.1f MSPS", msps);
     }
 }
+
+
 
 static float cycle_resample_khz(float current_khz) {
     // User-facing presets: 5/10/14.3/17.9/20 MSPS, stored as kHz.
@@ -198,6 +211,14 @@ static void render_settings_panel(gui_app_t *app) {
                 CLAY_TEXT(app->settings.auto_names_enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             }
             CLAY_TEXT(CLAY_STRING("Generate filenames automatically"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+
+            // Add Time/Date toggle on the right side of the same row
+            Color ts_bg = app->settings.auto_names_enabled ? (app->settings.append_timestamp_on_capture_start ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON) : ui_disabled_color(COLOR_BUTTON);
+            Color ts_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+            CLAY(CLAY_ID("AppendTimestampToggle"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(ts_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                CLAY_TEXT(app->settings.append_timestamp_on_capture_start ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(ts_fg) }));
+            }
+            CLAY_TEXT(CLAY_STRING("Add Time/Date"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(ts_fg) }));
         }
 
         CLAY(CLAY_ID("BaseNameRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
@@ -215,9 +236,9 @@ static void render_settings_panel(gui_app_t *app) {
                 // Visual caret indicator when editing.
                 if (s_edit_output_base_name && app->settings.auto_names_enabled) {
                     snprintf(settings_base_name_display, sizeof(settings_base_name_display), "%s_", base);
-                    CLAY_TEXT(make_string(settings_base_name_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(base_box_fg) }));
+                    CLAY_TEXT(make_string(settings_base_name_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
                 } else {
-                    CLAY_TEXT(make_string(base), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(base_box_fg) }));
+                    CLAY_TEXT(make_string(base), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
                 }
             }
 
@@ -451,6 +472,7 @@ static void render_settings_panel(gui_app_t *app) {
                     for (int i = 0; i < 4; i++) {
                         Clay_ElementId row_id = CLAY_IDI("ToggleRowAudio1ch", i);
                         Clay_ElementId toggle_id = CLAY_IDI("ToggleAudio1ch", i);
+                        Clay_ElementId label_id = CLAY_IDI("Audio1chLabelField", i);
 
                         CLAY(row_id, { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
                             CLAY(toggle_id, { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_audio_1ch[i] ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
@@ -462,6 +484,20 @@ static void render_settings_panel(gui_app_t *app) {
                             else if (i == 2) CLAY_TEXT(CLAY_STRING("CH3"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
                             else CLAY_TEXT(CLAY_STRING("CH4"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
 
+                            // Per-channel audio tag (used in auto naming)
+                            Color tag_bg = app->settings.auto_names_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
+                            Color tag_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                            CLAY(label_id, { .layout = { .sizing = { CLAY_SIZING_FIXED(90), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(tag_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                                const char *tag = app->settings.audio_1ch_labels[i][0] ? app->settings.audio_1ch_labels[i] : "(tag)";
+                                if (s_edit_audio_label_idx == i && app->settings.auto_names_enabled) {
+                                    snprintf(temp_buf8, sizeof(temp_buf8), "%s_", tag);
+                                    CLAY_TEXT(make_string(temp_buf8), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
+                                } else {
+                                    CLAY_TEXT(make_string(tag), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
+                                }
+                            }
+
+                            // Show current resolved filename
                             CLAY_TEXT(make_string(app->settings.audio_1ch_filenames[i]), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                         }
                     }
@@ -581,6 +617,78 @@ static void render_toolbar(gui_app_t *app) {
             .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } }
         }) {}
 
+        // Audio playback monitoring toggle
+        Color mon_bg = app->settings.audio_monitor_playback ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+        CLAY(CLAY_ID("AudioPlaybackToggle"), {
+            .layout = { .sizing = { CLAY_SIZING_FIXED(90), CLAY_SIZING_FIXED(32) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } },
+            .backgroundColor = to_clay_color(mon_bg),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY_TEXT(CLAY_STRING("Audio Mon"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+        
+        // Audio channel select (CH1/2 vs CH3/4)
+        Color ch_bg = app->settings.audio_monitor_ch34 ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+        CLAY(CLAY_ID("AudioChannelToggle"), {
+            .layout = { .sizing = { CLAY_SIZING_FIXED(70), CLAY_SIZING_FIXED(32) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } },
+            .backgroundColor = to_clay_color(ch_bg),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY_TEXT(app->settings.audio_monitor_ch34 ? CLAY_STRING("CH3/4") : CLAY_STRING("CH1/2"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        // 4 channel horizontal audio meters (compact for toolbar)
+        CLAY(CLAY_ID("AudioLevelBars"), {
+            .layout = { .sizing = { CLAY_SIZING_FIXED(240), CLAY_SIZING_FIXED(32) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 4, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .padding = { 4, 4, 4, 4 } },
+            .backgroundColor = to_clay_color((Color){25,25,30,255}),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            // 4 horizontal meters in a row with labels
+            for (int i = 0; i < 4; i++) {
+                uint32_t p = atomic_load(&app->audio_peak[i]);
+                float frac = (p > 0) ? (float)p / 8388607.0f : 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+
+                const int meter_w = 50;
+                int fill_w = (int)(frac * (float)meter_w);
+                if (fill_w < 0) fill_w = 0;
+                if (fill_w > meter_w) fill_w = meter_w;
+
+                // Color thresholds
+                Color bar_col = (frac > 0.95f) ? COLOR_CLIP_RED : (frac > 0.75f) ? COLOR_METER_YELLOW : COLOR_SYNC_GREEN;
+
+                // Column: channel label above meter
+                CLAY(CLAY_IDI("AudioMeterCol", i), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(54), CLAY_SIZING_FIXED(24) }, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 1, .childAlignment = { .x = CLAY_ALIGN_X_CENTER } }
+                }) {
+                    // Channel label (CH1-CH4)
+                    snprintf(audio_ch_label[i], sizeof(audio_ch_label[i]), "CH%d", i + 1);
+                    CLAY(CLAY_IDI("AudioChLabel", i), { .layout = { .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) } } }) {
+                        CLAY_TEXT(make_string(audio_ch_label[i]),
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                    }
+
+                    // Horizontal meter bar container
+                    CLAY(CLAY_IDI("AudioMeter", i), {
+                        .layout = { .sizing = { CLAY_SIZING_FIXED(meter_w), CLAY_SIZING_FIXED(8) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 0 },
+                        .backgroundColor = to_clay_color((Color){40,40,48,255}),
+                        .cornerRadius = CLAY_CORNER_RADIUS(2)
+                    }) {
+                        // Fill bar (left side)
+                        if (fill_w > 0) {
+                            CLAY(CLAY_IDI("AudioMeterFill", i), {
+                                .layout = { .sizing = { CLAY_SIZING_FIXED(fill_w), CLAY_SIZING_GROW(0) } },
+                                .backgroundColor = to_clay_color(bar_col),
+                                .cornerRadius = CLAY_CORNER_RADIUS(2)
+                            }) { }
+                        }
+                    }
+                }
+            }
+        }
+
         // Record button
         Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
         if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
@@ -596,6 +704,7 @@ static void render_toolbar(gui_app_t *app) {
             CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
         }
+
 
         // Settings button
         CLAY(CLAY_ID("SettingsButton"), {
@@ -702,6 +811,21 @@ static void render_channel_stats(gui_app_t *app, int channel) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(clip_pos > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
             CLAY_TEXT(make_string(buf_clip_neg),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(clip_neg > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
+        }
+
+        // Reset button row (kept separate so it scales better)
+        CLAY(CLAY_IDI("ResetClipRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+            CLAY(CLAY_IDI("LblClipReset", channel), { .layout = { .sizing = { CLAY_SIZING_FIXED(LABEL_WIDTH), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING(""),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_IDI("ResetClipBtn", channel), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(60), CLAY_SIZING_FIXED(18) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } },
+                .backgroundColor = to_clay_color(COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(3)
+            }) {
+                CLAY_TEXT(CLAY_STRING("RST"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_DROPDOWN_OPT, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
         }
 
         // Errors row
@@ -1320,8 +1444,12 @@ void gui_handle_interactions(gui_app_t *app) {
     // Reset click consumed flag at start of each frame
     s_ui_consumed_click = false;
 
+
     // Handle simple text input when editing capture name
     if (app->settings_panel_open && s_edit_output_base_name) {
+        // If base name editing is active, don't allow audio label edit at same time.
+        s_edit_audio_label_idx = -1;
+
         // Append printable ASCII chars (avoid locale/undefined behavior with ctype on >255)
         int ch = GetCharPressed();
         while (ch > 0) {
@@ -1362,6 +1490,53 @@ void gui_handle_interactions(gui_app_t *app) {
         }
     }
 
+    // Handle text input when editing audio label
+    if (app->settings_panel_open && s_edit_audio_label_idx >= 0 && s_edit_audio_label_idx < 4 && app->settings.auto_names_enabled) {
+        // Cancel base name edit
+        s_edit_output_base_name = false;
+
+        int idx = s_edit_audio_label_idx;
+        char *dst = app->settings.audio_1ch_labels[idx];
+        size_t cap = sizeof(app->settings.audio_1ch_labels[idx]);
+
+        int ch = GetCharPressed();
+        while (ch > 0) {
+            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
+                size_t len = strlen(dst);
+                if (len + 1 < cap) {
+                    dst[len] = (char)ch;
+                    dst[len + 1] = '\0';
+                    gui_settings_save(&app->settings);
+                }
+            }
+            ch = GetCharPressed();
+        }
+
+        if (IsKeyPressed(KEY_BACKSPACE)) {
+            s_audio_label_backspace_repeat_at = GetTime() + 0.25;
+            size_t len = strlen(dst);
+            if (len > 0) {
+                dst[len - 1] = '\0';
+                gui_settings_save(&app->settings);
+            }
+        } else if (IsKeyDown(KEY_BACKSPACE)) {
+            double now = GetTime();
+            if (now >= s_audio_label_backspace_repeat_at) {
+                s_audio_label_backspace_repeat_at = now + 0.05;
+                size_t len = strlen(dst);
+                if (len > 0) {
+                    dst[len - 1] = '\0';
+                    gui_settings_save(&app->settings);
+                }
+            }
+        }
+
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+            s_edit_audio_label_idx = -1;
+            gui_settings_save(&app->settings);
+        }
+    }
+
     // Handle popup interactions first (modal behavior)
     if (gui_popup_handle_interactions()) {
         s_ui_consumed_click = true;
@@ -1379,6 +1554,18 @@ void gui_handle_interactions(gui_app_t *app) {
             }
         }
 
+
+        // Audio playback monitoring toggle
+        if (Clay_PointerOver(CLAY_ID("AudioPlaybackToggle"))) {
+            gui_audio_set_playback_enabled(app, !app->settings.audio_monitor_playback);
+        }
+        
+        // Audio channel select toggle (CH1/2 vs CH3/4)
+        if (Clay_PointerOver(CLAY_ID("AudioChannelToggle"))) {
+            app->settings.audio_monitor_ch34 = !app->settings.audio_monitor_ch34;
+            gui_settings_save(&app->settings);
+        }
+
         // Check record button
         if (Clay_PointerOver(CLAY_ID("RecordButton")) && app->is_capturing) {
             if (app->is_recording) {
@@ -1391,7 +1578,19 @@ void gui_handle_interactions(gui_app_t *app) {
         // Check settings button
         if (Clay_PointerOver(CLAY_ID("SettingsButton"))) {
             app->settings_panel_open = !app->settings_panel_open;
+            s_edit_output_base_name = false;
+            s_edit_audio_label_idx = -1;
             gui_settings_save(&app->settings);
+        }
+
+        // Clip reset buttons (per-channel stats)
+        if (Clay_PointerOver(CLAY_IDI("ResetClipBtn", 0))) {
+            atomic_store(&app->clip_count_a_pos, 0);
+            atomic_store(&app->clip_count_a_neg, 0);
+        }
+        if (Clay_PointerOver(CLAY_IDI("ResetClipBtn", 1))) {
+            atomic_store(&app->clip_count_b_pos, 0);
+            atomic_store(&app->clip_count_b_neg, 0);
         }
 
         // Settings panel interactions
@@ -1465,7 +1664,12 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
                 s_edit_output_base_name = true;
+                s_edit_audio_label_idx = -1;
                 s_base_name_backspace_repeat_at = 0.0;
+            }
+            if (Clay_PointerOver(CLAY_ID("AppendTimestampToggle")) && app->settings.auto_names_enabled) {
+                app->settings.append_timestamp_on_capture_start = !app->settings.append_timestamp_on_capture_start;
+                gui_settings_save(&app->settings);
             }
 
             // RF bit depth selection (cycle)
@@ -1515,6 +1719,11 @@ void gui_handle_interactions(gui_app_t *app) {
                 if (Clay_PointerOver(CLAY_IDI("ToggleAudio1ch", i))) {
                     app->settings.enable_audio_1ch[i] = !app->settings.enable_audio_1ch[i];
                     gui_settings_save(&app->settings);
+                }
+                if (Clay_PointerOver(CLAY_IDI("Audio1chLabelField", i)) && app->settings.auto_names_enabled) {
+                    s_edit_audio_label_idx = i;
+                    s_edit_output_base_name = false;
+                    s_audio_label_backspace_repeat_at = 0.0;
                 }
             }
 
