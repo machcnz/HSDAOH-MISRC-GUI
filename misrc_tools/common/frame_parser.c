@@ -364,6 +364,8 @@ void capture_handler_init(capture_handler_ctx_t *ctx)
 {
     memset(ctx, 0, sizeof(*ctx));
     frame_parser_init(&ctx->frame_state);
+    atomic_store(&ctx->capture_rf, false);
+    atomic_store(&ctx->capture_audio, false);
 }
 
 void capture_handler_reset_audio_sync(capture_handler_ctx_t *ctx)
@@ -422,7 +424,7 @@ bool capture_handler_process_sync_event(capture_handler_ctx_t *ctx,
             capture_handler_reset_audio_sync(ctx);
 
             /* Check if audio is available when requested */
-            if (ctx->capture_audio) {
+            if (atomic_load(&ctx->capture_audio)) {
                 if (!(meta->flags & FLAG_STREAM_ID_PRESENT)) {
                     /* Audio requested but not available in stream */
                     if (ctx->msg_cb) {
@@ -455,14 +457,17 @@ bool capture_handler_audio_filter(void *ctx, int stream_id,
 
     if (stream_id == 0) {
         /* RF stream */
-        /* Only copy RF if:
-         * - We want to capture RF, AND
-         * - Either we're not waiting for audio, OR audio sync has started */
-        return cap->capture_rf &&
-               (!cap->capture_audio || cap->audio_sync_stage1);
+        /* Always copy RF when requested.
+         *
+         * IMPORTANT: Do not gate RF on audio sync state.
+         * The ordering of RF vs audio payload lines inside a frame is not guaranteed.
+         * Gating RF until the first audio line can cause partial RF payload copies
+         * while still committing the full expected RF byte count to the ringbuffer.
+         */
+        return atomic_load(&cap->capture_rf);
     } else if (stream_id == 1) {
         /* Audio stream */
-        if (!cap->capture_audio)
+        if (!atomic_load(&cap->capture_audio))
             return false;
 
         if (cap->audio_sync_stage2) {

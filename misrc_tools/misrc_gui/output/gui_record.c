@@ -540,11 +540,43 @@ static void format_msps_from_khz(char *dst, size_t dst_len, float khz) {
     }
 }
 
+static void sanitize_tag(char *dst, size_t dst_len, const char *src) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!src || !src[0]) return;
+
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 1 < dst_len; i++) {
+        char c = src[i];
+        // allow [A-Za-z0-9._-], map spaces to '-'
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+            dst[j++] = c;
+        } else if (c == ' ' || c == '\t') {
+            dst[j++] = '-';
+        } else {
+            // skip other chars (slashes etc.)
+        }
+    }
+    dst[j] = '\0';
+
+    // Trim trailing '-'
+    while (j > 0 && dst[j - 1] == '-') {
+        dst[--j] = '\0';
+    }
+}
+
 static void gui_record_apply_auto_names(gui_app_t *app) {
     if (!app) return;
     if (!app->settings.auto_names_enabled) return;
 
     const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
+
+    // Optionally append capture-start timestamp (does not mutate output_base_name)
+    char base_with_ts[256];
+    if (app->settings.append_timestamp_on_capture_start && app->capture_timestamp[0]) {
+        snprintf(base_with_ts, sizeof(base_with_ts), "%s_%s", base, app->capture_timestamp);
+        base = base_with_ts;
+    }
 
     // RF filenames
     if (app->settings.use_flac) {
@@ -592,8 +624,15 @@ static void gui_record_apply_auto_names(gui_app_t *app) {
     snprintf(app->settings.audio_4ch_filename, MAX_FILENAME_LEN, "%s_quad_4ch.wav", base);
     snprintf(app->settings.audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_stereo_ch1_ch2.wav", base);
     snprintf(app->settings.audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_stereo_ch3_ch4.wav", base);
+
     for (int i = 0; i < 4; i++) {
-        snprintf(app->settings.audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_audio_ch%d.wav", base, i + 1);
+        char tag[40];
+        sanitize_tag(tag, sizeof(tag), app->settings.audio_1ch_labels[i]);
+        if (tag[0]) {
+            snprintf(app->settings.audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_%s_audio_ch%d.wav", base, tag, i + 1);
+        } else {
+            snprintf(app->settings.audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_audio_ch%d.wav", base, i + 1);
+        }
     }
 }
 
@@ -976,8 +1015,13 @@ void gui_record_stop(gui_app_t *app) {
     // This stops new data from being written to record ringbuffers
     gui_extract_set_recording(false, false, 16, 16);
 
-    // Stop audio output/monitoring
+    // Stop audio output/monitoring (file writing).
+    // Then restart audio thread in monitor-only mode if we are still capturing,
+    // so audio capture stays always-on without filling BUF_CAPTURE_AUDIO.
     gui_audio_stop(app);
+    if (app->is_capturing) {
+        (void)gui_audio_start(app, &app->buffers);
+    }
 
     // Restore normal process priority
     proc_set_priority(PROC_PRIORITY_NORMAL);

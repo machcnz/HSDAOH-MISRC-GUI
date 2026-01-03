@@ -24,6 +24,7 @@
 #include "../ui/gui_dropdown.h"
 #include "../ui/gui_popup.h"
 #include "../output/gui_record.h"
+#include "../output/gui_audio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,9 @@ int main(int argc, char **argv) {
 
     // Load persistent settings (includes desktop path defaults)
     gui_settings_load(&app.settings);
+
+    // Capture limit should not persist across relaunches.
+    app.settings.capture_limit_seconds = 0;
 
     // Initialize raylib window
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
@@ -231,6 +235,9 @@ int main(int argc, char **argv) {
 
         // Update VU meters
         gui_app_update_vu_meters(&app, dt);
+
+        // Pump audio playback monitoring (system output)
+        gui_audio_update_playback(&app);
 
         // Note: Display processing now handled by display thread via panel_process_all()
         // Each panel type (waveform, histogram, FFT) receives raw samples via vtable->process()

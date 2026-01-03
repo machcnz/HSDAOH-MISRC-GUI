@@ -7,6 +7,7 @@
 
 #include "buffer_manager.h"
 #include "threading.h"
+#include "misrc_debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,8 +53,11 @@ static const backpressure_policy_t s_default_policies[BUF_COUNT] = {
         .log_drops = true,
     },
     [BUF_CAPTURE_AUDIO] = {
-        .max_wait_attempts = 5,
-        .wait_timeout_ms = 5,
+        /* Audio is best-effort: never block the capture callback waiting on audio space.
+         * Blocking here increases the chance of missing RF frames and destabilizing sync.
+         */
+        .max_wait_attempts = 0,
+        .wait_timeout_ms = 0,
         .log_first_wait = true,
         .log_drops = true,
     },
@@ -114,7 +118,9 @@ int bufmgr_init_custom(buffer_manager_t *mgr, const buffer_config_t *configs) {
     }
 
     mgr->manager_initialized = true;
-    fprintf(stderr, "[BUFMGR] Buffer manager initialized\n");
+    if (misrc_debug_enabled()) {
+        fprintf(stderr, "[BUFMGR] Buffer manager initialized\n");
+    }
     return 0;
 }
 
@@ -134,7 +140,9 @@ void bufmgr_cleanup(buffer_manager_t *mgr) {
     }
 
     mgr->manager_initialized = false;
-    fprintf(stderr, "[BUFMGR] Buffer manager cleaned up\n");
+    if (misrc_debug_enabled()) {
+        fprintf(stderr, "[BUFMGR] Buffer manager cleaned up\n");
+    }
 }
 
 int bufmgr_ensure_init(buffer_manager_t *mgr, buffer_id_t id) {
@@ -164,8 +172,10 @@ int bufmgr_ensure_init(buffer_manager_t *mgr, buffer_id_t id) {
     memset(&mgr->stats[id], 0, sizeof(buffer_stats_t));
 
     mgr->initialized[id] = true;
-    fprintf(stderr, "[BUFMGR] Initialized buffer '%s' (%zu bytes)\n",
-            cfg->name, cfg->size);
+    if (misrc_debug_enabled()) {
+        fprintf(stderr, "[BUFMGR] Initialized buffer '%s' (%zu bytes)\n",
+                cfg->name, cfg->size);
+    }
     return 0;
 }
 
@@ -179,7 +189,9 @@ void bufmgr_reset(buffer_manager_t *mgr, buffer_id_t id) {
     /* Also reset stats for this buffer */
     memset(&mgr->stats[id], 0, sizeof(buffer_stats_t));
 
-    fprintf(stderr, "[BUFMGR] Reset buffer '%s'\n", mgr->configs[id].name);
+    if (misrc_debug_enabled()) {
+        fprintf(stderr, "[BUFMGR] Reset buffer '%s'\n", mgr->configs[id].name);
+    }
 }
 
 void bufmgr_reset_stats(buffer_manager_t *mgr, buffer_id_t id) {
@@ -218,7 +230,7 @@ void *bufmgr_write_begin(buffer_manager_t *mgr, buffer_id_t id,
     if (pol->max_wait_attempts == 0) {
         /* Never wait policy - drop immediately */
         atomic_fetch_add(&mgr->stats[id].write_drops, 1);
-        if (pol->log_drops) {
+        if (pol->log_drops && misrc_debug_enabled()) {
             fprintf(stderr, "[BUFMGR] Buffer '%s' dropping write (%zu bytes)\n",
                     mgr->configs[id].name, bytes);
         }
@@ -233,8 +245,10 @@ void *bufmgr_write_begin(buffer_manager_t *mgr, buffer_id_t id,
 
         if (pol->log_first_wait && !logged_wait) {
             uint32_t wait_count = atomic_fetch_add(&mgr->stats[id].write_waits, 1) + 1;
-            fprintf(stderr, "[BUFMGR] Buffer '%s' backpressure - waiting (wait #%u)\n",
-                    mgr->configs[id].name, wait_count);
+            if (misrc_debug_enabled()) {
+                fprintf(stderr, "[BUFMGR] Buffer '%s' backpressure - waiting (wait #%u)\n",
+                        mgr->configs[id].name, wait_count);
+            }
             logged_wait = true;
         } else {
             atomic_fetch_add(&mgr->stats[id].write_waits, 1);
@@ -243,7 +257,7 @@ void *bufmgr_write_begin(buffer_manager_t *mgr, buffer_id_t id,
         if (attempts > pol->max_wait_attempts) {
             /* Max attempts exceeded - drop */
             atomic_fetch_add(&mgr->stats[id].write_drops, 1);
-            if (pol->log_drops) {
+            if (pol->log_drops && misrc_debug_enabled()) {
                 fprintf(stderr, "[BUFMGR] Buffer '%s' dropping write after %d attempts\n",
                         mgr->configs[id].name, attempts);
             }

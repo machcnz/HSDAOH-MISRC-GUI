@@ -9,6 +9,10 @@ extern volatile atomic_int do_exit;
 // Capture callback function
 void gui_capture_callback(void *data_info);
 
+// Enable/disable audio capture in the hsdaoh callback.
+// Normally audio is enabled during capture for monitoring.
+void gui_capture_set_audio_capture(bool enabled);
+
 // Note: Audio buffer now accessed via app->buffers (buffer_manager)
 // Use BUF_CAPTURE_AUDIO with bufmgr_read_begin/bufmgr_read_end
 

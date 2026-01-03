@@ -155,6 +155,17 @@ typedef struct {
     bool auto_names_enabled;                   // If true, derive filenames from output_base_name + parameters
     char output_base_name[MAX_FILENAME_LEN];   // Base name for outputs (no extension)
 
+    // Timestamp behavior
+    // If true, append a system-time timestamp captured at *capture start* to the base name when generating output filenames.
+    // This does not mutate output_base_name; it only affects derived filenames.
+    bool append_timestamp_on_capture_start;
+
+    // Capture duration limit (0 = no limit)
+    uint32_t capture_limit_seconds;
+
+    // Recording duration limit (0 = no limit)
+    uint32_t record_limit_seconds;
+
     // RF bit depth selection (per-channel)
     // FLAC supports 8/12/16; RAW supports 8/16 (12 is disabled in RAW UI).
     uint8_t rf_bits_a;
@@ -205,6 +216,13 @@ typedef struct {
     bool enable_audio_2ch_12;
     bool enable_audio_2ch_34;
     bool enable_audio_1ch[4];                  // Individual channel enables
+
+    // Audio monitoring
+    bool audio_monitor_playback;               // If true, play monitored audio to system output
+    bool audio_monitor_ch34;                   // If true, monitor CH3/4; if false, monitor CH1/2
+
+    // Per-channel audio labels (for auto naming, e.g. "linear", "baseband")
+    char audio_1ch_labels[4][32];
 
     // Display settings (existing)
     bool show_grid;
@@ -292,6 +310,10 @@ typedef struct gui_app {
 
     // Recording state
     double recording_start_time;
+
+    // Capture session timing
+    double capture_start_time;
+    char capture_timestamp[32];                  // yyyy.mm.dd_hh.mm.ss at capture start (empty if not set)
     atomic_uint_fast64_t recording_bytes;        // Total raw bytes recorded
     atomic_uint_fast64_t recording_raw_a;        // Raw input bytes channel A
     atomic_uint_fast64_t recording_raw_b;        // Raw input bytes channel B

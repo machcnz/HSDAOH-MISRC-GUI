@@ -14,6 +14,7 @@
 #include "../output/gui_audio.h"
 #include "version.h"
 #include "../visualization/gui_custom_elements.h"
+#include "../../common/buffer_manager.h"
 #include <clay.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1262,116 +1263,141 @@ static void render_status_bar(gui_app_t *app) {
 
             
 
-            // Missed frames count
+            // Samples
+            uint64_t samples_status = atomic_load(&app->samples_a);
+            if (samples_status >= 1000000000ULL) {
+                snprintf(temp_buf8, sizeof(temp_buf8), "%.2fG", (double)samples_status / 1000000000.0);
+            } else if (samples_status >= 1000000ULL) {
+                snprintf(temp_buf8, sizeof(temp_buf8), "%.2fM", (double)samples_status / 1000000.0);
+            } else if (samples_status >= 1000ULL) {
+                snprintf(temp_buf8, sizeof(temp_buf8), "%.1fK", (double)samples_status / 1000.0);
+            } else {
+                snprintf(temp_buf8, sizeof(temp_buf8), "%llu", (unsigned long long)samples_status);
+            }
+            CLAY(CLAY_ID("SamplesStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
+                }
+            }) {
+                CLAY_TEXT(CLAY_STRING("Samples:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("SamplesValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(60), CLAY_SIZING_FIT(0) } }
+                }) {
+                    CLAY_TEXT(make_string(temp_buf8),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
+                }
+            }
+
+            // Frames
+            uint32_t frames = atomic_load(&app->frame_count);
+            snprintf(temp_buf4, sizeof(temp_buf4), "%u", frames);
+            CLAY(CLAY_ID("FrameStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
+                }
+            }) {
+                CLAY_TEXT(CLAY_STRING("Frames:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("FrameValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(50), CLAY_SIZING_FIT(0) } }
+                }) {
+                    CLAY_TEXT(make_string(temp_buf4),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
+                }
+            }
+
+            // Missed frames
             uint32_t missed = atomic_load(&app->missed_frame_count);
-            //if (missed > 0) {
-                snprintf(temp_buf5, sizeof(temp_buf5), "%u", missed);
-                CLAY(CLAY_ID("MissedStatus"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
-                        .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                        .childGap = 4
-                    }
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Missed:"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                    CLAY(CLAY_ID("MissedValue"), {
-                        .layout = { .sizing = { CLAY_SIZING_FIXED(20), CLAY_SIZING_FIT(0) } }
-                    }) {
-                        CLAY_TEXT(make_string(temp_buf5),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_CLIP_RED) }));
-                    }
+            snprintf(temp_buf5, sizeof(temp_buf5), "%u", missed);
+            CLAY(CLAY_ID("MissedStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
                 }
-            //}
+            }) {
+                CLAY_TEXT(CLAY_STRING("Missed:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("MissedValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(30), CLAY_SIZING_FIT(0) } }
+                }) {
+                    CLAY_TEXT(make_string(temp_buf5),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(missed > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
+                }
+            }
 
-            // Total errors
+            // Errors
             uint32_t errors = atomic_load(&app->error_count);
-            //if (errors > 0) {
-                snprintf(temp_buf6, sizeof(temp_buf6), "%u", errors);
-                CLAY(CLAY_ID("ErrorStatus"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
-                        .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                        .childGap = 4
-                    }
+            snprintf(temp_buf6, sizeof(temp_buf6), "%u", errors);
+            CLAY(CLAY_ID("ErrorStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
+                }
+            }) {
+                CLAY_TEXT(CLAY_STRING("Errors:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("ErrorValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(30), CLAY_SIZING_FIT(0) } }
                 }) {
-                    CLAY_TEXT(CLAY_STRING("Errors:"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                    CLAY(CLAY_ID("ErrorValue"), {
-                        .layout = { .sizing = { CLAY_SIZING_FIXED(20), CLAY_SIZING_FIT(0) } }
-                    }) {
-                        CLAY_TEXT(make_string(temp_buf6),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_CLIP_RED) }));
-                    }
+                    CLAY_TEXT(make_string(temp_buf6),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
                 }
-            //}
+            }
 
-            // Unified Samples (same for both channels)
-            {
-                uint64_t samples_status = atomic_load(&app->samples_a);
-                if (samples_status >= 1000000000ULL) {
-                    snprintf(temp_buf8, sizeof(temp_buf8), "%.2fG", (double)samples_status / 1000000000.0);
-                } else if (samples_status >= 1000000ULL) {
-                    snprintf(temp_buf8, sizeof(temp_buf8), "%.2fM", (double)samples_status / 1000000.0);
-                } else if (samples_status >= 1000ULL) {
-                    snprintf(temp_buf8, sizeof(temp_buf8), "%.1fK", (double)samples_status / 1000.0);
-                } else {
-                    snprintf(temp_buf8, sizeof(temp_buf8), "%llu", (unsigned long long)samples_status);
+            // RF Buffer usage (as percentage)
+            size_t rf_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].head);
+            size_t rf_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].tail);
+            size_t rf_size = app->buffers.buffers[BUF_CAPTURE_RF].buffer_size;
+            size_t rf_used = (rf_head >= rf_tail) ? (rf_head - rf_tail) : (rf_size - rf_tail + rf_head);
+            int rf_pct = rf_size > 0 ? (int)((rf_used * 100) / rf_size) : 0;
+            snprintf(temp_buf1, sizeof(temp_buf1), "%d%%", rf_pct);
+            CLAY(CLAY_ID("RFBufStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
                 }
-
-                CLAY(CLAY_ID("SamplesStatus"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
-                        .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                        .childGap = 4
-                    }
+            }) {
+                CLAY_TEXT(CLAY_STRING("RF Buffer:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("RFBufValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(35), CLAY_SIZING_FIT(0) } }
                 }) {
-                    CLAY_TEXT(CLAY_STRING("Samples:"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                    CLAY(CLAY_ID("SamplesValue"), {
-                        .layout = { .sizing = { CLAY_SIZING_FIXED(60), CLAY_SIZING_FIT(0) } }
-                    }) {
-                        CLAY_TEXT(make_string(temp_buf8),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
+                    Color rf_color = (rf_pct > 90) ? COLOR_CLIP_RED : (rf_pct > 75) ? COLOR_METER_YELLOW : COLOR_TEXT;
+                    CLAY_TEXT(make_string(temp_buf1),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(rf_color) }));
                 }
+            }
 
-                // Frames count placed next to Samples
-                uint32_t frames = atomic_load(&app->frame_count);
-                snprintf(temp_buf4, sizeof(temp_buf4), "%u", frames);
-                CLAY(CLAY_ID("FrameStatus"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
-                        .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                        .childGap = 4
-                    }
+            // Audio Buffer usage (as percentage)
+            size_t aud_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].head);
+            size_t aud_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].tail);
+            size_t aud_size = app->buffers.buffers[BUF_CAPTURE_AUDIO].buffer_size;
+            size_t aud_used = (aud_head >= aud_tail) ? (aud_head - aud_tail) : (aud_size - aud_tail + aud_head);
+            int aud_pct = aud_size > 0 ? (int)((aud_used * 100) / aud_size) : 0;
+            snprintf(temp_buf2, sizeof(temp_buf2), "%d%%", aud_pct);
+            CLAY(CLAY_ID("AudBufStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
+                }
+            }) {
+                CLAY_TEXT(CLAY_STRING("Audio Buffer:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                CLAY(CLAY_ID("AudBufValue"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(35), CLAY_SIZING_FIT(0) } }
                 }) {
-                    CLAY_TEXT(CLAY_STRING("Frames:"),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                    CLAY(CLAY_ID("FrameValue"), {
-                        .layout = { .sizing = { CLAY_SIZING_FIXED(50), CLAY_SIZING_FIT(0) } }
-                    }) {
-                        CLAY_TEXT(make_string(temp_buf4),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
-                    }
-                }
-
-                // Audio monitoring peaks (24-bit magnitude -> %FS)
-                {
-                    uint32_t p1 = atomic_load(&app->audio_peak[0]);
-                    uint32_t p2 = atomic_load(&app->audio_peak[1]);
-                    uint32_t p3 = atomic_load(&app->audio_peak[2]);
-                    uint32_t p4 = atomic_load(&app->audio_peak[3]);
-
-                    if (p1 || p2 || p3 || p4) {
-                        int a1 = (int)((double)p1 * 100.0 / 8388607.0);
-                        int a2 = (int)((double)p2 * 100.0 / 8388607.0);
-                        int a3 = (int)((double)p3 * 100.0 / 8388607.0);
-                        int a4 = (int)((double)p4 * 100.0 / 8388607.0);
-                        snprintf(temp_buf7, sizeof(temp_buf7), "Aud:%d %d %d %d", a1, a2, a3, a4);
-                        CLAY_TEXT(make_string(temp_buf7),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                    }
+                    Color aud_color = (aud_pct > 90) ? COLOR_CLIP_RED : (aud_pct > 75) ? COLOR_METER_YELLOW : COLOR_TEXT;
+                    CLAY_TEXT(make_string(temp_buf2),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(aud_color) }));
                 }
             }
         }

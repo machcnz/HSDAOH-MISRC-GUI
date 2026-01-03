@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 #include <hsdaoh.h>
 #include <hsdaoh_raw.h>
@@ -290,8 +291,8 @@ typedef struct {
     frame_parser_state_t frame_state;
 
     /* Capture configuration */
-    bool capture_rf;                  /* Whether to capture RF stream */
-    bool capture_audio;               /* Whether to capture audio stream */
+    atomic_bool capture_rf;           /* Whether to capture RF stream */
+    atomic_bool capture_audio;        /* Whether to capture audio stream */
 
     /* Audio sync state machine (two-stage sync)
      * Stage 1: First audio line seen, RF can start

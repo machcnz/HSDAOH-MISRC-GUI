@@ -22,6 +22,7 @@
 #include "../visualization/gui_histogram_panel.h"
 #include "../signal/gui_cvbs.h"
 #include "../processing/gui_display_thread.h"
+#include "../output/gui_audio.h"
 
 #include <hsdaoh.h>
 #include <hsdaoh_raw.h>
@@ -32,12 +33,14 @@
 #include "../../common/frame_parser.h"
 #include "../../common/device_enum.h"
 #include "../../common/buffer_manager.h"
+#include "../../common/misrc_debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 // Define M_PI if not available (Windows compatibility)
 #ifndef M_PI
@@ -70,17 +73,28 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         atomic_fetch_add(&app->error_count, 1);
     }
 
-    // Print to console for debugging
+    // Print to console only when debug enabled, except always show ERROR/CRITICAL
     const char *level_str = "INFO";
     if (level == HSDAOH_WARNING) level_str = "WARN";
     else if (level == HSDAOH_ERROR) level_str = "ERROR";
     else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
 
-    fprintf(stderr, "[%s] %s", level_str, buffer);
+    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
+        fprintf(stderr, "[%s] %s", level_str, buffer);
+    }
 }
 
 // Debug counter
 static int s_callback_count = 0;
+
+void gui_capture_set_audio_capture(bool enabled)
+{
+    atomic_store(&s_capture_handler.capture_audio, enabled);
+    if (enabled) {
+        // Ensure clean audio sync ramp when enabling audio mid-capture.
+        capture_handler_reset_audio_sync(&s_capture_handler);
+    }
+}
 
 /*-----------------------------------------------------------------------------
  * GUI-Specific Capture Handler Callbacks
@@ -94,17 +108,27 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
 
     switch (result) {
         case FRAME_SYNC_LOST:
-            if (was_synced) {
+            if (was_synced && misrc_debug_enabled()) {
                 fprintf(stderr, "[CB] Lost sync to HDMI input stream\n");
             }
             atomic_store(&app->stream_synced, false);
             break;
         case FRAME_SYNC_MISSED:
-            fprintf(stderr, "[CB] Missed frame(s)\n");
+            if (misrc_debug_enabled()) {
+                // Match CLI usefulness: include framecounter. Note expected counter isn't directly
+                // available here because frame_process() already updated last_frame_cnt.
+                if (meta) {
+                    fprintf(stderr, "[CB] Missed at least one frame, fcnt %u\n", (unsigned)meta->framecounter);
+                } else {
+                    fprintf(stderr, "[CB] Missed frame(s)\n");
+                }
+            }
             atomic_fetch_add(&app->missed_frame_count, 1);
             break;
         case FRAME_SYNC_ACQUIRED:
-            fprintf(stderr, "[CB] Synchronized to HDMI input stream\n");
+            if (misrc_debug_enabled()) {
+                fprintf(stderr, "[CB] Synchronized to HDMI input stream\n");
+            }
             atomic_store(&app->stream_synced, true);
             break;
         case FRAME_SYNC_DUPLICATE:
@@ -172,7 +196,9 @@ void gui_capture_callback(void *data_info_ptr) {
     // Handle errors
     if (result.error_count > 0) {
         if (result.report_errors) {
-            fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
+            if (misrc_debug_enabled()) {
+                fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
+            }
             atomic_fetch_add(&app->error_count, result.error_count);
         }
         return;  // Discard frame with errors
@@ -192,16 +218,24 @@ void gui_capture_callback(void *data_info_ptr) {
     if (!buf_out) {
         // Buffer full after waiting - drop frame (policy allows this)
         atomic_fetch_add(&app->rb_drop_count, 1);
-        if (atomic_load(&app->rb_drop_count) <= 5) {
-            fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
+    if (atomic_load(&app->rb_drop_count) <= 5) {
+            if (misrc_debug_enabled()) {
+                fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
+            }
         }
         return;
     }
 
     // If audio capture enabled, reserve space in audio buffer via buffer manager
-    if (s_capture_handler.capture_audio && result.stream1_bytes > 0) {
+    if (atomic_load(&s_capture_handler.capture_audio) && result.stream1_bytes > 0) {
         buf_out_audio = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, result.stream1_bytes, NULL);
-        // buf_out_audio may be NULL if buffer full - best-effort audio
+        if (s_callback_count <= 3 && buf_out_audio) {
+            fprintf(stderr, "[CB] Audio capture enabled, wrote %zu bytes to BUF_CAPTURE_AUDIO\n", result.stream1_bytes);
+        }
+        // buf_out_audio may be NULL if buffer full
+    } else if (s_callback_count <= 3) {
+        fprintf(stderr, "[CB] Audio NOT captured: capture_audio=%d, stream1_bytes=%zu\n",
+                atomic_load(&s_capture_handler.capture_audio), result.stream1_bytes);
     }
 
     // Copy payloads (RF + optional audio) with shared audio sync filtering
@@ -217,7 +251,7 @@ void gui_capture_callback(void *data_info_ptr) {
     // Signal that new data is available (data events are managed by buffer manager)
     bufmgr_signal_data(&app->buffers, BUF_CAPTURE_RF);
 
-    if (s_callback_count <= 3) {
+    if (s_callback_count <= 3 && misrc_debug_enabled()) {
         fprintf(stderr, "[CB] Wrote %zu bytes to ringbuffer\n", result.stream0_bytes);
     }
 }
@@ -339,12 +373,8 @@ void gui_app_init(gui_app_t *app) {
     s_capture_handler.rb_audio = NULL; // Audio uses buffer manager
     s_capture_handler.capture_rf = true;
 
-    // Enable audio capture if any audio outputs are enabled (mirrors CLI audio options)
-    bool want_audio = app->settings.enable_audio_4ch || app->settings.enable_audio_2ch_12 || app->settings.enable_audio_2ch_34;
-    for (int i = 0; i < 4; i++) {
-        if (app->settings.enable_audio_1ch[i]) want_audio = true;
-    }
-    s_capture_handler.capture_audio = want_audio;
+    // Always enable audio capture for monitoring and meters (file outputs are optional)
+    s_capture_handler.capture_audio = true;
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
 
@@ -577,13 +607,11 @@ int gui_app_start_capture(gui_app_t *app) {
     // Note: All buffers now use buffer manager directly
     s_capture_handler.rb_rf = NULL;
     s_capture_handler.rb_audio = NULL;
-    s_capture_handler.capture_rf = true;
+    atomic_store(&s_capture_handler.capture_rf, true);
 
-    bool want_audio = app->settings.enable_audio_4ch || app->settings.enable_audio_2ch_12 || app->settings.enable_audio_2ch_34;
-    for (int i = 0; i < 4; i++) {
-        if (app->settings.enable_audio_1ch[i]) want_audio = true;
-    }
-    s_capture_handler.capture_audio = want_audio;
+    // Audio is always-on during capture (for monitoring). Writing to files is controlled
+    // by recording state in gui_audio_start().
+    atomic_store(&s_capture_handler.capture_audio, true);
 
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
@@ -621,6 +649,29 @@ int gui_app_start_capture(gui_app_t *app) {
     }
 
     app->is_capturing = true;
+    app->capture_start_time = GetTime();
+
+    // Capture-start timestamp (used for auto naming if enabled)
+    {
+        time_t t = time(NULL);
+        struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+        localtime_s(&tmv, &t);
+#else
+        localtime_r(&t, &tmv);
+#endif
+        snprintf(app->capture_timestamp, sizeof(app->capture_timestamp), "%04d.%02d.%02d_%02d.%02d.%02d",
+                 (tmv.tm_year + 1900),
+                 tmv.tm_mon + 1,
+                 tmv.tm_mday,
+                 tmv.tm_hour,
+                 tmv.tm_min,
+                 tmv.tm_sec);
+    }
+
+    // Start audio thread for monitoring/draining (keeps audio always-on during capture).
+    // gui_audio_start() will only open/write files when app->is_recording is true.
+    (void)gui_audio_start(app, &app->buffers);
 
     // Start the extraction thread - runs continuously from capture start
     r = gui_extract_start(app);
@@ -681,11 +732,15 @@ void gui_app_stop_capture(gui_app_t *app) {
     // Set is_capturing to false BEFORE stopping extraction thread
     // The extraction thread checks this flag to know when to exit
     app->is_capturing = false;
+    app->capture_timestamp[0] = '\0';
 
     // Stop display thread first (it reads from BUF_DISPLAY written by extraction)
     if (app->display_thread) {
         gui_display_thread_stop(app->display_thread);
     }
+
+    // Stop audio monitoring thread
+    gui_audio_stop(app);
 
     // Stop extraction thread before closing device
     gui_extract_stop();

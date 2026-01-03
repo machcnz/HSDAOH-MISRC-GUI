@@ -110,6 +110,13 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->auto_names_enabled = true;
     strcpy(settings->output_base_name, "capture");
 
+    // Timestamp behavior
+    settings->append_timestamp_on_capture_start = false;
+
+    // Duration limits: removed from UI, force to 0 (unlimited)
+    settings->capture_limit_seconds = 0;
+    settings->record_limit_seconds = 0;
+
     // Default filenames (used when auto naming is disabled)
     strcpy(settings->output_filename_a, "capture_a.flac");
     strcpy(settings->output_filename_b, "capture_b.flac");
@@ -126,6 +133,11 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     // Individual channel filenames
     for (int i = 0; i < 4; i++) {
         snprintf(settings->audio_1ch_filenames[i], MAX_FILENAME_LEN, "audio_ch%d.wav", i + 1);
+    }
+
+    // Per-channel audio labels (optional, used for auto naming)
+    for (int i = 0; i < 4; i++) {
+        settings->audio_1ch_labels[i][0] = '\0';
     }
     
     // Capture control defaults
@@ -165,6 +177,10 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     for (int i = 0; i < 4; i++) {
         settings->enable_audio_1ch[i] = false;
     }
+
+    // Audio monitoring defaults
+    settings->audio_monitor_playback = false;
+    settings->audio_monitor_ch34 = false;  // Default to CH1/2
     
     // Display settings
     settings->show_grid = true;
@@ -185,6 +201,7 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"output_path\": \"%s\",\n", settings->output_path);
     fprintf(f, "  \"auto_names_enabled\": %s,\n", settings->auto_names_enabled ? "true" : "false");
     fprintf(f, "  \"output_base_name\": \"%s\",\n", settings->output_base_name);
+    fprintf(f, "  \"append_timestamp_on_capture_start\": %s,\n", settings->append_timestamp_on_capture_start ? "true" : "false");
     fprintf(f, "  \"rf_bits_a\": %u,\n", (unsigned)settings->rf_bits_a);
     fprintf(f, "  \"rf_bits_b\": %u,\n", (unsigned)settings->rf_bits_b);
     fprintf(f, "  \"output_filename_a\": \"%s\",\n", settings->output_filename_a);
@@ -205,10 +222,16 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"audio_1ch_2_filename\": \"%s\",\n", settings->audio_1ch_filenames[1]);
     fprintf(f, "  \"audio_1ch_3_filename\": \"%s\",\n", settings->audio_1ch_filenames[2]);
     fprintf(f, "  \"audio_1ch_4_filename\": \"%s\",\n", settings->audio_1ch_filenames[3]);
+    fprintf(f, "  \"audio_1ch_1_label\": \"%s\",\n", settings->audio_1ch_labels[0]);
+    fprintf(f, "  \"audio_1ch_2_label\": \"%s\",\n", settings->audio_1ch_labels[1]);
+    fprintf(f, "  \"audio_1ch_3_label\": \"%s\",\n", settings->audio_1ch_labels[2]);
+    fprintf(f, "  \"audio_1ch_4_label\": \"%s\",\n", settings->audio_1ch_labels[3]);
 
     fprintf(f, "  \"enable_audio_4ch\": %s,\n", settings->enable_audio_4ch ? "true" : "false");
     fprintf(f, "  \"enable_audio_2ch_12\": %s,\n", settings->enable_audio_2ch_12 ? "true" : "false");
     fprintf(f, "  \"enable_audio_2ch_34\": %s,\n", settings->enable_audio_2ch_34 ? "true" : "false");
+    fprintf(f, "  \"audio_monitor_playback\": %s,\n", settings->audio_monitor_playback ? "true" : "false");
+    fprintf(f, "  \"audio_monitor_ch34\": %s,\n", settings->audio_monitor_ch34 ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -300,6 +323,35 @@ static void trim_newlines(char *s) {
     size_t len = strlen(s);
     while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
         s[--len] = '\0';
+    }
+}
+
+// Backward-compat migration:
+// Earlier builds could permanently prefix output_base_name with a timestamp like:
+// - "yy.mm.dd_hh.mm.ss_<name>"
+// - "yyyy.mm.dd_hh.mm.ss_<name>"
+// That is no longer desired (timestamp is now appended at capture start only for derived filenames).
+static void strip_timestamp_prefix_inplace(char *s) {
+    if (!s) return;
+
+    // yy.mm.dd_hh.mm.ss_
+    const size_t len_yy = 18;
+    // yyyy.mm.dd_hh.mm.ss_
+    const size_t len_yyyy = 20;
+
+    size_t n = strlen(s);
+    if (n <= len_yy) return;
+
+    bool match_yy = (n > len_yy) &&
+        (s[2] == '.' && s[5] == '.' && s[8] == '_' && s[11] == '.' && s[14] == '.' && s[17] == '_');
+
+    bool match_yyyy = (n > len_yyyy) &&
+        (s[4] == '.' && s[7] == '.' && s[10] == '_' && s[13] == '.' && s[16] == '.' && s[19] == '_');
+
+    if (match_yyyy) {
+        memmove(s, s + len_yyyy, n - len_yyyy + 1);
+    } else if (match_yy) {
+        memmove(s, s + len_yy, n - len_yy + 1);
     }
 }
 
@@ -452,7 +504,14 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "output_base_name")) != NULL) {
         strncpy(settings->output_base_name, value, MAX_FILENAME_LEN - 1);
         settings->output_base_name[MAX_FILENAME_LEN - 1] = '\0';
+        strip_timestamp_prefix_inplace(settings->output_base_name);
     }
+    if ((value = find_value(content, "append_timestamp_on_capture_start")) != NULL) {
+        settings->append_timestamp_on_capture_start = (strcmp(value, "true") == 0);
+    }
+    // Duration limits: feature removed, ignore saved values and force to 0
+    settings->capture_limit_seconds = 0;
+    settings->record_limit_seconds = 0;
     if ((value = find_value(content, "rf_bits_a")) != NULL) {
         settings->rf_bits_a = (uint8_t)atoi(value);
     }
@@ -583,6 +642,24 @@ void gui_settings_load(gui_settings_t *settings) {
         settings->audio_1ch_filenames[3][MAX_FILENAME_LEN - 1] = '\0';
     }
 
+    // Per-channel audio labels (optional)
+    if ((value = find_value(content, "audio_1ch_1_label")) != NULL) {
+        strncpy(settings->audio_1ch_labels[0], value, sizeof(settings->audio_1ch_labels[0]) - 1);
+        settings->audio_1ch_labels[0][sizeof(settings->audio_1ch_labels[0]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "audio_1ch_2_label")) != NULL) {
+        strncpy(settings->audio_1ch_labels[1], value, sizeof(settings->audio_1ch_labels[1]) - 1);
+        settings->audio_1ch_labels[1][sizeof(settings->audio_1ch_labels[1]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "audio_1ch_3_label")) != NULL) {
+        strncpy(settings->audio_1ch_labels[2], value, sizeof(settings->audio_1ch_labels[2]) - 1);
+        settings->audio_1ch_labels[2][sizeof(settings->audio_1ch_labels[2]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "audio_1ch_4_label")) != NULL) {
+        strncpy(settings->audio_1ch_labels[3], value, sizeof(settings->audio_1ch_labels[3]) - 1);
+        settings->audio_1ch_labels[3][sizeof(settings->audio_1ch_labels[3]) - 1] = '\0';
+    }
+
     if ((value = find_value(content, "enable_audio_4ch")) != NULL) {
         settings->enable_audio_4ch = (strcmp(value, "true") == 0);
     }
@@ -591,6 +668,12 @@ void gui_settings_load(gui_settings_t *settings) {
     }
     if ((value = find_value(content, "enable_audio_2ch_34")) != NULL) {
         settings->enable_audio_2ch_34 = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "audio_monitor_playback")) != NULL) {
+        settings->audio_monitor_playback = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "audio_monitor_ch34")) != NULL) {
+        settings->audio_monitor_ch34 = (strcmp(value, "true") == 0);
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

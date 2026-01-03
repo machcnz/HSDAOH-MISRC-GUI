@@ -14,4 +14,11 @@ void gui_audio_stop(gui_app_t *app);
 // True if audio thread is running.
 bool gui_audio_is_running(void);
 
+// Enable/disable playback monitoring to system audio device.
+// This affects live monitoring only (not file writing).
+void gui_audio_set_playback_enabled(gui_app_t *app, bool enabled);
+
+// Pump audio playback (call from main thread once per frame).
+void gui_audio_update_playback(gui_app_t *app);
+
 #endif // GUI_AUDIO_H
