@@ -19,6 +19,18 @@ echo "Build directory: $BUILD_DIR"
 echo "Repository root: $REPO_ROOT"
 echo "Workspace: $WORKSPACE"
 
+# Determine parallel build jobs (portable across Linux/macOS/MSYS)
+if command -v nproc >/dev/null 2>&1; then
+  MAKE_JOBS="$(nproc)"
+elif [[ "$OSTYPE" == "darwin"* ]] && command -v sysctl >/dev/null 2>&1; then
+  MAKE_JOBS="$(sysctl -n hw.ncpu)"
+else
+  MAKE_JOBS=1
+fi
+if [[ -z "$MAKE_JOBS" ]]; then
+  MAKE_JOBS=1
+fi
+
 if [[ ("$OSTYPE" == "darwin"*) ]]; then
   export MACOSX_DEPLOYMENT_TARGET=10.15
   export MACOS_DEPLOYMENT_TARGET=10.15
@@ -45,7 +57,7 @@ if [[ ("$OSTYPE" != "cygwin"*) && ("$OSTYPE" != "msys"*) ]]; then
       export CFLAGS="-Wno-error=int-conversion"
     fi
     ./configure --silent --prefix="${WORKSPACE}" --with-pc-path="${WORKSPACE}"/lib/pkgconfig --with-internal-glib
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
     cd ../
   fi
@@ -63,7 +75,7 @@ if [[ ("$OSTYPE" == "darwin"*) || ("$OSTYPE" == "cygwin"*) || ("$OSTYPE" == "msy
     tar xjf libusb-1.0.29.tar.bz2
     cd libusb-1.0.29
     ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
     cd ../
   fi
@@ -98,7 +110,7 @@ else
     cmake --build .
     cmake --install .
   else
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
   fi
   cd ../../
@@ -115,7 +127,7 @@ else
   tar xf flac-1.5.0.tar.xz
   cd flac-1.5.0
   ./configure --disable-shared --enable-static --disable-ogg --disable-programs --disable-examples --prefix="${WORKSPACE}"
-  make -j$(nproc)
+  make -j"${MAKE_JOBS}"
   make install
   cd ../
 fi
@@ -137,7 +149,7 @@ else
     cmake --build .
     cmake --install .
   else
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
   fi
   cd ../../
@@ -164,7 +176,7 @@ else
     cmake --build .
     cmake --install .
   else
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
   fi
   cd ../../
@@ -187,7 +199,7 @@ else
     cmake --build . --config Release
     cmake --install .
   else
-    make -j$(nproc)
+    make -j"${MAKE_JOBS}"
     make install
   fi
   cd ../../
@@ -204,7 +216,7 @@ else
   tar xzf fftw-3.3.10.tar.gz
   cd fftw-3.3.10
   ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static --enable-float
-  make -j$(nproc)
+  make -j"${MAKE_JOBS}"
   make install
   cd ../
 fi

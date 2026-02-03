@@ -48,12 +48,15 @@ def embed_font(font_path, output_path, var_name='font_data', font_name='Font'):
     return True
 
 if __name__ == '__main__':
+    output_dir = os.path.join('misrc_tools', 'misrc_gui', 'assets')
+    os.makedirs(output_dir, exist_ok=True)
+
     # Generate Inter font header
-    inter_font_path = 'assets/fonts/static/Inter_18pt-Regular.ttf'
-    inter_output_path = 'misrc_gui/inter_font_data.h'
+    inter_font_path = os.path.join('assets', 'fonts', 'static', 'Inter_18pt-Regular.ttf')
+    inter_output_path = os.path.join(output_dir, 'inter_font_data.h')
     embed_font(inter_font_path, inter_output_path, 'inter_font_data', 'Inter')
     
     # Generate Space Mono font header
-    space_mono_path = 'assets/fonts/SpaceMono-Regular.ttf'
-    space_mono_output_path = 'misrc_gui/space_mono_font_data.h'
+    space_mono_path = os.path.join('assets', 'fonts', 'SpaceMono-Regular.ttf')
+    space_mono_output_path = os.path.join(output_dir, 'space_mono_font_data.h')
     embed_font(space_mono_path, space_mono_output_path, 'space_mono_font_data', 'Space Mono')

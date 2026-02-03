@@ -8,6 +8,7 @@
 #endif
 
 #include "rb_event.h"
+#include <stddef.h>
 
 #ifdef _WIN32
 

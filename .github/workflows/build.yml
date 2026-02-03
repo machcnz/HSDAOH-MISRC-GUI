@@ -13,12 +13,6 @@ env:
   ARCHIVE_NAME_WINDOWS_ARM: ${{ github.ref_name }}-win-arm64.zip
   ARCHIVE_NAME_MACOS_INTEL: ${{ github.ref_name }}-macos-intel-x86_64.tar.gz
   ARCHIVE_NAME_MACOS_ARM: ${{ github.ref_name }}-macos-apple-silicon-arm64.tar.gz
-  ARCHIVE_NAME_GUI_LINUX: ${{ github.ref_name }}-gui-linux-x86_64.tar.gz
-  ARCHIVE_NAME_GUI_LINUX_ARM: ${{ github.ref_name }}-gui-linux-arm64.tar.gz
-  ARCHIVE_NAME_GUI_WINDOWS: ${{ github.ref_name }}-gui-win-x86_64.zip
-  ARCHIVE_NAME_GUI_WINDOWS_ARM: ${{ github.ref_name }}-gui-win-arm64.zip
-  ARCHIVE_NAME_GUI_MACOS_INTEL: ${{ github.ref_name }}-gui-macos-intel-x86_64.tar.gz
-  ARCHIVE_NAME_GUI_MACOS_ARM: ${{ github.ref_name }}-gui-macos-apple-silicon-arm64.tar.gz
   ARCHIVE_NAME_SRC: ${{ github.ref_name }}-src.tar.gz
 
 jobs:
@@ -34,7 +28,7 @@ jobs:
 
       - uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: cmake nasm build-essential libusb-1.0-0-dev curl meson ninja-build
+          packages: cmake nasm build-essential libusb-1.0-0-dev curl meson ninja-build libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libx11-dev
           version: 1.0
 
       - name: Build
@@ -50,15 +44,7 @@ jobs:
           tar -cvzf ~/${{ env.ARCHIVE_NAME_LINUX }} \
           --owner=root --group=root \
           -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_capture misrc_extract install-udev-rules.sh LICENSE.GPL LEGAL.txt
-      - name: Create GUI archive
-        run: |
-          cp LICENSE.GPL ./build/workspace/bin/
-          cp ./build/LEGAL.txt ./build/workspace/bin/
-          tar -cvzf ~/${{ env.ARCHIVE_NAME_GUI_LINUX }} \
-          --owner=root --group=root \
-          -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_gui LICENSE.GPL LEGAL.txt
+          misrc_capture misrc_extract misrc_gui install-udev-rules.sh LICENSE.GPL LEGAL.txt
 
       - name: Create source archive
         run: |
@@ -72,12 +58,6 @@ jobs:
         with:
           name: misrc_tools-linux
           path: ~/${{ env.ARCHIVE_NAME_LINUX }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-linux
-          path: ~/${{ env.ARCHIVE_NAME_GUI_LINUX }}
           if-no-files-found: error
 
       - name: Upload source artifact
@@ -99,7 +79,7 @@ jobs:
 
       - uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: cmake nasm build-essential libusb-1.0-0-dev curl meson ninja-build
+          packages: cmake nasm build-essential libusb-1.0-0-dev curl meson ninja-build libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libx11-dev
           version: 1.0
 
       - name: Build
@@ -115,27 +95,13 @@ jobs:
           tar -cvzf ~/${{ env.ARCHIVE_NAME_LINUX_ARM }} \
           --owner=root --group=root \
           -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_capture misrc_extract install-udev-rules.sh LICENSE.GPL LEGAL.txt
-      - name: Create GUI archive
-        run: |
-          cp LICENSE.GPL ./build/workspace/bin/
-          cp ./build/LEGAL.txt ./build/workspace/bin/
-          tar -cvzf ~/${{ env.ARCHIVE_NAME_GUI_LINUX_ARM }} \
-          --owner=root --group=root \
-          -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_gui LICENSE.GPL LEGAL.txt
+          misrc_capture misrc_extract misrc_gui install-udev-rules.sh LICENSE.GPL LEGAL.txt
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: misrc_tools-linux-arm
           path: ~/${{ env.ARCHIVE_NAME_LINUX_ARM }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-linux-arm
-          path: ~/${{ env.ARCHIVE_NAME_GUI_LINUX_ARM }}
           if-no-files-found: error
 
   build-windows:
@@ -177,12 +143,6 @@ jobs:
           zip -9 -j ${{ env.ARCHIVE_NAME_WINDOWS }} \
           "${ws}/build/workspace/bin/misrc_capture.exe" \
           "${ws}/build/workspace/bin/misrc_extract.exe" \
-          "${ws}/LICENSE.GPL" \
-          "${ws}/build/LEGAL.txt"
-      - name: Create GUI archive
-        run: |
-          ws="${GITHUB_WORKSPACE//\\//}"
-          zip -9 -j ${{ env.ARCHIVE_NAME_GUI_WINDOWS }} \
           "${ws}/build/workspace/bin/misrc_gui.exe" \
           "${ws}/LICENSE.GPL" \
           "${ws}/build/LEGAL.txt"
@@ -192,12 +152,6 @@ jobs:
         with:
           name: misrc_tools-windows
           path: ${{ env.ARCHIVE_NAME_WINDOWS }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-windows
-          path: ${{ env.ARCHIVE_NAME_GUI_WINDOWS }}
           if-no-files-found: error
 
   build-windows-arm:
@@ -238,12 +192,6 @@ jobs:
           zip -9 -j ${{ env.ARCHIVE_NAME_WINDOWS_ARM }} \
           "${ws}/build/workspace/bin/misrc_capture.exe" \
           "${ws}/build/workspace/bin/misrc_extract.exe" \
-          "${ws}/LICENSE.GPL" \
-          "${ws}/build/LEGAL.txt"
-      - name: Create GUI archive
-        run: |
-          ws="${GITHUB_WORKSPACE//\\//}"
-          zip -9 -j ${{ env.ARCHIVE_NAME_GUI_WINDOWS_ARM }} \
           "${ws}/build/workspace/bin/misrc_gui.exe" \
           "${ws}/LICENSE.GPL" \
           "${ws}/build/LEGAL.txt"
@@ -253,12 +201,6 @@ jobs:
         with:
           name: misrc_tools-windows-arm
           path: ${{ env.ARCHIVE_NAME_WINDOWS_ARM }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-windows-arm
-          path: ${{ env.ARCHIVE_NAME_GUI_WINDOWS_ARM }}
           if-no-files-found: error
 
   build-macos-intel:
@@ -287,27 +229,13 @@ jobs:
           tar -cvzf ${{ env.ARCHIVE_NAME_MACOS_INTEL }} \
           --uid 0 --gid 0 --no-acls \
           -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_capture misrc_extract LICENSE.GPL LEGAL.txt
-      - name: Create GUI archive
-        run: |
-          cp LICENSE.GPL ./build/workspace/bin/
-          cp ./build/LEGAL.txt ./build/workspace/bin/
-          tar -cvzf ${{ env.ARCHIVE_NAME_GUI_MACOS_INTEL }} \
-          --uid 0 --gid 0 --no-acls \
-          -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_gui LICENSE.GPL LEGAL.txt
+          misrc_capture misrc_extract misrc_gui LICENSE.GPL LEGAL.txt
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: misrc_tools-macos-intel
           path: ${{ env.ARCHIVE_NAME_MACOS_INTEL }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-macos-intel
-          path: ${{ env.ARCHIVE_NAME_GUI_MACOS_INTEL }}
           if-no-files-found: error
 
   build-macos-arm:
@@ -336,27 +264,13 @@ jobs:
           tar -cvzf ${{ env.ARCHIVE_NAME_MACOS_ARM }} \
           --uid 0 --gid 0 --no-acls \
           -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_capture misrc_extract LICENSE.GPL LEGAL.txt
-      - name: Create GUI archive
-        run: |
-          cp LICENSE.GPL ./build/workspace/bin/
-          cp ./build/LEGAL.txt ./build/workspace/bin/
-          tar -cvzf ${{ env.ARCHIVE_NAME_GUI_MACOS_ARM }} \
-          --uid 0 --gid 0 --no-acls \
-          -C ${{ github.workspace }}/build/workspace/bin \
-          misrc_gui LICENSE.GPL LEGAL.txt
+          misrc_capture misrc_extract misrc_gui LICENSE.GPL LEGAL.txt
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: misrc_tools-macos-arm
           path: ${{ env.ARCHIVE_NAME_MACOS_ARM }}
-          if-no-files-found: error
-      - name: Upload GUI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: misrc_gui-macos-arm
-          path: ${{ env.ARCHIVE_NAME_GUI_MACOS_ARM }}
           if-no-files-found: error
 
   github-release:
@@ -398,54 +312,30 @@ jobs:
           '${{ github.ref_name }}' \
           'misrc_tools-linux/${{ env.ARCHIVE_NAME_LINUX }}' \
           --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-linux/${{ env.ARCHIVE_NAME_GUI_LINUX }}' \
-          --repo '${{ github.repository }}'
 
           gh release upload \
           '${{ github.ref_name }}' \
           'misrc_tools-linux-arm/${{ env.ARCHIVE_NAME_LINUX_ARM }}' \
-          --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-linux-arm/${{ env.ARCHIVE_NAME_GUI_LINUX_ARM }}' \
           --repo '${{ github.repository }}'
 
           gh release upload \
           '${{ github.ref_name }}' \
           'misrc_tools-windows/${{ env.ARCHIVE_NAME_WINDOWS }}' \
           --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-windows/${{ env.ARCHIVE_NAME_GUI_WINDOWS }}' \
-          --repo '${{ github.repository }}'
 
           gh release upload \
           '${{ github.ref_name }}' \
           'misrc_tools-windows-arm/${{ env.ARCHIVE_NAME_WINDOWS_ARM }}' \
-          --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-windows-arm/${{ env.ARCHIVE_NAME_GUI_WINDOWS_ARM }}' \
           --repo '${{ github.repository }}'
 
           gh release upload \
           '${{ github.ref_name }}' \
           'misrc_tools-macos-intel/${{ env.ARCHIVE_NAME_MACOS_INTEL }}' \
           --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-macos-intel/${{ env.ARCHIVE_NAME_GUI_MACOS_INTEL }}' \
-          --repo '${{ github.repository }}'
 
           gh release upload \
           '${{ github.ref_name }}' \
           'misrc_tools-macos-arm/${{ env.ARCHIVE_NAME_MACOS_ARM }}' \
-          --repo '${{ github.repository }}'
-          gh release upload \
-          '${{ github.ref_name }}' \
-          'misrc_gui-macos-arm/${{ env.ARCHIVE_NAME_GUI_MACOS_ARM }}' \
           --repo '${{ github.repository }}'
 
           gh release upload \
