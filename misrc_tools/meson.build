@@ -177,6 +177,7 @@ if host_system == 'windows' or host_system == 'cygwin'
   ldflags_capture += [ '-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lonecore', '-static' ]
   sources_capture += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
   if host_cpu_family == 'aarch64'
+    ldflags += [ '-lwinpthread' ]
     ldflags_capture += [ '-lwinpthread' ]
   endif
 elif host_system == 'linux'
