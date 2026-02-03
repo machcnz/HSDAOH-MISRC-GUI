@@ -25,6 +25,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+
 #undef IMPL_MEMFD
 #undef IMPL_POSIX
 #undef IMPL_SHM_ANON

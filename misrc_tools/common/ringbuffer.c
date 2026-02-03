@@ -29,6 +29,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 #include "ringbuffer.h"
 
@@ -81,7 +84,11 @@ int rb_init(ringbuffer_t *rb, char *name, size_t size) {
 	CloseHandle(h);
 #else
 	// First, make sure the size is a multiple of the page size
-	if(size % getpagesize() != 0) {
+	long page_size = sysconf(_SC_PAGESIZE);
+	if (page_size <= 0) {
+		page_size = 4096;
+	}
+	if(size % (size_t)page_size != 0) {
 		return 1;
 	}
 

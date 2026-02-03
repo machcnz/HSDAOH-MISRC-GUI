@@ -59,6 +59,10 @@ host_cpu_family = host_machine.cpu_family()
 
 host_system = host_machine.system()
 
+if host_system == 'darwin'
+  cflags += ['-D_DARWIN_C_SOURCE']
+endif
+
 if host_cpu_family == 'x86_64'
   nasm_flags = []
   if host_system == 'windows' or host_system == 'cygwin'
