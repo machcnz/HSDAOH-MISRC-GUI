@@ -1,10 +1,57 @@
-# MISRC - Multi Input Simultaneous Raw RF Capture
+# MISRC - Multi Input Simultaneous Raw RF Capture - Fork
+
+**What is new in this fork:**
+This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
+Initial support targets the **single AD9226/PCM1802 variant** (Sev5000 Pico2_12bitADC_PCMAudio): https://github.com/Sev5000/Pico2_12bitADC_PCMAudio
+
+- [hsdaoh rp2350 version hardware:] (https://github.com/steve-m/hsdaoh-rp2350)
+
+Building hsdaoh-rp2350 MISRC GUI
+Prerequisites
+
+You need a compatible libhsdaoh installed or built locally. This project does not auto-fetch hsdaoh, because multiple incompatible libhsdaoh variants can exist (e.g. MISRC-modified vs upstream). You must explicitly point CMake at the intended one.
+
+1) Build and install upstream hsdaoh (steve-m)
+
+Example: build from source and keep it in a known location.
+
+git clone https://github.com/steve-m/hsdaoh.git
+cd hsdaoh
+mkdir -p build
+cd build
+cmake .. -DINSTALL_UDEV_RULES=ON
+make -j 4
+sudo make install
+sudo ldconfig
+
+
+If you prefer an isolated install prefix (recommended to avoid collisions):
+
+git clone https://github.com/steve-m/hsdaoh.git
+cmake -S hsdaoh -B hsdaoh/build -DINSTALL_UDEV_RULES=ON -DCMAKE_INSTALL_PREFIX=$HOME/opt/hsdaoh-steve
+cmake --build hsdaoh/build -j
+cmake --install hsdaoh/build
+
+2) Build this GUI
+Recommended build (from repo root)
+cd /path/to/HSDAOH-MISRC-GUI-misrc_gui_dev
+
+cmake -S . -B build \
+  -DHSDAOH_INC=/path/to/hsdaoh/include \
+  -DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.so
+
+cmake --build build -j
+
+Notes
+
+HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h.
+
+HSDAOH_LIB must point to the actual library file you want to link against (e.g. libhsdaoh.so or libhsdaoh.so.0).
+----------------------------------------------------------------------------------------------------------------------------------------
+
 
 [Hardware](#hardware-features) - [Firmware](#firmware-tang-nano-20k) - [Software](#software) - [Usage example](#capture--usage-example)
 
-<picture>
-<img src="assets/hardware-images/MISRC_V1.5_Tang_Nano_20k_Sony_ILCE-7RM3_2024.10.21_03.14.08-Small.png" width="600" height="" />
-</picture>
 
 > V1.5 with Tang Nano 20k on the FX3 to Tang Nano 20k adaptor PCB. 
 
