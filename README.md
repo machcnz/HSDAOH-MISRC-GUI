@@ -6,14 +6,13 @@ Initial support targets the **single AD9226/PCM1802 variant** (Sev5000 Pico2_12b
 
 - [hsdaoh rp2350 version hardware:] (https://github.com/steve-m/hsdaoh-rp2350)
 
-Building hsdaoh-rp2350 MISRC GUI
-Prerequisites
+## Building hsdaoh-rp2350 MISRC GUI
+### Prerequisites
+Steve-M's libhsdaoh must be installed or built locally. (This is due to MISRC HDMI stream, which changes how frames are parsed and validated. )
 
-You need a compatible libhsdaoh installed or built locally. This project does not auto-fetch hsdaoh, because multiple incompatible libhsdaoh variants can exist (e.g. MISRC-modified vs upstream). You must explicitly point CMake at the intended one.
-
-1) Build and install upstream hsdaoh (steve-m)
-
-Example: build from source and keep it in a known location.
+**1) Build and install upstream hsdaoh (steve-m)**
+Example: build from source in your desired path
+https://github.com/steve-m/hsdaoh
 
 git clone https://github.com/steve-m/hsdaoh.git
 cd hsdaoh
@@ -24,15 +23,13 @@ make -j 4
 sudo make install
 sudo ldconfig
 
-
-If you prefer an isolated install prefix (recommended to avoid collisions):
-
+If you prefer an isolated install:
 git clone https://github.com/steve-m/hsdaoh.git
-cmake -S hsdaoh -B hsdaoh/build -DINSTALL_UDEV_RULES=ON -DCMAKE_INSTALL_PREFIX=$HOME/opt/hsdaoh-steve
+cmake -S hsdaoh -B hsdaoh/build -DINSTALL_UDEV_RULES=ON -DCMAKE_INSTALL_PREFIX=$HOME/opt/hsdaoh-rp2350
 cmake --build hsdaoh/build -j
 cmake --install hsdaoh/build
 
-2) Build this GUI
+**2) Build this GUI**
 Recommended build (from repo root)
 cd /path/to/HSDAOH-MISRC-GUI-misrc_gui_dev
 
@@ -42,10 +39,8 @@ cmake -S . -B build \
 
 cmake --build build -j
 
-Notes
-
-HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h.
-
+Notes:
+HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h. (you build in step 1)
 HSDAOH_LIB must point to the actual library file you want to link against (e.g. libhsdaoh.so or libhsdaoh.so.0).
 ----------------------------------------------------------------------------------------------------------------------------------------
 
