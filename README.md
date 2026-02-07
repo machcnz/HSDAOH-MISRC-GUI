@@ -39,9 +39,10 @@ cmake -S . -B build \
 
 cmake --build build -j
 
-Notes:
-HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h. (you build in step 1)
-HSDAOH_LIB must point to the actual library file you want to link against (e.g. libhsdaoh.so or libhsdaoh.so.0).
+**Note:**
+- HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h. (you build in step 1)
+- HSDAOH_LIB must point to the actual library file you want to link against (e.g. libhsdaoh.so or libhsdaoh.so.0).
+
 ----------------------------------------------------------------------------------------------------------------------------------------
 
 
