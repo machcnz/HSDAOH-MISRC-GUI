@@ -2,7 +2,9 @@
 
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
-Initial support targets the **single AD9226/PCM1802 variant** (Sev5000 Pico2_12bitADC_PCMAudio): https://github.com/Sev5000/Pico2_12bitADC_PCMAudio
+
+- Initial support targets the **single AD9226/PCM1802 variant** 
+(Sev5000 Pico2_12bitADC_PCMAudio): https://github.com/Sev5000/Pico2_12bitADC_PCMAudio
 
 - [hsdaoh rp2350 version hardware:] (https://github.com/steve-m/hsdaoh-rp2350)
 
