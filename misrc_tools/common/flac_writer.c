@@ -174,8 +174,8 @@ static flac_writer_error_t configure_encoder(flac_writer_t *writer) {
         return FLAC_WRITER_ERR_CONFIG;
     }
 
-    // Multi-threading (FLAC API v14+)
-#if defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT >= 14
+    // Multi-threading (FLAC API v14+) - changed from previous version to allow explicit single-threaded mode with num_threads=1
+#if defined(HAVE_FLAC_THREADING) && HAVE_FLAC_THREADING
     if (writer->config.num_threads != 1) {  // 1 means explicitly single-threaded
         uint32_t threads = writer->config.num_threads;
         uint32_t status = FLAC__stream_encoder_set_num_threads(enc, threads);

@@ -1,8 +1,11 @@
 /*
- * MISRC GUI - Capture Integration
- *
+ * MISRC - hsdaoh-rp2350 GUI - Capture Integration
+ * NEW-n-improved with extra sparkles
  * Uses the same ringbuffer and extraction pattern as misrc_capture.c
  */
+
+#include <stdarg.h>
+#include <stdatomic.h>
 
 #include "gui_capture.h"
 #include "../core/gui_app.h"
@@ -25,12 +28,18 @@
 #include "../output/gui_audio.h"
 
 #include <hsdaoh.h>
+
+#ifndef HSDAOH_UPSTREAM
+// Frame-based mode only (MISRC)
 #include <hsdaoh_raw.h>
+#include "../../common/frame_parser.h"
+#endif
+
 #include "../../common/extract.h"
 #include "../../common/ringbuffer.h"
 #include "../../common/rb_event.h"
 #include "../../common/threading.h"
-#include "../../common/frame_parser.h"
+// #include "../../common/frame_parser.h"
 #include "../../common/device_enum.h"
 #include "../../common/buffer_manager.h"
 #include "../../common/misrc_debug.h"
@@ -55,9 +64,15 @@
 // Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
 
 // Capture handler context (includes frame parser state)
+#ifndef HSDAOH_UPSTREAM
 static capture_handler_ctx_t s_capture_handler;
+#else
+// Upstream mode audio enable/disable (used by gui_capture_set_audio_capture + upstream callback)
+static atomic_bool s_upstream_capture_audio = ATOMIC_VAR_INIT(true);
+#endif
 
-// Message callback for hsdaoh
+// Message callback for hsdaoh (frame mode only matey)
+#ifndef HSDAOH_UPSTREAM
 static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const char *format, ...) {
     gui_app_t *app = (gui_app_t *)ctx;
 
@@ -83,23 +98,31 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         fprintf(stderr, "[%s] %s", level_str, buffer);
     }
 }
+#endif
 
 // Debug counter
 static int s_callback_count = 0;
 
 void gui_capture_set_audio_capture(bool enabled)
 {
+#ifdef HSDAOH_UPSTREAM 
+    atomic_store(&s_upstream_capture_audio, enabled);
+
+#else   
+    // MISRC frame-based mode: audio capture is part of the capture handler 
     atomic_store(&s_capture_handler.capture_audio, enabled);
+
     if (enabled) {
         // Ensure clean audio sync ramp when enabling audio mid-capture.
         capture_handler_reset_audio_sync(&s_capture_handler);
     }
+#endif
 }
 
 /*-----------------------------------------------------------------------------
  * GUI-Specific Capture Handler Callbacks
  *-----------------------------------------------------------------------------*/
-
+#ifndef HSDAOH_UPSTREAM
 static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                                const metadata_t *meta, bool was_synced)
 {
@@ -136,6 +159,7 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
             break;
     }
 }
+
 
 /*-----------------------------------------------------------------------------
  * Main Capture Callback
@@ -255,6 +279,21 @@ void gui_capture_callback(void *data_info_ptr) {
         fprintf(stderr, "[CB] Wrote %zu bytes to ringbuffer\n", result.stream0_bytes);
     }
 }
+//#endif /* HSDAOH_UPSTREAM */
+#else /* HSDAOH_UPSTREAM */
+/*-----------------------------------------------------------------------------
+ * Upstream helpers (rp2350 / upstream path)
+ *-----------------------------------------------------------------------------*/
+    static inline void gui_upstream_mark_synced(gui_app_t *app)
+    {
+        bool was = atomic_exchange(&app->stream_synced, true);
+        if (!was && misrc_debug_enabled()) {
+            fprintf(stderr, "[CB] Upstream stream active\n");
+        }
+    }
+
+#endif /* HSDAOH_UPSTREAM */
+
 
 // Initialize application
 void gui_app_init(gui_app_t *app) {
@@ -367,16 +406,27 @@ void gui_app_init(gui_app_t *app) {
     // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
     // by buffer manager automatically on first use
 
-    // Initialize capture handler (includes frame parser state)
+// Initialize capture handler (includes frame parser state)
+#ifndef HSDAOH_UPSTREAM   // MISRC mode only
     capture_handler_init(&s_capture_handler);
-    s_capture_handler.rb_rf = NULL;    // RF uses buffer manager
-    s_capture_handler.rb_audio = NULL; // Audio uses buffer manager
+
+    // RF/audio ringbuffers are now managed by buffer manager, not here
+    s_capture_handler.rb_rf = NULL;
+    s_capture_handler.rb_audio = NULL;
+
+    // Enable RF capture
     s_capture_handler.capture_rf = true;
 
-    // Always enable audio capture for monitoring and meters (file outputs are optional)
+    // Always enable audio capture for monitoring/meters
     s_capture_handler.capture_audio = true;
+
+    // Sync event callback (MISRC frame parser)
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
+
+    // GUI context for callbacks
     s_capture_handler.user_ctx = app;
+#endif
+
 
     // Initialize centralized buffer manager
     if (bufmgr_init(&app->buffers) != 0) {
@@ -524,7 +574,92 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     }
 }
 
-// Start capture
+#ifdef HSDAOH_UPSTREAM // Upstream mode callback - writes raw data to ringbuffer (like reference implementation)
+static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
+{
+    if (!data_info || !data_info->ctx) return;
+
+    gui_app_t *app = (gui_app_t *)data_info->ctx;
+    if (!app || !data_info->buf || data_info->len == 0) return;
+
+    atomic_store(&app->last_callback_time_ms, get_time_ms());
+
+    // We are receiving valid upstream data -> consider link synced
+    //atomic_store(&app->stream_synced, true);    
+     
+    if (data_info->stream_id == 0) {
+        gui_upstream_mark_synced(app);
+        const uint16_t *samples = (const uint16_t *)data_info->buf;
+        size_t sample_count = data_info->len / sizeof(uint16_t);
+
+        size_t packed_bytes = sample_count * sizeof(uint32_t);
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, NULL);
+        if (!out) {
+            atomic_fetch_add(&app->rb_drop_count, 1);
+            return;
+        }
+
+        uint32_t *packed = (uint32_t *)out;
+        for (size_t i = 0; i < sample_count; i++) {
+            uint16_t a = samples[i] & 0x0FFF;
+            packed[i] = (uint32_t)a;
+        }
+
+        bufmgr_write_end(&app->buffers, BUF_CAPTURE_RF, packed_bytes);
+        bufmgr_signal_data(&app->buffers, BUF_CAPTURE_RF);
+
+        if (data_info->srate > 0) {
+            atomic_store(&app->sample_rate, data_info->srate);
+        }
+
+        atomic_fetch_add(&app->frame_count, 1);
+        return;
+    }
+
+    if (data_info->stream_id == 2) {
+        if (!atomic_load(&s_upstream_capture_audio)) return;
+
+        if (data_info->len < 6) return;
+        
+        size_t frames = data_info->len / 6;
+        if (frames == 0) return;
+        
+        if (frames > SIZE_MAX / 12) {
+            fprintf(stderr, "[AUDIO] Frame count overflow\n");
+            return;
+        }
+        
+        size_t padded_len = frames * 12;
+        
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, NULL);
+        if (!out) return;
+        
+        memset(out, 0, padded_len);
+        
+        const uint8_t *src = data_info->buf;
+        for (size_t i = 0; i < frames; i++) {
+            memcpy(out + i*12, src + i*6, 6);
+        }
+        
+        bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, padded_len);
+        bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
+        
+        if (data_info->srate > 0) {
+            static int rate_logged = 0;
+            if (!rate_logged) {
+                fprintf(stderr, "[AUDIO] Sample rate: %u Hz\n", data_info->srate);
+                rate_logged = 1;
+            }
+        }
+        
+        return;
+    }
+
+}
+#endif /* HSDAOH_UPSTREAM */
+
+
+// Start capture (+60ln from orig adding upstream callbk)
 int gui_app_start_capture(gui_app_t *app) {
     fprintf(stderr, "[GUI] gui_app_start_capture called\n");
 
@@ -602,7 +737,10 @@ int gui_app_start_capture(gui_app_t *app) {
     app->display_samples_available_b = 0;
 
     // Reset callback counter and capture handler state
-    s_callback_count = 0;
+        s_callback_count = 0;
+        
+#ifndef HSDAOH_UPSTREAM // MISRC
+
     capture_handler_init(&s_capture_handler);
     // Note: All buffers now use buffer manager directly
     s_capture_handler.rb_rf = NULL;
@@ -611,35 +749,57 @@ int gui_app_start_capture(gui_app_t *app) {
 
     // Audio is always-on during capture (for monitoring). Writing to files is controlled
     // by recording state in gui_audio_start().
-    atomic_store(&s_capture_handler.capture_audio, true);
+   // atomic_store(&s_capture_handler.capture_audio, true);
 
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;
+#endif
+ 
+// Open device
+    int r = -1;
 
-    // Open device
+#ifdef HSDAOH_UPSTREAM
+    fprintf(stderr, "[GUI] Opening device index %d (HSDAOH_UPSTREAM)...\n", dev->index);
+
+    r = hsdaoh_open(&app->hs_dev, dev->index);
+    if (r < 0 || !app->hs_dev) {
+        fprintf(stderr, "[GUI] RP-hsdaoh_open failed: %d\n", r);
+        gui_app_set_status(app, "Failed to open device");
+        app->hs_dev = NULL;
+        return -1;
+    }
+
+#else
     fprintf(stderr, "[GUI] Allocating device...\n");
-    int r = hsdaoh_alloc(&app->hs_dev);
+
+    r = hsdaoh_alloc(&app->hs_dev); // MISRC original path
     if (r < 0) {
         fprintf(stderr, "[GUI] hsdaoh_alloc failed: %d\n", r);
         gui_app_set_status(app, "Failed to allocate device");
         return -1;
     }
 
-    hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
-    hsdaoh_raw_callback(app->hs_dev, true);
-
-    fprintf(stderr, "[GUI] Opening device index %d...\n", dev->index);
     r = hsdaoh_open2(app->hs_dev, dev->index);
     if (r < 0) {
         fprintf(stderr, "[GUI] hsdaoh_open2 failed: %d\n", r);
         gui_app_set_status(app, "Failed to open device");
-        // Note: hsdaoh_open2 frees dev on failure, so DON'T call hsdaoh_close
+        hsdaoh_close(app->hs_dev);
         app->hs_dev = NULL;
         return -1;
     }
 
+    hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
+    hsdaoh_raw_callback(app->hs_dev, true);
+#endif
+
     fprintf(stderr, "[GUI] Starting stream...\n");
+
+#ifdef HSDAOH_UPSTREAM
+    r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
+#else
     r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
+#endif
+
     if (r < 0) {
         fprintf(stderr, "[GUI] hsdaoh_start_stream failed: %d\n", r);
         gui_app_set_status(app, "Failed to start stream");
@@ -648,7 +808,8 @@ int gui_app_start_capture(gui_app_t *app) {
         return -1;
     }
 
-    app->is_capturing = true;
+
+        app->is_capturing = true;
     app->capture_start_time = GetTime();
 
     // Capture-start timestamp (used for auto naming if enabled)

@@ -1,5 +1,5 @@
 /*
- * MISRC GUI - Recording Module
+ * MISRC - hsdaoh-rp2350 GUI - Recording Module
  *
  * Handles file recording with optional FLAC compression.
  * Uses writer threads to write extracted samples to files.
@@ -1015,9 +1015,17 @@ void gui_record_stop(gui_app_t *app) {
     // This stops new data from being written to record ringbuffers
     gui_extract_set_recording(false, false, 16, 16);
 
-    // Stop audio output/monitoring (file writing).
+    // Signal threads to stop FIRST so the audio restart cannot reopen WAVs in record mode - 070226 - MA
+    app->is_recording = false;
+
+    // Stop audio output/monitoring (file writing). --- 070226 - MA - Changed to resolve wav file corruption.
     // Then restart audio thread in monitor-only mode if we are still capturing,
     // so audio capture stays always-on without filling BUF_CAPTURE_AUDIO.
+    
+    //gui_audio_stop(app);
+    //if (app->is_capturing) {
+    //    (void)gui_audio_start(app, &app->buffers);
+    //}
     gui_audio_stop(app);
     if (app->is_capturing) {
         (void)gui_audio_start(app, &app->buffers);
@@ -1027,7 +1035,7 @@ void gui_record_stop(gui_app_t *app) {
     proc_set_priority(PROC_PRIORITY_NORMAL);
 
     // Signal threads to stop
-    app->is_recording = false;
+    //app->is_recording = false;
 
     // Wait for writer threads to drain and exit
     if (s_writer_threads_running) {

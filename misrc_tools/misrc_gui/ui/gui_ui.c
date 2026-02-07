@@ -1358,11 +1358,11 @@ static void render_status_bar(gui_app_t *app) {
                 }
             //}
 
-            // RF Buffer usage (as percentage)
+            // RF Buffer usage
             size_t rf_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].head);
             size_t rf_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].tail);
             size_t rf_size = app->buffers.buffers[BUF_CAPTURE_RF].buffer_size;
-            size_t rf_used = (rf_head >= rf_tail) ? (rf_head - rf_tail) : (rf_size - rf_tail + rf_head);
+            size_t rf_used = rf_tail - rf_head;  // Simple subtraction - no wrap handling
             int rf_pct = rf_size > 0 ? (int)((rf_used * 100) / rf_size) : 0;
             snprintf(temp_buf5, sizeof(temp_buf5), "%d%%", rf_pct);
             CLAY(CLAY_ID("RFBufStatus"), {
@@ -1383,11 +1383,11 @@ static void render_status_bar(gui_app_t *app) {
                 }
             }
 
-            // Audio Buffer usage (as percentage)
+            // Audio Buffer usage
             size_t aud_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].head);
             size_t aud_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].tail);
             size_t aud_size = app->buffers.buffers[BUF_CAPTURE_AUDIO].buffer_size;
-            size_t aud_used = (aud_head >= aud_tail) ? (aud_head - aud_tail) : (aud_size - aud_tail + aud_head);
+            size_t aud_used = aud_tail - aud_head;  // Simple subtraction - no wrap handling  
             int aud_pct = aud_size > 0 ? (int)((aud_used * 100) / aud_size) : 0;
             snprintf(temp_buf6, sizeof(temp_buf6), "%d%%", aud_pct);
             CLAY(CLAY_ID("AudBufStatus"), {
