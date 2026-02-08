@@ -32,7 +32,9 @@ static bool s_ui_consumed_click = false;
 
 // Simple in-place text editing state (settings panel)
 static bool s_edit_output_base_name = false;
+static bool s_edit_output_path = false; // 080226 - added to make editable
 static double s_base_name_backspace_repeat_at = 0.0;
+static double s_output_path_backspace_repeat_at = 0.0; // 080226 - added to make editable
 
 // Audio label in-place editing state (settings panel)
 static int s_edit_audio_label_idx = -1; // 0..3, or -1
@@ -75,6 +77,7 @@ static char stat_b_errors[16];
 // Playback file display buffers
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
+static char settings_output_path_display[256]; // 080226 - separate buffer for output path display
 
 // Audio meter channel labels (static buffers)
 static char audio_ch_label[4][8];
@@ -248,51 +251,60 @@ static void render_settings_panel(gui_app_t *app) {
             }
         }
 
-        // Output path display + choose button
-        CLAY(CLAY_ID("SettingsOutputPath"), {
+// Output path display + choose button
+CLAY(CLAY_ID("SettingsOutputPath"), {
+    .layout = {
+        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+        .layoutDirection = CLAY_TOP_TO_BOTTOM,
+        .childGap = 6
+    }
+}) {
+    CLAY_TEXT(CLAY_STRING("Output folder:"),
+        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+    CLAY(CLAY_ID("OutputPathRow"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+            .layoutDirection = CLAY_LEFT_TO_RIGHT,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 8
+        }
+    }) {
+        // Editable path box (click to edit)
+        CLAY(CLAY_ID("OutputPathBox"), {
             .layout = {
-                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                .childGap = 6
-            }
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                .padding = { 10, 10, 0, 0 }
+            },
+            .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            CLAY_TEXT(CLAY_STRING("Output folder:"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-
-            CLAY(CLAY_ID("OutputPathRow"), {
-                .layout = {
-                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
-                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
-                    .childGap = 8
-                }
-            }) {
-                CLAY(CLAY_ID("OutputPathBox"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
-                        .padding = { 10, 10, 0, 0 }
-                    },
-                    .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
-                    .cornerRadius = CLAY_CORNER_RADIUS(4)
-                }) {
-                    CLAY_TEXT(make_string(app->settings.output_path),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-
-                CLAY(CLAY_ID("ChooseOutputFolderButton"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(32) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(COLOR_BUTTON),
-                    .cornerRadius = CLAY_CORNER_RADIUS(4)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Choose folder..."),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
+            if (s_edit_output_path) {
+                snprintf(settings_output_path_display, sizeof(settings_output_path_display), "%s_", app->settings.output_path);
+                CLAY_TEXT(make_string(settings_output_path_display),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            } else {
+                CLAY_TEXT(make_string(app->settings.output_path),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             }
         }
+
+        // Choose output folder button (so the handler has a real element)
+        CLAY(CLAY_ID("ChooseOutputFolderButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(96), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY_TEXT(CLAY_STRING("Choose..."),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+    }
+}
+
 
         // Scrollable settings body
         CLAY(CLAY_ID("SettingsScroll"), {
@@ -1478,19 +1490,28 @@ void gui_handle_interactions(gui_app_t *app) {
     s_ui_consumed_click = false;
 
 
-    // Handle simple text input when editing capture name
-    if (app->settings_panel_open && s_edit_output_base_name) {
-        // If base name editing is active, don't allow audio label edit at same time.
-        s_edit_audio_label_idx = -1;
+// --- replace everything from:
+//     // Handle simple text input when editing output path
+// down to the end of gui_handle_interactions()
+// with the block below ---
 
-        // Append printable ASCII chars (avoid locale/undefined behavior with ctype on >255)
+    // Handle simple text input when editing output path
+    if (app->settings_panel_open && s_edit_output_path) {
+        // Cancel other edit modes
+        s_edit_output_base_name = false;
+        s_edit_audio_label_idx  = -1;
+
         int ch = GetCharPressed();
         while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
-                size_t len = strlen(app->settings.output_base_name);
-                if (len + 1 < sizeof(app->settings.output_base_name)) {
-                    app->settings.output_base_name[len] = (char)ch;
-                    app->settings.output_base_name[len + 1] = '\0';
+            // allow common path chars; block the usual illegal filename chars
+            if (ch >= 32 && ch < 127 &&
+                ch != ':' && ch != '*' && ch != '?' && ch != '"' &&
+                ch != '<' && ch != '>' && ch != '|')
+            {
+                size_t len = strlen(app->settings.output_path);
+                if (len + 1 < sizeof(app->settings.output_path)) {
+                    app->settings.output_path[len]     = (char)ch;
+                    app->settings.output_path[len + 1] = '\0';
                     gui_settings_save(&app->settings);
                 }
             }
@@ -1499,34 +1520,40 @@ void gui_handle_interactions(gui_app_t *app) {
 
         // Backspace with repeat
         if (IsKeyPressed(KEY_BACKSPACE)) {
-            s_base_name_backspace_repeat_at = GetTime() + 0.25; // initial delay
-            size_t len = strlen(app->settings.output_base_name);
+            s_output_path_backspace_repeat_at = GetTime() + 0.25;
+            size_t len = strlen(app->settings.output_path);
             if (len > 0) {
-                app->settings.output_base_name[len - 1] = '\0';
+                app->settings.output_path[len - 1] = '\0';
                 gui_settings_save(&app->settings);
             }
         } else if (IsKeyDown(KEY_BACKSPACE)) {
             double now = GetTime();
-            if (now >= s_base_name_backspace_repeat_at) {
-                s_base_name_backspace_repeat_at = now + 0.05;
-                size_t len = strlen(app->settings.output_base_name);
+            if (now >= s_output_path_backspace_repeat_at) {
+                s_output_path_backspace_repeat_at = now + 0.05;
+                size_t len = strlen(app->settings.output_path);
                 if (len > 0) {
-                    app->settings.output_base_name[len - 1] = '\0';
+                    app->settings.output_path[len - 1] = '\0';
                     gui_settings_save(&app->settings);
                 }
             }
         }
 
+        // Finish edit
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-            s_edit_output_base_name = false;
+            s_edit_output_path = false;
             gui_settings_save(&app->settings);
         }
     }
 
     // Handle text input when editing audio label
-    if (app->settings_panel_open && s_edit_audio_label_idx >= 0 && s_edit_audio_label_idx < 4 && app->settings.auto_names_enabled) {
-        // Cancel base name edit
+    if (app->settings_panel_open &&
+        s_edit_audio_label_idx >= 0 &&
+        s_edit_audio_label_idx < 4 &&
+        app->settings.auto_names_enabled)
+    {
+        // Cancel base name/path edit
         s_edit_output_base_name = false;
+        s_edit_output_path      = false;
 
         int idx = s_edit_audio_label_idx;
         char *dst = app->settings.audio_1ch_labels[idx];
@@ -1534,10 +1561,14 @@ void gui_handle_interactions(gui_app_t *app) {
 
         int ch = GetCharPressed();
         while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
+            if (ch >= 32 && ch < 127 &&
+                ch != '/' && ch != '\\' &&
+                ch != ':' && ch != '*' && ch != '?' && ch != '"' &&
+                ch != '<' && ch != '>' && ch != '|')
+            {
                 size_t len = strlen(dst);
                 if (len + 1 < cap) {
-                    dst[len] = (char)ch;
+                    dst[len]     = (char)ch;
                     dst[len + 1] = '\0';
                     gui_settings_save(&app->settings);
                 }
@@ -1573,232 +1604,286 @@ void gui_handle_interactions(gui_app_t *app) {
     // Handle popup interactions first (modal behavior)
     if (gui_popup_handle_interactions()) {
         s_ui_consumed_click = true;
-        return;  // Popup consumed the interaction
+        return;
     }
 
     // Handle clicks
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-        // Check connect button
-        if (Clay_PointerOver(CLAY_ID("ConnectButton"))) {
-            if (app->is_capturing) {
-                gui_app_stop_capture(app);
-            } else {
-                gui_app_start_capture(app);
-            }
-        }
+        // Helper: mark UI as having consumed this click so nothing "falls through"
+        #define UI_CONSUME_CLICK() do { s_ui_consumed_click = true; } while (0)
 
+        // Connect/Disconnect
+        if (Clay_PointerOver(CLAY_ID("ConnectButton"))) {
+            UI_CONSUME_CLICK();
+            if (app->is_capturing) gui_app_stop_capture(app);
+            else gui_app_start_capture(app);
+        }
 
         // Audio playback monitoring toggle
         if (Clay_PointerOver(CLAY_ID("AudioPlaybackToggle"))) {
+            UI_CONSUME_CLICK();
             gui_audio_set_playback_enabled(app, !app->settings.audio_monitor_playback);
         }
-        
+
         // Audio channel select toggle (CH1/2 vs CH3/4)
         if (Clay_PointerOver(CLAY_ID("AudioChannelToggle"))) {
+            UI_CONSUME_CLICK();
             app->settings.audio_monitor_ch34 = !app->settings.audio_monitor_ch34;
             gui_settings_save(&app->settings);
         }
 
-        // Check record button
-        if (Clay_PointerOver(CLAY_ID("RecordButton")) && app->is_capturing) {
-            if (app->is_recording) {
-                gui_app_stop_recording(app);
-            } else {
-                gui_app_start_recording(app);
+        // Record button
+        if (Clay_PointerOver(CLAY_ID("RecordButton"))) {
+            UI_CONSUME_CLICK();
+            if (app->is_capturing) {
+                if (app->is_recording) gui_app_stop_recording(app);
+                else gui_app_start_recording(app);
             }
         }
 
-        // Check settings button
+        // Settings gear button (ONLY toggles panel)
         if (Clay_PointerOver(CLAY_ID("SettingsButton"))) {
+            UI_CONSUME_CLICK();
             app->settings_panel_open = !app->settings_panel_open;
+
+            // Reset edit modes when opening/closing
             s_edit_output_base_name = false;
-            s_edit_audio_label_idx = -1;
+            s_edit_output_path      = false;
+            s_edit_audio_label_idx  = -1;
+
             gui_settings_save(&app->settings);
         }
 
         // Clip reset buttons (per-channel stats)
         if (Clay_PointerOver(CLAY_IDI("ResetClipBtn", 0))) {
+            UI_CONSUME_CLICK();
             atomic_store(&app->clip_count_a_pos, 0);
             atomic_store(&app->clip_count_a_neg, 0);
         }
         if (Clay_PointerOver(CLAY_IDI("ResetClipBtn", 1))) {
+            UI_CONSUME_CLICK();
             atomic_store(&app->clip_count_b_pos, 0);
             atomic_store(&app->clip_count_b_neg, 0);
         }
 
-        // Settings panel interactions
+        // Settings panel interactions (ONLY when open)
         if (app->settings_panel_open) {
-            if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
-                app->settings_panel_open = false;
-                gui_settings_save(&app->settings);
-                return;
+
+        // Close if click backdrop or X
+        if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
+            app->settings_panel_open = false;
+            s_edit_output_base_name = false;
+            s_edit_output_path      = false;
+            s_edit_audio_label_idx  = -1;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+            
+        }
+
+        // Output folder path edit (click box OR Choose button -> enter edit mode)
+        if (Clay_PointerOver(CLAY_ID("OutputPathBox")) || Clay_PointerOver(CLAY_ID("ChooseOutputFolderButton"))) {
+            s_edit_output_path = true;
+            s_edit_output_base_name = false;
+            s_edit_audio_label_idx = -1;
+            s_output_path_backspace_repeat_at = 0.0;
+
+            // Optional status hint (remove if you do not want it)
+            gui_app_set_status(app, "Edit output folder path and press Enter");
+            UI_CONSUME_CLICK();
+        }
+
+        // Capture base name edit (ONLY when auto names enabled)
+        if (Clay_PointerOver(CLAY_ID("OutputBaseNameField")) && app->settings.auto_names_enabled) {
+            s_edit_output_base_name = true;
+            s_edit_output_path = false;
+            s_edit_audio_label_idx = -1;
+            s_base_name_backspace_repeat_at = 0.0;
+            UI_CONSUME_CLICK();
+        }
+
+        // Capture toggles
+        if (Clay_PointerOver(CLAY_ID("ToggleCaptureA"))) {
+            app->settings.capture_a = !app->settings.capture_a;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
+            app->settings.capture_b = !app->settings.capture_b;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // FLAC + verify + overwrite
+        if (Clay_PointerOver(CLAY_ID("ToggleUseFlac"))) {
+            app->settings.use_flac = !app->settings.use_flac;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleFlacVerify"))) {
+            app->settings.flac_verification = !app->settings.flac_verification;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleOverwrite"))) {
+            app->settings.overwrite_files = !app->settings.overwrite_files;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // FLAC level stepper
+        if (Clay_PointerOver(CLAY_ID("FlacLevelMinus"))) {
+            if (app->settings.flac_level > 0) app->settings.flac_level--;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("FlacLevelPlus"))) {
+            if (app->settings.flac_level < 8) app->settings.flac_level++;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // FLAC threads stepper
+        if (Clay_PointerOver(CLAY_ID("FlacThreadsMinus"))) {
+            if (app->settings.flac_threads > 0) app->settings.flac_threads--;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("FlacThreadsPlus"))) {
+            if (app->settings.flac_threads < 64) app->settings.flac_threads++;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // Auto naming toggle
+        if (Clay_PointerOver(CLAY_ID("ToggleAutoNames"))) {
+            app->settings.auto_names_enabled = !app->settings.auto_names_enabled;
+
+            if (!app->settings.output_base_name[0]) {
+                snprintf(app->settings.output_base_name, sizeof(app->settings.output_base_name), "%s", "capture");
             }
 
-            if (Clay_PointerOver(CLAY_ID("ToggleCaptureA"))) {
-                app->settings.capture_a = !app->settings.capture_a;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
-                app->settings.capture_b = !app->settings.capture_b;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleUseFlac"))) {
-                app->settings.use_flac = !app->settings.use_flac;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleOverwrite"))) {
-                app->settings.overwrite_files = !app->settings.overwrite_files;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleFlacVerify"))) {
-                app->settings.flac_verification = !app->settings.flac_verification;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("FlacLevelMinus"))) {
-                if (app->settings.flac_level > 0) app->settings.flac_level--;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("FlacLevelPlus"))) {
-                if (app->settings.flac_level < 8) app->settings.flac_level++;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("FlacThreadsMinus"))) {
-                if (app->settings.flac_threads > 0) app->settings.flac_threads--;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("FlacThreadsPlus"))) {
-                if (app->settings.flac_threads < 64) app->settings.flac_threads++;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
-                app->settings.enable_resample_a = !app->settings.enable_resample_a;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ResampleRateABox"))) {
-                app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
-                app->settings.enable_resample_b = !app->settings.enable_resample_b;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ResampleRateBBox"))) {
-                app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
-                gui_settings_save(&app->settings);
-            }
-
-            // Auto naming controls
-            if (Clay_PointerOver(CLAY_ID("ToggleAutoNames"))) {
-                app->settings.auto_names_enabled = !app->settings.auto_names_enabled;
-                if (!app->settings.output_base_name[0]) {
-                    snprintf(app->settings.output_base_name, sizeof(app->settings.output_base_name), "%s", "capture");
-                }
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
-                s_edit_output_base_name = true;
+            // If turning OFF, cancel any active name/tag edits
+            if (!app->settings.auto_names_enabled) {
+                s_edit_output_base_name = false;
                 s_edit_audio_label_idx = -1;
-                s_base_name_backspace_repeat_at = 0.0;
-            }
-            if (Clay_PointerOver(CLAY_ID("AppendTimestampToggle")) && app->settings.auto_names_enabled) {
-                app->settings.append_timestamp_on_capture_start = !app->settings.append_timestamp_on_capture_start;
-                gui_settings_save(&app->settings);
             }
 
-            // RF bit depth selection (cycle)
-            // If user switches to RAW and a channel was set to 12-bit, treat it as 16-bit.
-            if (!app->settings.use_flac) {
-                if (app->settings.rf_bits_a == 12) app->settings.rf_bits_a = 16;
-                if (app->settings.rf_bits_b == 12) app->settings.rf_bits_b = 16;
-            }
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
 
-            if (Clay_PointerOver(CLAY_ID("RfBitsABox"))) {
-                uint8_t b = app->settings.rf_bits_a;
-                if (app->settings.use_flac) {
-                    // 8 -> 12 -> 16 -> 8
-                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
-                } else {
-                    // RAW: 8 <-> 16
-                    b = (b == 8) ? 16 : 8;
-                }
-                app->settings.rf_bits_a = b;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("RfBitsBBox"))) {
-                uint8_t b = app->settings.rf_bits_b;
-                if (app->settings.use_flac) {
-                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
-                } else {
-                    b = (b == 8) ? 16 : 8;
-                }
-                app->settings.rf_bits_b = b;
-                gui_settings_save(&app->settings);
-            }
+        // Append timestamp toggle (ONLY when auto names enabled)
+        if (Clay_PointerOver(CLAY_ID("AppendTimestampToggle")) && app->settings.auto_names_enabled) {
+            app->settings.append_timestamp_on_capture_start = !app->settings.append_timestamp_on_capture_start;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
 
-            if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch12"))) {
-                app->settings.enable_audio_2ch_12 = !app->settings.enable_audio_2ch_12;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleAudio4ch"))) {
-                app->settings.enable_audio_4ch = !app->settings.enable_audio_4ch;
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch34"))) {
-                app->settings.enable_audio_2ch_34 = !app->settings.enable_audio_2ch_34;
-                gui_settings_save(&app->settings);
-            }
+        // Resample toggles
+        if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
+            app->settings.enable_resample_a = !app->settings.enable_resample_a;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
+            app->settings.enable_resample_b = !app->settings.enable_resample_b;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
 
-            for (int i = 0; i < 4; i++) {
-                if (Clay_PointerOver(CLAY_IDI("ToggleAudio1ch", i))) {
-                    app->settings.enable_audio_1ch[i] = !app->settings.enable_audio_1ch[i];
-                    gui_settings_save(&app->settings);
-                }
-                if (Clay_PointerOver(CLAY_IDI("Audio1chLabelField", i)) && app->settings.auto_names_enabled) {
-                    s_edit_audio_label_idx = i;
-                    s_edit_output_base_name = false;
-                    s_audio_label_backspace_repeat_at = 0.0;
-                }
-            }
+        // Resample rate cycle (ONLY when enabled)
+        if (Clay_PointerOver(CLAY_ID("ResampleRateABox")) && app->settings.enable_resample_a) {
+            app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ResampleRateBBox")) && app->settings.enable_resample_b) {
+            app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
 
-            if (Clay_PointerOver(CLAY_ID("ChooseOutputFolderButton"))) {
-                // Best-effort folder picker (macOS via osascript). If unavailable, no-op.
-                if (gui_settings_choose_output_folder(&app->settings)) {
-                    gui_settings_save(&app->settings);
-                }
+        // RF bit depth selection (cycle)
+        if (!app->settings.use_flac) {
+            if (app->settings.rf_bits_a == 12) app->settings.rf_bits_a = 16;
+            if (app->settings.rf_bits_b == 12) app->settings.rf_bits_b = 16;
+        }
+
+        if (Clay_PointerOver(CLAY_ID("RfBitsABox"))) {
+            uint8_t b = app->settings.rf_bits_a;
+            if (app->settings.use_flac) b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+            else                       b = (b == 8) ? 16 : 8;
+            app->settings.rf_bits_a = b;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("RfBitsBBox"))) {
+            uint8_t b = app->settings.rf_bits_b;
+            if (app->settings.use_flac) b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+            else                       b = (b == 8) ? 16 : 8;
+            app->settings.rf_bits_b = b;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // Audio output toggles
+        if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch12"))) {
+            app->settings.enable_audio_2ch_12 = !app->settings.enable_audio_2ch_12;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleAudio2ch34"))) {
+            app->settings.enable_audio_2ch_34 = !app->settings.enable_audio_2ch_34;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("ToggleAudio4ch"))) {
+            app->settings.enable_audio_4ch = !app->settings.enable_audio_4ch;
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+
+        // Audio 1ch toggles + label edit (label edit ONLY when auto names enabled)
+        for (int i = 0; i < 4; i++) {
+            if (Clay_PointerOver(CLAY_IDI("ToggleAudio1ch", i))) {
+                app->settings.enable_audio_1ch[i] = !app->settings.enable_audio_1ch[i];
+                gui_settings_save(&app->settings);
+                UI_CONSUME_CLICK();
             }
+            if (Clay_PointerOver(CLAY_IDI("Audio1chLabelField", i)) && app->settings.auto_names_enabled) {
+                s_edit_audio_label_idx = i;
+                s_edit_output_base_name = false;
+                s_edit_output_path = false;
+                s_audio_label_backspace_repeat_at = 0.0;
+                UI_CONSUME_CLICK();
+            }
+        }
 
         // Playback file selection buttons
-            if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseA"))) {
-                if (gui_settings_choose_playback_file(&app->settings, 0)) {
-                    gui_settings_save(&app->settings);
-                } else {
-                    gui_app_set_status(app, "No file selected (or file picker unavailable)");
-                }
-            }
-            if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseB"))) {
-                if (gui_settings_choose_playback_file(&app->settings, 1)) {
-                    gui_settings_save(&app->settings);
-                } else {
-                    gui_app_set_status(app, "No file selected (or file picker unavailable)");
-                }
-            }
-            if (Clay_PointerOver(CLAY_ID("PlaybackFileClearA"))) {
-                app->settings.playback_file_a[0] = '\0';
-                gui_settings_save(&app->settings);
-            }
-            if (Clay_PointerOver(CLAY_ID("PlaybackFileClearB"))) {
-                app->settings.playback_file_b[0] = '\0';
-                gui_settings_save(&app->settings);
-            }
+        if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseA"))) {
+            if (gui_settings_choose_playback_file(&app->settings, 0)) gui_settings_save(&app->settings);
+            else gui_app_set_status(app, "No file selected (or file picker unavailable)");
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("PlaybackFileBrowseB"))) {
+            if (gui_settings_choose_playback_file(&app->settings, 1)) gui_settings_save(&app->settings);
+            else gui_app_set_status(app, "No file selected (or file picker unavailable)");
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("PlaybackFileClearA"))) {
+            app->settings.playback_file_a[0] = '\0';
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
+        }
+        if (Clay_PointerOver(CLAY_ID("PlaybackFileClearB"))) {
+            app->settings.playback_file_b[0] = '\0';
+            gui_settings_save(&app->settings);
+            UI_CONSUME_CLICK();
         }
 
-        // Note: CVBS enable/disable is now handled automatically when selecting
-        // CVBS view via ensure_cvbs_enabled_for_channel() in gui_dropdown.c
 
-        // Handle all dropdown interactions via centralized handler
-        if (!s_ui_consumed_click && gui_dropdown_handle_click(app)) {
-            s_ui_consumed_click = true;
-        }
-    }
-}
+       } // end if (app->settings_panel_open)
 
+        #undef UI_CONSUME_CLICK
+    } // end if (IsMouseButtonPressed)
+} // end gui_handle_interactions
