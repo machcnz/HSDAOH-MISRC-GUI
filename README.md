@@ -12,6 +12,20 @@ This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS c
 ### Prerequisites
 Steve-M's libhsdaoh must be installed or built locally. (This is due to MISRC HDMI stream, which changes how frames are parsed and validated. )
 
+### Porting notes:
+1. Implements Steve Markgraf's hsdaoh API in upstream mode via a compile-time switch
+- hsdaoh_start_stream(dev, cb, ctx, buf_num) (4 args)
+- callback gets hsdaoh_data_info_t with stream_id, len, buf, srate, et
+- hsdaoh firmware/upstream library is aware of CRC and tracks any errors - (metadata struct) generating CRC16 per line, pipelines CRC accumulation, stores saves_crc, & writes into the HDMI line buffer at next_line[RBUF_SLICE_LEN - 2]
+- Essentially - Open the device, start a stream, receives callbacks per stream (with stream_id and buffer length), treating the callback byffer as payload for that stream (RF, PCM1802 audio..)
+
+2. Misrc notes:
+- Raw fram callback
+- Callbacks represent frame buffers
+- host code extract metadata and payload out of these frames
+
+
+
 **1) Build and install upstream hsdaoh (steve-m)**
 Example: build from source in your desired path
 https://github.com/steve-m/hsdaoh
