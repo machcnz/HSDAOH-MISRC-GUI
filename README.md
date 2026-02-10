@@ -10,7 +10,7 @@ This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS c
 
 ## Building hsdaoh-rp2350 MISRC GUI
 ### Prerequisites
-Steve-M's libhsdaoh must be installed or built locally. (This is due to MISRC HDMI stream, which changes how frames are parsed and validated. )
+Steve-M's libhsdaoh must be installed or built locally - refer below for detail.
 
 ### Porting notes:
 1. Implements Steve Markgraf's hsdaoh API in upstream mode via a compile-time switch
@@ -20,7 +20,7 @@ Steve-M's libhsdaoh must be installed or built locally. (This is due to MISRC HD
 - Essentially - Open the device, start a stream, receives callbacks per stream (with stream_id and buffer length), treating the callback byffer as payload for that stream (RF, PCM1802 audio..)
 
 2. Misrc notes:
-- Raw fram callback
+- Raw frame callback implementation
 - Callbacks represent frame buffers
 - host code extract metadata and payload out of these frames
 
