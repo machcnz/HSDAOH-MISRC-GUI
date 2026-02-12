@@ -26,7 +26,6 @@
 #include "../signal/gui_cvbs.h"
 #include "../processing/gui_display_thread.h"
 #include "../output/gui_audio.h"
-
 #include <hsdaoh.h>
 
 #ifndef HSDAOH_UPSTREAM
@@ -62,7 +61,6 @@
 #define BUFFER_AUDIO_TOTAL_SIZE (65536 * 256)
 
 // Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
-
 // Capture handler context (includes frame parser state)
 #ifndef HSDAOH_UPSTREAM
 static capture_handler_ctx_t s_capture_handler;
@@ -71,24 +69,82 @@ static capture_handler_ctx_t s_capture_handler;
 static atomic_bool s_upstream_capture_audio = ATOMIC_VAR_INIT(true);
 #endif
 
-// Message callback for hsdaoh (frame mode only matey)
-#ifndef HSDAOH_UPSTREAM
+// Message callback for hsdaoh
+// Enable with hsdaoh change to support callbacks
+static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level, const char *msg)
+{
+    // try-lock: never block the hsdaoh thread
+    if (atomic_flag_test_and_set(&app->hs_msg_lock)) {
+        return; // drop if UI is copying at the same time
+    }
+
+    strncpy(app->hs_msg_buf, msg, sizeof(app->hs_msg_buf) - 1);
+    app->hs_msg_buf[sizeof(app->hs_msg_buf) - 1] = '\0';
+    atomic_store(&app->hs_msg_level, (int)level);
+    atomic_store(&app->hs_msg_pending, true);
+
+    atomic_flag_clear(&app->hs_msg_lock);
+}
+
+
+// #ifndef HSDAOH_UPSTREAM
 static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const char *format, ...) {
     gui_app_t *app = (gui_app_t *)ctx;
+    if (!app) return;
 
     char buffer[512];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
+    bool counted = false;
+    
+#ifdef HSDAOH_UPSTREAM
+    /*
+     * Upstream mode: do NOT push GUI updates from this callback.
+     * Just translate hsdaoh stderr-style messages into app state/counters.    
+    */
+    if (strstr(buffer, "Lost sync to HDMI input stream")) {
+        atomic_store(&app->stream_synced, false);
+    } else if (strstr(buffer, "Synchronized to HDMI input stream")) {
+        atomic_store(&app->stream_synced, true);
+    } else if (strstr(buffer, "Missed at least one frame")) {
+        /* only count missed frames once we were already synced */
+        if (atomic_load(&app->stream_synced))
+            atomic_fetch_add(&app->missed_frame_count, 1);
+    } else if (strstr(buffer, "frame errors")) {
+        int n = 0;
+        if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
+            atomic_fetch_add(&app->error_count, (unsigned int)n);
+        else
+            atomic_fetch_add(&app->error_count, 1);
+        counted = true;
+    } else if (strstr(buffer, "Buffer dropped due to overrun")) {
+        atomic_fetch_add(&app->rb_drop_count, 1);
+        counted = true;
+    }
+    // 2) Cache the last message for the UI thread to apply (no GUI mutation here)
+    gui_hsdaoh_cache_message(app, level, buffer);
+   
+    // Print to console only when debug enabled, except always show ERROR/CRITICAL
+    const char *level_str = "INFO";
+    if (level == HSDAOH_WARNING) level_str = "WARN";
+    else if (level == HSDAOH_ERROR) level_str = "ERROR";
+    else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
 
-    // Update status message
+    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()){
+        fprintf(stderr, "[%s] %s", level_str, buffer);
+    }
+#else
+    /*
+     * Frame mode (Stefan/MISRC): keep original behaviour.
+     * Status is only pushed to GUI for ERROR/CRITICAL.
+     */
     if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL) {
         gui_app_set_status(app, buffer);
         atomic_fetch_add(&app->error_count, 1);
     }
 
-    // Print to console only when debug enabled, except always show ERROR/CRITICAL
     const char *level_str = "INFO";
     if (level == HSDAOH_WARNING) level_str = "WARN";
     else if (level == HSDAOH_ERROR) level_str = "ERROR";
@@ -97,8 +153,8 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
     if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
         fprintf(stderr, "[%s] %s", level_str, buffer);
     }
-}
 #endif
+}
 
 // Debug counter
 static int s_callback_count = 0;
@@ -344,6 +400,12 @@ void gui_app_init(gui_app_t *app) {
     for (int i = 0; i < 4; i++) {
         atomic_store(&app->audio_peak[i], 0);
     }
+    // Support hsdaoh-rp2350 error/stats handling
+    atomic_store(&app->hs_msg_pending, false);
+    atomic_store(&app->hs_msg_level, (int)HSDAOH_INFO);
+    atomic_flag_clear(&app->hs_msg_lock);
+    app->hs_msg_buf[0] = '\0';
+    app->hs_ui_last_poll_ms = 0;
 
     // Initialize sample rate to default (will be updated when device connects)
     atomic_store(&app->sample_rate, DEFAULT_SAMPLE_RATE);
@@ -495,7 +557,7 @@ void gui_app_cleanup(gui_app_t *app) {
 // Enumerate available capture devices
 void gui_app_enumerate_devices(gui_app_t *app) {
     app->device_count = 0;
-
+    fprintf(stderr, "[GUI] enumerate_devices: count=%d\n", app->device_count); //debugging
     // Use shared device enumeration (hsdaoh + simple_capture + optionally FX3)
     misrc_device_list_t devices;
     misrc_device_list_init(&devices);
@@ -588,7 +650,7 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
     //atomic_store(&app->stream_synced, true);    
      
     if (data_info->stream_id == 0) {
-        gui_upstream_mark_synced(app);
+        gui_upstream_mark_synced(app); //UPDATE 2 - hsdaoh - status from metadata only - Update 3 put it back ---delete ****
         const uint16_t *samples = (const uint16_t *)data_info->buf;
         size_t sample_count = data_info->len / sizeof(uint16_t);
 
@@ -768,7 +830,7 @@ int gui_app_start_capture(gui_app_t *app) {
         app->hs_dev = NULL;
         return -1;
     }
-
+    hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
 #else
     fprintf(stderr, "[GUI] Allocating device...\n");
 
@@ -810,7 +872,7 @@ int gui_app_start_capture(gui_app_t *app) {
 
 
         app->is_capturing = true;
-    app->capture_start_time = GetTime();
+        app->capture_start_time = GetTime();
 
     // Capture-start timestamp (used for auto naming if enabled)
     {
@@ -1037,11 +1099,45 @@ void gui_app_clear_display(gui_app_t *app) {
     atomic_store(&app->stream_synced, false);
 }
 
-// Set status message
-void gui_app_set_status(gui_app_t *app, const char *message) {
-    strncpy(app->status_message, message, sizeof(app->status_message) - 1);
-    app->status_message[sizeof(app->status_message) - 1] = '\0';
-    app->status_message_time = GetTime();
+/* Prevent GUI lock with hsdaoh error handling added */
+    void gui_app_set_status(gui_app_t *app, const char *message)
+    {
+        strncpy(app->status_message, message,
+                sizeof(app->status_message) - 1);
+        app->status_message[sizeof(app->status_message) - 1] = '\0';
+        app->status_message_time = GetTime();
+    }
+void gui_capture_poll_hsdaoh_status(gui_app_t *app)
+{
+    if (!app) return;
+
+    uint64_t now = get_time_ms();
+
+    // Poll rate: 2 seconds (non-realtime, as requested)
+    if (app->hs_ui_last_poll_ms != 0 && (now - app->hs_ui_last_poll_ms) < 2000) {
+        return;
+    }
+    app->hs_ui_last_poll_ms = now;
+
+    if (!atomic_load(&app->hs_msg_pending)) {
+        return;
+    }
+
+    char local[512];
+
+    // Copy cached message (try-lock; if locked, skip this poll tick)
+    if (atomic_flag_test_and_set(&app->hs_msg_lock)) {
+        return;
+    }
+    strncpy(local, app->hs_msg_buf, sizeof(local) - 1);
+    local[sizeof(local) - 1] = '\0';
+    atomic_store(&app->hs_msg_pending, false);
+    atomic_flag_clear(&app->hs_msg_lock);
+
+    // UI thread updates GUI-visible text
+    if (local[0] != '\0') {
+        gui_app_set_status(app, local);
+    }
 }
 
 // Check if device has timed out (no callbacks for too long)

@@ -20,4 +20,8 @@ void gui_capture_set_audio_capture(bool enabled);
 // Returns true if device appears disconnected
 bool gui_capture_device_timeout(gui_app_t *app, uint32_t timeout_ms);
 
+// UI thread: apply cached hsdaoh-rp2350 status/errors at a low rate (e.g. every 2s)
+// Major HW issues will be obvious
+void gui_capture_poll_hsdaoh_status(gui_app_t *app);
+
 #endif // GUI_CAPTURE_H

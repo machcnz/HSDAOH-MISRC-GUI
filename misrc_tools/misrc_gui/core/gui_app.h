@@ -328,6 +328,16 @@ typedef struct gui_app {
     char status_message[256];
     double status_message_time;
 
+    // hsdaoh status message cache (written from hsdaoh thread, applied by UI thread)
+    // Support hsdaoh-rp2350 error handling & stats
+    atomic_bool hs_msg_pending;
+    atomic_int hs_msg_level;
+    atomic_flag hs_msg_lock;
+    char hs_msg_buf[512];
+
+    // UI-side poll timing (UI thread only)
+    uint64_t hs_ui_last_poll_ms;
+
     // Auto-reconnect state
     bool auto_reconnect_enabled;
     bool reconnect_pending;
