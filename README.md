@@ -3,6 +3,8 @@
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
 
+- 16/02/25  - Fix Windows settings saving and minor path issues. Release portable exe - refer Releases
+  
 - 13/02/26  - Support hsdaoh/rp2350 status/warning/error messages in GUI
             - enables GUI-side error counting / status display (in addition to stderr logging)
             - ** Requires my hsdoah fork which adds a message callback path to enable 
