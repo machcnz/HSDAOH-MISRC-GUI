@@ -1,6 +1,6 @@
 /*
  * MISRC GUI - Settings Persistence
- *
+ * 16/02/25 - Remediate Win settings not saving - %appdata%
  * Handles loading/saving settings to JSON file and provides defaults
  */
 
@@ -189,12 +189,21 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
 }
 
 // Simple JSON-like format for settings
+// 16.02.25 - Remediate Win save
 void gui_settings_save(const gui_settings_t *settings) {
     if (!settings) return;
     
     const char* path = get_settings_file_path();
-    FILE* f = fopen(path, "w");
-    if (!f) return;
+    
+    // CREATE DIRECTORY IF IT DOESN'T EXIST (Windows)
+#if defined(_WIN32) || defined(_WIN64)
+    const char* appdata = getenv("APPDATA");
+    if (appdata) {
+        char dir_path[512];
+        snprintf(dir_path, sizeof(dir_path), "%s\\MISRC", appdata);
+        mkdir(dir_path);   // MinGW (1 arg), ignore error if exists
+    }
+#endif
     
     fprintf(f, "{\n");
     fprintf(f, "  \"device_index\": %d,\n", settings->device_index);
