@@ -1,5 +1,5 @@
 /*
- * MISRC GUI - Sample Extraction and Display Processing
+ * MISRC hsdaoh-rp2350 GUI - Sample Extraction and Display Processing
  *
  * Continuous extraction thread that runs from capture start to capture stop.
  * - Always reads from capture ringbuffer
@@ -36,6 +36,8 @@ static int16_t *s_buf_b = NULL;
 static uint8_t *s_buf_aux = NULL;
 static conv_function_t s_extract_fn = NULL;
 static bool s_initialized = false;
+
+static bool s_b_present = true; // Assume B channel present by default; adjust based on mode (frame vs upstream) in gui_extract_init
 
 // Scratch buffers for recording conversions
 static int8_t *s_tmp8_a = NULL;
@@ -101,6 +103,10 @@ static int extraction_thread(void *ctx) {
 
         // Extract samples (always - this is the core work)
         s_extract_fn((uint32_t*)buf, BUFFER_READ_SIZE, clip, s_buf_aux, s_buf_a, s_buf_b, peak);
+        if (!s_b_present) {
+            // Prevent stale/uninitialized data from driving CH-B meters/display
+            memset(s_buf_b, 0, BUFFER_READ_SIZE * sizeof(int16_t));
+            }
 
         // Mark capture buffer as consumed via buffer manager
         bufmgr_read_end(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size);
@@ -113,24 +119,36 @@ static int extraction_thread(void *ctx) {
         {
             size_t display_frame_size = BUFFER_READ_SIZE * sizeof(int16_t) * 2;
             uint8_t *display_buf = bufmgr_write_begin(&s_extract_app->buffers, BUF_DISPLAY,
-                                                       display_frame_size, NULL);
+                                                    display_frame_size, NULL);
             if (display_buf) {
-                // Copy both channels into display buffer
-                memcpy(display_buf, s_buf_a, BUFFER_READ_SIZE * sizeof(int16_t));
-                memcpy(display_buf + BUFFER_READ_SIZE * sizeof(int16_t),
-                       s_buf_b, BUFFER_READ_SIZE * sizeof(int16_t));
+                    memcpy(display_buf, s_buf_a, BUFFER_READ_SIZE * sizeof(int16_t));
+
+                if (s_b_present) {
+                    memcpy(display_buf + BUFFER_READ_SIZE * sizeof(int16_t),
+                    s_buf_b, BUFFER_READ_SIZE * sizeof(int16_t));
+                } else {
+                    memset(display_buf + BUFFER_READ_SIZE * sizeof(int16_t),
+                    0,
+                    BUFFER_READ_SIZE * sizeof(int16_t));
+                }
+
                 bufmgr_write_end(&s_extract_app->buffers, BUF_DISPLAY, display_frame_size);
             }
             // If display buffer full, frame is silently dropped (lossy buffer policy)
         }
 
+
         // Stats are cheap - always update them
-        gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
+        //gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
+        gui_extract_update_stats(s_extract_app, s_buf_a, s_b_present ? s_buf_b : NULL, BUFFER_READ_SIZE);
+
 
         // Sample counters always updated (cheap atomic ops)
         atomic_fetch_add(&s_extract_app->total_samples, BUFFER_READ_SIZE);
         atomic_fetch_add(&s_extract_app->samples_a, BUFFER_READ_SIZE);
+        if (s_b_present) {
         atomic_fetch_add(&s_extract_app->samples_b, BUFFER_READ_SIZE);
+        }
 
         // Periodic buffer stats logging
         frame_count++;
@@ -148,28 +166,34 @@ static int extraction_thread(void *ctx) {
             size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
 
             int16_t *write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                             BUF_RECORD_A, sample_bytes, NULL);
-            int16_t *write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                             BUF_RECORD_B, sample_bytes, NULL);
+                                                            BUF_RECORD_A, sample_bytes, NULL);
+            bool want_b = s_b_present && s_extract_app->settings.capture_b;  // <- radio button should drive this
+            int16_t *write_b = NULL;
 
-            if (!write_a || !write_b) {
-                // Buffer full after waiting - handle gracefully
-                if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
-                if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
-                if (atomic_load(&do_exit)) goto exit_thread;
-                continue;
-            }
+        if (want_b) {
+            write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                    BUF_RECORD_B, sample_bytes, NULL);
+        }
 
-            memcpy(write_a, s_buf_a, sample_bytes);
+        if (!write_a || (want_b && !write_b)) {
+            if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
+            if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
+            if (atomic_load(&do_exit)) goto exit_thread;
+            continue;
+        }
+
+        memcpy(write_a, s_buf_a, sample_bytes);
+        bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+
+        if (want_b) {
             memcpy(write_b, s_buf_b, sample_bytes);
-
-            bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
             bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
         }
     }
+}
 
 exit_thread:
-    fprintf(stderr, "[EXTRACT] Continuous extraction thread exiting\n");
+    fprintf(stderr, "[EXTRACT] Continuous extraction thread exiting\n"); 
     return 0;
 }
 
@@ -190,8 +214,29 @@ void gui_extract_init(void) {
     s_conv_16to8 = get_16to8_function();
     s_conv_16to8to32 = get_16to8to32_function();
 
-    // Get extraction function (AB mode)
+//    // Get extraction function (AB mode)
+//#ifdef HSDAOH_UPSTREAM
+//    // Upstream mode: A-only extraction (B channel is not present, so pass NULL to get_conv_function)
+//    s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, NULL);
+//    fprintf(stderr, "[EXTRACT] Using A-only extraction for upstream mode\n");
+//#else
+//    // Frame mode: AB dual channel extraction 
+//    s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, (void*)1);
+// #endif
+
+// Get extraction function
+#ifdef HSDAOH_UPSTREAM
+    // Upstream mode: currently A-only extraction
+    s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, NULL);
+    s_b_present = false;
+    fprintf(stderr, "[EXTRACT] Using A-only extraction for upstream mode\n");
+#else
+    // Frame mode: AB dual channel extraction
     s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, (void*)1);
+    s_b_present = true;
+#endif
+
+
 
     // Initialize synchronization events
     if (!s_events_initialized) {
@@ -378,38 +423,56 @@ void gui_extract_update_stats(gui_app_t *app, const int16_t *buf_a,
     size_t clip_b_pos = 0, clip_b_neg = 0;
     uint16_t peak_a_pos = 0, peak_a_neg = 0;
     uint16_t peak_b_pos = 0, peak_b_neg = 0;
-
+     bool have_b = (buf_b != NULL); // buf_b may be NULL in upstream mode, so check before processing B channel stats                            
     // Peak detection uses first 1000 samples
     size_t peak_samples = (num_samples < 1000) ? num_samples : 1000;
 
-    for (size_t i = 0; i < num_samples; i++) {
+     for (size_t i = 0; i < num_samples; i++) {
         int16_t sa = buf_a[i];
-        int16_t sb = buf_b[i];
 
         // Clipping detection (12-bit ADC: +2047 is positive clip, -2048 is negative clip)
         if (sa >= 2047) clip_a_pos++;
         else if (sa <= -2048) clip_a_neg++;
-        if (sb >= 2047) clip_b_pos++;
-        else if (sb <= -2048) clip_b_neg++;
 
-        // Peak detection (first N samples only)
+        // Peak detection (first N samples only) - A
         if (i < peak_samples) {
             if (sa > 0 && (uint16_t)sa > peak_a_pos) peak_a_pos = (uint16_t)sa;
-            if (sb > 0 && (uint16_t)sb > peak_b_pos) peak_b_pos = (uint16_t)sb;
             if (sa < 0 && (uint16_t)(-sa) > peak_a_neg) peak_a_neg = (uint16_t)(-sa);
-            if (sb < 0 && (uint16_t)(-sb) > peak_b_neg) peak_b_neg = (uint16_t)(-sb);
+        }
+
+        // B only if present
+        if (have_b) {
+            int16_t sb = buf_b[i];
+
+            if (sb >= 2047) clip_b_pos++;
+            else if (sb <= -2048) clip_b_neg++;
+
+            if (i < peak_samples) {
+                if (sb > 0 && (uint16_t)sb > peak_b_pos) peak_b_pos = (uint16_t)sb;
+                if (sb < 0 && (uint16_t)(-sb) > peak_b_neg) peak_b_neg = (uint16_t)(-sb);
+            }
         }
     }
+
 
     // Update atomic counters
     atomic_fetch_add(&app->clip_count_a_pos, clip_a_pos);
     atomic_fetch_add(&app->clip_count_a_neg, clip_a_neg);
-    atomic_fetch_add(&app->clip_count_b_pos, clip_b_pos);
-    atomic_fetch_add(&app->clip_count_b_neg, clip_b_neg);
     atomic_store(&app->peak_a_pos, peak_a_pos);
     atomic_store(&app->peak_a_neg, peak_a_neg);
-    atomic_store(&app->peak_b_pos, peak_b_pos);
-    atomic_store(&app->peak_b_neg, peak_b_neg);
+
+    if (have_b) {
+        atomic_fetch_add(&app->clip_count_b_pos, clip_b_pos);
+        atomic_fetch_add(&app->clip_count_b_neg, clip_b_neg);
+        atomic_store(&app->peak_b_pos, peak_b_pos);
+        atomic_store(&app->peak_b_neg, peak_b_neg);
+    } else {
+        atomic_store(&app->peak_b_pos, 0);
+        atomic_store(&app->peak_b_neg, 0);
+        atomic_store(&app->clip_count_b_pos, 0);
+        atomic_store(&app->clip_count_b_neg, 0);
+    }
+
 }
 
 rb_event_t *gui_extract_get_data_event(void) {

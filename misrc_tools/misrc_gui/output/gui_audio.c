@@ -183,6 +183,7 @@ static int audio_thread_main(void *ctx)
     }
 
     size_t iter_count = 0;
+    bool was_recording = false;
     while (1) {
         // Read from buffer manager with timeout
         buf = bufmgr_read_begin(a->bufmgr, BUF_CAPTURE_AUDIO, len, 10);
@@ -280,22 +281,131 @@ static int audio_thread_main(void *ctx)
             }
         }
         
-        skip_monitoring:
+skip_monitoring:
 
-        // Write files
-        if (a->f_4ch) fwrite(buf, 1, len, a->f_4ch);
-        if (a->convert_1ch) extract_audio_1ch_C((uint8_t *)buf, len, a->buffer_1ch[0], a->buffer_1ch[1], a->buffer_1ch[2], a->buffer_1ch[3]);
-        if (a->convert_2ch) extract_audio_2ch_C((uint16_t *)buf, len, (uint16_t *)a->buffer_2ch[0], (uint16_t *)a->buffer_2ch[1]);
+        // Check if recording state changed
+        bool is_recording = a->app && a->app->is_recording;
+        
+        // RECORDING JUST STARTED - open files dynamically
+        if (!was_recording && is_recording) {
+            fprintf(stderr, "[AUDIO] Recording started, opening files\n");
+            
+            char path[512];
+            wave_header_t hdr;
+            memset(&hdr, 0, sizeof(hdr));
+            
+            if (a->app->settings.enable_audio_4ch) {
+                snprintf(path, sizeof(path), "%s/%s", a->app->settings.output_path, a->app->settings.audio_4ch_filename);
+                a->f_4ch = fopen(path, "wb");
+                if (a->f_4ch && a->f_4ch != stdout) fwrite(&hdr, 1, sizeof(hdr), a->f_4ch);
+            }
+            
+            if (a->app->settings.enable_audio_2ch_12) {
+                snprintf(path, sizeof(path), "%s/%s", a->app->settings.output_path, a->app->settings.audio_2ch_12_filename);
+                a->f_2ch[0] = fopen(path, "wb");
+                if (a->f_2ch[0] && a->f_2ch[0] != stdout) fwrite(&hdr, 1, sizeof(hdr), a->f_2ch[0]);
+                a->convert_2ch = true;
+            }
+            
+            if (a->app->settings.enable_audio_2ch_34) {
+                snprintf(path, sizeof(path), "%s/%s", a->app->settings.output_path, a->app->settings.audio_2ch_34_filename);
+                a->f_2ch[1] = fopen(path, "wb");
+                if (a->f_2ch[1] && a->f_2ch[1] != stdout) fwrite(&hdr, 1, sizeof(hdr), a->f_2ch[1]);
+                a->convert_2ch = true;
+            }
+            
+            for (int i = 0; i < 4; i++) {
+                if (a->app->settings.enable_audio_1ch[i]) {
+                    snprintf(path, sizeof(path), "%s/%s", a->app->settings.output_path, a->app->settings.audio_1ch_filenames[i]);
+                    a->f_1ch[i] = fopen(path, "wb");
+                    if (a->f_1ch[i] && a->f_1ch[i] != stdout) fwrite(&hdr, 1, sizeof(hdr), a->f_1ch[i]);
+                    a->convert_1ch = true;
+                }
+            }
+            
+a->total_bytes = 0;
+            
+            // Allocate conversion buffers if needed and not already allocated
+            if (a->convert_1ch && !a->buffer_1ch[0]) {
+                a->buffer_1ch[0] = aligned_alloc(32, BUFFER_AUDIO_READ_SIZE);
+                if (!a->buffer_1ch[0]) {
+                    fprintf(stderr, "[AUDIO] Failed to allocate 1ch buffer\n");
+                    // Close 1ch files and reset state
+                    for (int i = 0; i < 4; i++) {
+                        if (a->f_1ch[i]) { fclose(a->f_1ch[i]); a->f_1ch[i] = NULL; }
+                    }
+                    a->convert_1ch = false;
+                    goto skip_file_ops;
+                }
+                for (int i = 1; i < 4; i++) a->buffer_1ch[i] = a->buffer_1ch[0] + (BUFFER_AUDIO_READ_SIZE / 4) * i;
+            }
+            if (a->convert_2ch && !a->buffer_2ch[0]) {
+                a->buffer_2ch[0] = aligned_alloc(32, BUFFER_AUDIO_READ_SIZE);
+                if (!a->buffer_2ch[0]) {
+                    fprintf(stderr, "[AUDIO] Failed to allocate 2ch buffer\n");
+                    // Close 2ch files and reset state
+                    if (a->f_2ch[0]) { fclose(a->f_2ch[0]); a->f_2ch[0] = NULL; }
+                    if (a->f_2ch[1]) { fclose(a->f_2ch[1]); a->f_2ch[1] = NULL; }
+                    a->convert_2ch = false;
+                    goto skip_file_ops;
+                }
+                a->buffer_2ch[1] = a->buffer_2ch[0] + (BUFFER_AUDIO_READ_SIZE / 2);
+            }
+        }
+        
+skip_file_ops:
+        
+        // RECORDING JUST STOPPED - close files and write headers
+        if (was_recording && !is_recording) {
+            wave_header_t h;
+            if (a->f_4ch && a->f_4ch != stdout) {
+                fseek(a->f_4ch, 0, SEEK_SET);
+                create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
+                fwrite(&h, 1, sizeof(h), a->f_4ch);
+                fclose(a->f_4ch);
+                a->f_4ch = NULL;
+            }
+            for (int i = 0; i < 2; i++) {
+                if (a->f_2ch[i] && a->f_2ch[i] != stdout) {
+                    fseek(a->f_2ch[i], 0, SEEK_SET);
+                    create_wave_header(&h, a->total_bytes / 12, 78125, 2, 24);
+                    fwrite(&h, 1, sizeof(h), a->f_2ch[i]);
+                    fclose(a->f_2ch[i]);
+                    a->f_2ch[i] = NULL;
+                }
+            }
+            for (int i = 0; i < 4; i++) {
+                if (a->f_1ch[i] && a->f_1ch[i] != stdout) {
+                    fseek(a->f_1ch[i], 0, SEEK_SET);
+                    create_wave_header(&h, a->total_bytes / 12, 78125, 1, 24);
+                    fwrite(&h, 1, sizeof(h), a->f_1ch[i]);
+                    fclose(a->f_1ch[i]);
+                    a->f_1ch[i] = NULL;
+                }
+            }
+            fprintf(stderr, "[AUDIO] Recording stopped, files closed\n");
+            // DO NOT reset a->total_bytes here
+        }
+        
+        was_recording = is_recording;
 
+        // Write files and extract only if recording active
+        if (is_recording) {
+            if (a->f_4ch) fwrite(buf, 1, len, a->f_4ch);
+            if (a->convert_1ch) extract_audio_1ch_C((uint8_t *)buf, len, a->buffer_1ch[0], a->buffer_1ch[1], a->buffer_1ch[2], a->buffer_1ch[3]);
+            if (a->convert_2ch) extract_audio_2ch_C((uint16_t *)buf, len, (uint16_t *)a->buffer_2ch[0], (uint16_t *)a->buffer_2ch[1]);
+        }
+        
         bufmgr_read_end(a->bufmgr, BUF_CAPTURE_AUDIO, len);
 
-        for (int i = 0; i < 2; i++) if (a->f_2ch[i]) fwrite(a->buffer_2ch[i], 1, len / 2, a->f_2ch[i]);
-        for (int i = 0; i < 4; i++) if (a->f_1ch[i]) fwrite(a->buffer_1ch[i], 1, len / 4, a->f_1ch[i]);
-
-        a->total_bytes += len;
+        if (is_recording) {
+            for (int i = 0; i < 2; i++) if (a->f_2ch[i]) fwrite(a->buffer_2ch[i], 1, len / 2, a->f_2ch[i]);
+            for (int i = 0; i < 4; i++) if (a->f_1ch[i]) fwrite(a->buffer_1ch[i], 1, len / 4, a->f_1ch[i]);
+            a->total_bytes += len;
+        }
     }
 
-    // Rewrite headers with correct sizes
+    // Cleanup at thread exit
     if (a->f_4ch && a->f_4ch != stdout) {
         fseek(a->f_4ch, 0, SEEK_SET);
         create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
@@ -423,7 +533,7 @@ void gui_audio_stop(gui_app_t *app)
     thrd_join(s_audio_thread, NULL);
     s_audio_running = false;
     
-    // Cleanup audio stream and resampler
+    // Cleanup audio stream and resampler - no goat. Honestly.
     if (s_play_stream_inited) {
         StopAudioStream(s_play_stream);
         UnloadAudioStream(s_play_stream);

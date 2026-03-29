@@ -1,6 +1,5 @@
 /*
  * MISRC GUI - UI Layout Implementation
- *
  * Clay-based declarative UI layout (Clay v0.14 API)
  */
 
@@ -12,6 +11,7 @@
 #include "../visualization/gui_panel.h"
 #include "../input/gui_playback.h"
 #include "../output/gui_audio.h"
+#include "../input/gui_capture.h" // Support hsdoah-rp2350 Error & stats
 #include "version.h"
 #include "../visualization/gui_custom_elements.h"
 #include "../../common/buffer_manager.h"
@@ -32,7 +32,9 @@ static bool s_ui_consumed_click = false;
 
 // Simple in-place text editing state (settings panel)
 static bool s_edit_output_base_name = false;
+static bool s_edit_output_path = false; // 080226 - added to make editable
 static double s_base_name_backspace_repeat_at = 0.0;
+static double s_output_path_backspace_repeat_at = 0.0; // 080226 - added to make editable
 
 // Audio label in-place editing state (settings panel)
 static int s_edit_audio_label_idx = -1; // 0..3, or -1
@@ -43,6 +45,9 @@ bool gui_ui_click_consumed(void) {
     return s_ui_consumed_click;
 }
 
+static inline void gui_ui_set_click_consumed(void) { // 130226 - added
+    s_ui_consumed_click = true;
+}
 // Color conversions
 static inline Clay_Color to_clay_color(Color c) {
     return (Clay_Color){ c.r, c.g, c.b, c.a };
@@ -75,6 +80,7 @@ static char stat_b_errors[16];
 // Playback file display buffers
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
+static char settings_output_path_display[256]; // 080226 - separate buffer for output path display
 
 // Audio meter channel labels (static buffers)
 static char audio_ch_label[4][8];
@@ -248,51 +254,60 @@ static void render_settings_panel(gui_app_t *app) {
             }
         }
 
-        // Output path display + choose button
-        CLAY(CLAY_ID("SettingsOutputPath"), {
+// Output path display + choose button
+CLAY(CLAY_ID("SettingsOutputPath"), {
+    .layout = {
+        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+        .layoutDirection = CLAY_TOP_TO_BOTTOM,
+        .childGap = 6
+    }
+}) {
+    CLAY_TEXT(CLAY_STRING("Output folder:"),
+        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+    CLAY(CLAY_ID("OutputPathRow"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+            .layoutDirection = CLAY_LEFT_TO_RIGHT,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 8
+        }
+    }) {
+        // Editable path box (click to edit)
+        CLAY(CLAY_ID("OutputPathBox"), {
             .layout = {
-                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                .childGap = 6
-            }
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                .padding = { 10, 10, 0, 0 }
+            },
+            .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            CLAY_TEXT(CLAY_STRING("Output folder:"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-
-            CLAY(CLAY_ID("OutputPathRow"), {
-                .layout = {
-                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
-                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
-                    .childGap = 8
-                }
-            }) {
-                CLAY(CLAY_ID("OutputPathBox"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
-                        .padding = { 10, 10, 0, 0 }
-                    },
-                    .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
-                    .cornerRadius = CLAY_CORNER_RADIUS(4)
-                }) {
-                    CLAY_TEXT(make_string(app->settings.output_path),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
-
-                CLAY(CLAY_ID("ChooseOutputFolderButton"), {
-                    .layout = {
-                        .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(32) },
-                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-                    },
-                    .backgroundColor = to_clay_color(COLOR_BUTTON),
-                    .cornerRadius = CLAY_CORNER_RADIUS(4)
-                }) {
-                    CLAY_TEXT(CLAY_STRING("Choose folder..."),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
-                }
+            if (s_edit_output_path) {
+                snprintf(settings_output_path_display, sizeof(settings_output_path_display), "%s_", app->settings.output_path);
+                CLAY_TEXT(make_string(settings_output_path_display),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            } else {
+                CLAY_TEXT(make_string(app->settings.output_path),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             }
         }
+
+        // Choose output folder button (so the handler has a real element)
+        CLAY(CLAY_ID("ChooseOutputFolderButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(96), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY_TEXT(CLAY_STRING("Choose..."),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+    }
+}
+
 
         // Scrollable settings body
         CLAY(CLAY_ID("SettingsScroll"), {
@@ -1358,11 +1373,11 @@ static void render_status_bar(gui_app_t *app) {
                 }
             //}
 
-            // RF Buffer usage (as percentage)
+            // RF Buffer usage
             size_t rf_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].head);
             size_t rf_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_RF].tail);
             size_t rf_size = app->buffers.buffers[BUF_CAPTURE_RF].buffer_size;
-            size_t rf_used = (rf_head >= rf_tail) ? (rf_head - rf_tail) : (rf_size - rf_tail + rf_head);
+            size_t rf_used = rf_tail - rf_head;  // Simple subtraction - no wrap handling
             int rf_pct = rf_size > 0 ? (int)((rf_used * 100) / rf_size) : 0;
             snprintf(temp_buf5, sizeof(temp_buf5), "%d%%", rf_pct);
             CLAY(CLAY_ID("RFBufStatus"), {
@@ -1383,11 +1398,11 @@ static void render_status_bar(gui_app_t *app) {
                 }
             }
 
-            // Audio Buffer usage (as percentage)
+            // Audio Buffer usage
             size_t aud_head = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].head);
             size_t aud_tail = atomic_load(&app->buffers.buffers[BUF_CAPTURE_AUDIO].tail);
             size_t aud_size = app->buffers.buffers[BUF_CAPTURE_AUDIO].buffer_size;
-            size_t aud_used = (aud_head >= aud_tail) ? (aud_head - aud_tail) : (aud_size - aud_tail + aud_head);
+            size_t aud_used = aud_tail - aud_head;  // Simple subtraction - no wrap handling  
             int aud_pct = aud_size > 0 ? (int)((aud_used * 100) / aud_size) : 0;
             snprintf(temp_buf6, sizeof(temp_buf6), "%d%%", aud_pct);
             CLAY(CLAY_ID("AudBufStatus"), {
@@ -1420,6 +1435,9 @@ void gui_render_layout(gui_app_t *app) {
             .layoutDirection = CLAY_TOP_TO_BOTTOM
         }
     }) {
+        // Apply cached hsdaoh status/errors at a low rate (2s)
+        gui_capture_poll_hsdaoh_status(app);
+        
         // Toolbar
         render_toolbar(app);
 
@@ -1481,6 +1499,7 @@ void gui_handle_interactions(gui_app_t *app) {
     // Handle simple text input when editing capture name
     if (app->settings_panel_open && s_edit_output_base_name) {
         // If base name editing is active, don't allow audio label edit at same time.
+        s_edit_output_path = false;   // cancel Output-path edit while editing base name
         s_edit_audio_label_idx = -1;
 
         // Append printable ASCII chars (avoid locale/undefined behavior with ctype on >255)
@@ -1523,6 +1542,52 @@ void gui_handle_interactions(gui_app_t *app) {
         }
     }
 
+        // Handle simple text input when editing output folder path -- MOVED
+        if (app->settings_panel_open && s_edit_output_path) {
+            // Cancel other edits while editing output path
+            s_edit_output_base_name = false;
+            s_edit_audio_label_idx = -1;
+
+            int ch = GetCharPressed();
+            while (ch > 0) {
+        // Allow common path characters; block only the usual illegal ones.
+        if (ch >= 32 && ch < 127 &&
+            ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
+
+            size_t len = strlen(app->settings.output_path);
+            if (len + 1 < sizeof(app->settings.output_path)) {
+                app->settings.output_path[len] = (char)ch;
+                app->settings.output_path[len + 1] = '\0';
+                gui_settings_save(&app->settings);
+            }
+        }
+        ch = GetCharPressed();
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE)) {
+        s_output_path_backspace_repeat_at = GetTime() + 0.25;
+        size_t len = strlen(app->settings.output_path);
+        if (len > 0) {
+            app->settings.output_path[len - 1] = '\0';
+            gui_settings_save(&app->settings);
+        }
+    } else if (IsKeyDown(KEY_BACKSPACE)) {
+        double now = GetTime();
+        if (now >= s_output_path_backspace_repeat_at) {
+            s_output_path_backspace_repeat_at = now + 0.05;
+            size_t len = strlen(app->settings.output_path);
+            if (len > 0) {
+                app->settings.output_path[len - 1] = '\0';
+                gui_settings_save(&app->settings);
+            }
+        }
+    }
+
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+        s_edit_output_path = false;
+        gui_settings_save(&app->settings);
+    }
+}
     // Handle text input when editing audio label
     if (app->settings_panel_open && s_edit_audio_label_idx >= 0 && s_edit_audio_label_idx < 4 && app->settings.auto_names_enabled) {
         // Cancel base name edit
@@ -1612,9 +1677,11 @@ void gui_handle_interactions(gui_app_t *app) {
         if (Clay_PointerOver(CLAY_ID("SettingsButton"))) {
             app->settings_panel_open = !app->settings_panel_open;
             s_edit_output_base_name = false;
+            s_edit_output_path = false;
             s_edit_audio_label_idx = -1;
             gui_settings_save(&app->settings);
         }
+
 
         // Clip reset buttons (per-channel stats)
         if (Clay_PointerOver(CLAY_IDI("ResetClipBtn", 0))) {
@@ -1630,6 +1697,9 @@ void gui_handle_interactions(gui_app_t *app) {
         if (app->settings_panel_open) {
             if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
                 app->settings_panel_open = false;
+                s_edit_output_base_name = false;
+                s_edit_output_path = false;
+                s_edit_audio_label_idx = -1;
                 gui_settings_save(&app->settings);
                 return;
             }
@@ -1695,17 +1765,55 @@ void gui_handle_interactions(gui_app_t *app) {
                 }
                 gui_settings_save(&app->settings);
             }
-            if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
+//            if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
+//                s_edit_output_base_name = true;
+//                s_edit_audio_label_idx = -1;
+//                s_base_name_backspace_repeat_at = 0.0;
+//            }
+
+            // Enter editing Capture/Base name only on click
+            if (app->settings_panel_open &&
+                Clay_PointerOver(CLAY_ID("OutputBaseNameField")) &&
+                // IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && // 130226 - Changed
+                !gui_ui_click_consumed())
+            {
                 s_edit_output_base_name = true;
+                s_edit_output_path = false;
                 s_edit_audio_label_idx = -1;
-                s_base_name_backspace_repeat_at = 0.0;
+
+                gui_ui_set_click_consumed();
             }
+
+
+//            if (Clay_PointerOver(CLAY_ID("OutputPathBox"))) { // 130226 - Enable OUTPUT folder edit
+//            s_edit_output_path = true;
+//            s_edit_output_base_name = false;
+//            s_edit_audio_label_idx = -1;
+//            s_output_path_backspace_repeat_at = 0.0;
+///}
+
             if (Clay_PointerOver(CLAY_ID("AppendTimestampToggle")) && app->settings.auto_names_enabled) {
                 app->settings.append_timestamp_on_capture_start = !app->settings.append_timestamp_on_capture_start;
                 gui_settings_save(&app->settings);
+                gui_ui_set_click_consumed();
             }
 
-            // RF bit depth selection (cycle)
+
+            // Enter editing Output folder only on click
+            if (app->settings_panel_open &&
+                Clay_PointerOver(CLAY_ID("OutputPathBox")) &&
+                !gui_ui_click_consumed())
+            {
+                s_edit_output_path = true;
+                s_edit_output_base_name = false;
+                s_edit_audio_label_idx = -1;
+                s_output_path_backspace_repeat_at = 0.0;
+
+                gui_ui_set_click_consumed();
+            }
+
+
+             // RF bit depth selection (cycle)
             // If user switches to RAW and a channel was set to 12-bit, treat it as 16-bit.
             if (!app->settings.use_flac) {
                 if (app->settings.rf_bits_a == 12) app->settings.rf_bits_a = 16;
@@ -1756,6 +1864,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 if (Clay_PointerOver(CLAY_IDI("Audio1chLabelField", i)) && app->settings.auto_names_enabled) {
                     s_edit_audio_label_idx = i;
                     s_edit_output_base_name = false;
+                    s_edit_output_path = false; //130226 - Added
                     s_audio_label_backspace_repeat_at = 0.0;
                 }
             }
@@ -1801,4 +1910,3 @@ void gui_handle_interactions(gui_app_t *app) {
         }
     }
 }
-

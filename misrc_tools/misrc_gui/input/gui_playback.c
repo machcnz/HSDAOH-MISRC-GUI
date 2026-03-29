@@ -1,5 +1,5 @@
 /*
- * MISRC GUI - Playback Mode Implementation
+ * MISRC - hsdaoh-rp2350 GUI - Playback Mode Implementation
  *
  * Reads FLAC files and plays them back as if being captured live.
  * Uses libFLAC stream decoder for reading.
