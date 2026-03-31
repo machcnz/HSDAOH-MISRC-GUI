@@ -231,6 +231,8 @@ void gui_capture_callback(void *data_info_ptr) {
     if (atomic_load(&do_exit)) return;
     if (!app) return;
     if (!data_info->buf) return;
+    // Any callback activity means the capture path is still alive.
+    atomic_store(&app->last_callback_time_ms, get_time_ms());
     if (data_info->width == 0 || data_info->height == 0) return;
 
     if (data_info->device_error) {
@@ -263,8 +265,6 @@ void gui_capture_callback(void *data_info_ptr) {
         return;
     }
 
-    // Update last callback time for disconnect detection
-    atomic_store(&app->last_callback_time_ms, get_time_ms());
 
     atomic_fetch_add(&app->frame_count, 1);
 
@@ -274,13 +274,11 @@ void gui_capture_callback(void *data_info_ptr) {
     }
 
     // Handle errors
-    if (result.error_count > 0) {
-        if (result.report_errors) {
-            if (misrc_debug_enabled()) {
-                fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
-            }
-            atomic_fetch_add(&app->error_count, result.error_count);
+    if (result.error_count > 0 && result.report_errors) {
+        if (misrc_debug_enabled()) {
+            fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
         }
+        atomic_fetch_add(&app->error_count, result.error_count);
         return;  // Discard frame with errors
     }
 
@@ -309,13 +307,7 @@ void gui_capture_callback(void *data_info_ptr) {
     // If audio capture enabled, reserve space in audio buffer via buffer manager
     if (atomic_load(&s_capture_handler.capture_audio) && result.stream1_bytes > 0) {
         buf_out_audio = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, result.stream1_bytes, NULL);
-        if (s_callback_count <= 3 && buf_out_audio) {
-            fprintf(stderr, "[CB] Audio capture enabled, wrote %zu bytes to BUF_CAPTURE_AUDIO\n", result.stream1_bytes);
-        }
         // buf_out_audio may be NULL if buffer full
-    } else if (s_callback_count <= 3) {
-        fprintf(stderr, "[CB] Audio NOT captured: capture_audio=%d, stream1_bytes=%zu\n",
-                atomic_load(&s_capture_handler.capture_audio), result.stream1_bytes);
     }
 
     // Copy payloads (RF + optional audio) with shared audio sync filtering
@@ -811,7 +803,7 @@ int gui_app_start_capture(gui_app_t *app) {
 
     // Audio is always-on during capture (for monitoring). Writing to files is controlled
     // by recording state in gui_audio_start().
-   // atomic_store(&s_capture_handler.capture_audio, true);
+    atomic_store(&s_capture_handler.capture_audio, true);
 
     s_capture_handler.sync_event_cb = gui_sync_event_cb;
     s_capture_handler.user_ctx = app;

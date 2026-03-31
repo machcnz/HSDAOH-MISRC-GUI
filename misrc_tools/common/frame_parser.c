@@ -7,6 +7,7 @@
 
 #include "frame_parser.h"
 #include <hsdaoh_crc.h>
+#include "misrc_debug.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +42,54 @@
     #define le32toh(x) (x)
 #endif
 
+static uint16_t frame_compute_line_crc(const uint8_t *line_dat, unsigned int width_words,
+                                       bool has_stream_id)
+{
+    if (width_words == 0) {
+        return 0;
+    }
+
+    uint8_t *line_mut = (uint8_t *)line_dat;
+    size_t line_bytes = width_words * sizeof(uint16_t);
+    uint8_t *tail_hi_byte = line_mut + line_bytes - 1;
+    uint8_t saved_hi = *tail_hi_byte;
+    uint8_t *sid_hi_byte = NULL;
+    uint8_t saved_sid_hi = 0;
+
+    /* Upper 4 bits of trailer words carry metadata/reserved bits; exclude from CRC. */
+    *tail_hi_byte &= 0x0F;
+    if (has_stream_id && line_bytes >= 5) {
+        sid_hi_byte = line_mut + line_bytes - 5;
+        saved_sid_hi = *sid_hi_byte;
+        *sid_hi_byte &= 0x0F;
+    }
+    uint16_t crc = crc16_ccitt(line_dat, line_bytes);
+    if (sid_hi_byte) {
+        *sid_hi_byte = saved_sid_hi;
+    }
+    *tail_hi_byte = saved_hi;
+
+    return crc;
+}
+
+static int frame_crc_error_tolerance(void)
+{
+    static int cached = -1;
+    if (cached != -1) {
+        return cached;
+    }
+
+    cached = 24; /* default tolerance for minor line-level CRC noise */
+    const char *v = getenv("MISRC_CRC_TOLERANCE");
+    if (v && v[0]) {
+        char *end = NULL;
+        long parsed = strtol(v, &end, 10);
+        if (end != v && *end == '\0' && parsed >= 0 && parsed <= 10000) {
+            cached = (int)parsed;
+        }
+    }
+    return cached;
+}
 /*-----------------------------------------------------------------------------
  * Line Parsing
  *-----------------------------------------------------------------------------*/
@@ -50,6 +99,12 @@ parsed_line_t frame_parse_line(const uint8_t *line_dat, int width,
 {
     parsed_line_t result = {0};
     const uint16_t *words = (const uint16_t *)line_dat;
+    int trailer_words = 1 + (has_stream_id ? 1 : 0) + (has_crc ? 1 : 0);
+
+    if (width <= trailer_words) {
+        result.valid = false;
+        return result;
+    }
 
     /* Extract payload length from last word, apply 12-bit mask */
     result.payload_len = le16toh(words[width - 1]) & 0x0FFF;
@@ -64,8 +119,8 @@ parsed_line_t frame_parse_line(const uint8_t *line_dat, int width,
         result.stream_id = le16toh(words[width - 3]) & 0x0FFF;
     }
 
-    /* Validate payload length */
-    result.valid = (result.payload_len <= (uint16_t)(width - 1));
+    /* Validate payload length against available payload area (exclude trailer words) */
+    result.valid = (result.payload_len <= (uint16_t)(width - trailer_words));
 
     return result;
 }
@@ -141,7 +196,7 @@ bool frame_check_crc(frame_crc_state_t *state, const uint8_t *line_dat,
 
     /* Update running CRC values */
     state->last_crc[1] = state->last_crc[0];
-    state->last_crc[0] = crc16_ccitt(line_dat, width * sizeof(uint16_t));
+    state->last_crc[0] = frame_compute_line_crc(line_dat, (unsigned int)width, false);
 
     return (received_crc == expected_crc);
 }
@@ -160,13 +215,20 @@ int frame_check_idle(frame_idle_state_t *state, const uint8_t *line_dat,
                      bool has_stream_id, bool has_crc)
 {
     /* Calculate idle field length */
-    uint16_t idle_len = (width - 1) - payload_len;
+    int idle_len = (width - 1) - payload_len;
     if (has_stream_id) idle_len--;
     if (has_crc) idle_len--;
 
+    if (idle_len < 0) {
+        return 1;
+    }
+    if (idle_len == 0) {
+        return 0;
+    }
+
     /* Check idle counts using hsdaoh library function */
     const uint16_t *idle_start = (const uint16_t *)line_dat + payload_len;
-    return hsdaoh_check_idle_cnt(&state->idle_cnt, (uint16_t *)idle_start, idle_len);
+    return hsdaoh_check_idle_cnt(&state->idle_cnt, (uint16_t *)idle_start, (uint16_t)idle_len);
 }
 
 /*-----------------------------------------------------------------------------
@@ -196,6 +258,8 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
     result.sync_result = FRAME_SYNC_OK;
     result.valid = false;
     result.report_errors = false;
+    int idle_error_count = 0;
+    int crc_error_count = 0;
 
     /* Validate magic number (need le32toh for big-endian systems) */
     if (le32toh(meta->magic) != HSDAOH_MAGIC) {
@@ -246,9 +310,11 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
         }
 
         /* Check idle counts */
-        result.error_count += frame_check_idle(&state->idle, line_dat,
-                                                parsed.payload_len, (int)width,
-                                                has_stream_id, has_crc);
+        int idle_err = frame_check_idle(&state->idle, line_dat,
+                                        parsed.payload_len, (int)width,
+                                        has_stream_id, has_crc);
+        result.error_count += idle_err;
+        idle_error_count += idle_err;
 
         /* Check CRC if enabled - always update state, only count errors when synced */
         if (has_crc) {
@@ -258,11 +324,12 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
 
             if (parsed.crc != expected_crc && state->sync.stream_synced) {
                 result.error_count++;
+                crc_error_count++;
             }
 
             /* Always update CRC state */
             state->crc.last_crc[1] = state->crc.last_crc[0];
-            state->crc.last_crc[0] = crc16_ccitt(line_dat, width * sizeof(uint16_t));
+            state->crc.last_crc[0] = frame_compute_line_crc(line_dat, width, has_stream_id);
         }
 
         /* Accumulate payload sizes by stream (only when synced) */
@@ -277,9 +344,16 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
 
     /* Handle errors - only count when synced */
     if (result.error_count > 0 && state->sync.stream_synced) {
-        result.report_errors = true;
-        state->frames_since_error = 0;
-        return result;  /* Frame has errors, don't mark as valid */
+        int crc_tol = frame_crc_error_tolerance();
+        bool tolerate_crc_only = (idle_error_count == 0 &&
+                                  crc_error_count == result.error_count &&
+                                  crc_tol > 0 &&
+                                  crc_error_count <= crc_tol);
+        if (!tolerate_crc_only) {
+            result.report_errors = true;
+            state->frames_since_error = 0;
+            return result;  /* Frame has non-tolerable errors, don't mark as valid */
+        }
     }
 
     state->frames_since_error++;

@@ -264,13 +264,11 @@ static int flac_writer_thread(void *ctx) {
                     if (!buf) break;
 
                     const int16_t *in = (const int16_t *)buf;
-                    size_t out_n = BUFFER_READ_SIZE;
 
 #if LIBSOXR_ENABLED
                     if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
                         soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
                         if (s) {
-                            soxr_clear(s);
                             size_t in_done = 0, out_done = 0;
                             soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
                                                            tmp_i16, tmp_cap, &out_done);
@@ -301,7 +299,6 @@ static int flac_writer_thread(void *ctx) {
         if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
-                soxr_clear(s);
                 size_t in_done = 0, out_done = 0;
                 soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
                                                tmp_i16, tmp_cap, &out_done);
@@ -420,7 +417,6 @@ static int raw_writer_thread(void *ctx) {
                     if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
                         soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
                         if (s) {
-                            soxr_clear(s);
                             size_t in_done = 0, out_done = 0;
                             soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
                                                            tmp_i16, BUFFER_READ_SIZE, &out_done);
@@ -452,7 +448,6 @@ static int raw_writer_thread(void *ctx) {
         if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
-                soxr_clear(s);
                 size_t in_done = 0, out_done = 0;
                 soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
                                                tmp_i16, BUFFER_READ_SIZE, &out_done);
@@ -1074,6 +1069,10 @@ void gui_record_stop(gui_app_t *app) {
     uint32_t end_drop = atomic_load(&app->rb_drop_count);
     uint32_t rec_waits = end_wait - s_start_wait_count;
     uint32_t rec_drops = end_drop - s_start_drop_count;
+    uint32_t rec_a_waits = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
+    uint32_t rec_a_drops = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
+    uint32_t rec_b_waits = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
+    uint32_t rec_b_drops = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
 
     char size_a[32], size_b[32];
     format_file_size_u64(raw_a, size_a, sizeof(size_a));
@@ -1081,6 +1080,8 @@ void gui_record_stop(gui_app_t *app) {
 
     fprintf(stderr, "[REC] Recording stopped: %.1fs, A=%s, B=%s, waits=%u, drops=%u\n",
             duration, size_a, size_b, rec_waits, rec_drops);
+    fprintf(stderr, "[REC] Record buffers: A waits=%u drops=%u, B waits=%u drops=%u\n",
+            rec_a_waits, rec_a_drops, rec_b_waits, rec_b_drops);
 
     if (rec_drops > 0) {
         fprintf(stderr, "[REC] WARNING: %u frames were dropped during recording due to backpressure!\n", rec_drops);

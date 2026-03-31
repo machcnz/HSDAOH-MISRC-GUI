@@ -627,6 +627,19 @@ static void render_toolbar(gui_app_t *app) {
             CLAY_TEXT(app->is_capturing ? CLAY_STRING("Disconnect") : CLAY_STRING("Connect"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
+        // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B)
+        Color mode_bg = app->settings.misrc_mode ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+        CLAY(CLAY_ID("CaptureModeToggle"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(125), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(mode_bg),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY_TEXT(app->settings.misrc_mode ? CLAY_STRING("Mode: MISRC") : CLAY_STRING("Mode: HSDAOH"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
 
         // Spacer
         CLAY(CLAY_ID("ToolbarSpacer2"), {
@@ -1651,6 +1664,13 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_app_start_capture(app);
             }
         }
+        if (Clay_PointerOver(CLAY_ID("CaptureModeToggle"))) {
+            app->settings.misrc_mode = !app->settings.misrc_mode;
+            gui_settings_save(&app->settings);
+            gui_app_set_status(app, app->settings.misrc_mode
+                ? "Capture mode set to MISRC (A/B swapped)"
+                : "Capture mode set to HSDAOH (A/B normal)");
+        }
 
 
         // Audio playback monitoring toggle
@@ -1870,9 +1890,11 @@ void gui_handle_interactions(gui_app_t *app) {
             }
 
             if (Clay_PointerOver(CLAY_ID("ChooseOutputFolderButton"))) {
-                // Best-effort folder picker (macOS via osascript). If unavailable, no-op.
+                // Best-effort folder picker (platform-specific).
                 if (gui_settings_choose_output_folder(&app->settings)) {
                     gui_settings_save(&app->settings);
+                } else {
+                    gui_app_set_status(app, "No folder selected (or folder picker unavailable)");
                 }
             }
 

@@ -59,6 +59,15 @@ static atomic_bool s_use_flac = false;
 static atomic_uchar s_rf_bits_a = 16;
 static atomic_uchar s_rf_bits_b = 16;
 
+// Record path must never stall extraction/RF ingestion.
+// If record buffers are full, drop record blocks immediately.
+static const backpressure_policy_t s_record_write_policy = {
+    .max_wait_attempts = 0,
+    .wait_timeout_ms = 0,
+    .log_first_wait = true,
+    .log_drops = true,
+};
+
 static conv_16to8_t s_conv_16to8 = NULL;
 static conv_16to32_t s_conv_16to8to32 = NULL;
 
@@ -89,6 +98,8 @@ static int extraction_thread(void *ctx) {
         if (atomic_load(&do_exit)) {
             break;
         }
+        const int16_t *mapped_a = NULL;
+        const int16_t *mapped_b = NULL;
 
         // Try to read from capture ringbuffer via buffer manager
         void *buf = bufmgr_read_begin(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size, 20);
@@ -106,7 +117,15 @@ static int extraction_thread(void *ctx) {
         if (!s_b_present) {
             // Prevent stale/uninitialized data from driving CH-B meters/display
             memset(s_buf_b, 0, BUFFER_READ_SIZE * sizeof(int16_t));
-            }
+        }
+        bool swap_channels = (s_extract_app && s_extract_app->settings.misrc_mode);
+        if (s_b_present && swap_channels) {
+            mapped_a = s_buf_b;
+            mapped_b = s_buf_a;
+        } else {
+            mapped_a = s_buf_a;
+            mapped_b = s_b_present ? s_buf_b : NULL;
+        }
 
         // Mark capture buffer as consumed via buffer manager
         bufmgr_read_end(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size);
@@ -121,11 +140,11 @@ static int extraction_thread(void *ctx) {
             uint8_t *display_buf = bufmgr_write_begin(&s_extract_app->buffers, BUF_DISPLAY,
                                                     display_frame_size, NULL);
             if (display_buf) {
-                    memcpy(display_buf, s_buf_a, BUFFER_READ_SIZE * sizeof(int16_t));
+                    memcpy(display_buf, mapped_a, BUFFER_READ_SIZE * sizeof(int16_t));
 
-                if (s_b_present) {
+                if (mapped_b) {
                     memcpy(display_buf + BUFFER_READ_SIZE * sizeof(int16_t),
-                    s_buf_b, BUFFER_READ_SIZE * sizeof(int16_t));
+                    mapped_b, BUFFER_READ_SIZE * sizeof(int16_t));
                 } else {
                     memset(display_buf + BUFFER_READ_SIZE * sizeof(int16_t),
                     0,
@@ -140,7 +159,7 @@ static int extraction_thread(void *ctx) {
 
         // Stats are cheap - always update them
         //gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
-        gui_extract_update_stats(s_extract_app, s_buf_a, s_b_present ? s_buf_b : NULL, BUFFER_READ_SIZE);
+        gui_extract_update_stats(s_extract_app, mapped_a, mapped_b, BUFFER_READ_SIZE);
 
 
         // Sample counters always updated (cheap atomic ops)
@@ -164,33 +183,43 @@ static int extraction_thread(void *ctx) {
         // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
         if (atomic_load(&s_recording_enabled)) {
             size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
-
-            int16_t *write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                            BUF_RECORD_A, sample_bytes, NULL);
-            bool want_b = s_b_present && s_extract_app->settings.capture_b;  // <- radio button should drive this
+            bool want_a = s_extract_app->settings.capture_a;
+            bool want_b = s_b_present && s_extract_app->settings.capture_b;
+            int16_t *write_a = NULL;
             int16_t *write_b = NULL;
 
-        if (want_b) {
-            write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                    BUF_RECORD_B, sample_bytes, NULL);
-        }
+            if (want_a) {
+                write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                        BUF_RECORD_A,
+                                                        sample_bytes,
+                                                        &s_record_write_policy);
+            }
 
-        if (!write_a || (want_b && !write_b)) {
-            if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
-            if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
-            if (atomic_load(&do_exit)) goto exit_thread;
-            continue;
-        }
+            if (want_b) {
+                write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                        BUF_RECORD_B,
+                                                        sample_bytes,
+                                                        &s_record_write_policy);
+            }
 
-        memcpy(write_a, s_buf_a, sample_bytes);
-        bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+            if ((want_a && !write_a) || (want_b && !write_b)) {
+                if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
+                if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
+                if (atomic_load(&do_exit)) goto exit_thread;
+                continue;
+            }
 
-        if (want_b) {
-            memcpy(write_b, s_buf_b, sample_bytes);
-            bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
+            if (want_a) {
+                memcpy(write_a, mapped_a, sample_bytes);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+            }
+
+            if (want_b) {
+                memcpy(write_b, mapped_b, sample_bytes);
+                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
+            }
         }
     }
-}
 
 exit_thread:
     fprintf(stderr, "[EXTRACT] Continuous extraction thread exiting\n"); 

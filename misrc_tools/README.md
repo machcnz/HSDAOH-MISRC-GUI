@@ -4,7 +4,6 @@
 Build instructions for Steve's hardware can be found:
 1. [hsdaoh rp2350 or fpga version hardware:] (https://github.com/steve-m/hsdaoh)
 
-
 ## License
 
 

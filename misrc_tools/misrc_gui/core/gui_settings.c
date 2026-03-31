@@ -181,6 +181,7 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     // Audio monitoring defaults
     settings->audio_monitor_playback = false;
     settings->audio_monitor_ch34 = false;  // Default to CH1/2
+    settings->misrc_mode = true;           // Default to MISRC mode (A/B swapped)
     
     // Display settings
     settings->show_grid = true;
@@ -194,6 +195,10 @@ void gui_settings_save(const gui_settings_t *settings) {
     if (!settings) return;
     
     const char* path = get_settings_file_path();
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return;
+    }
     
     // CREATE DIRECTORY IF IT DOESN'T EXIST (Windows)
 #if defined(_WIN32) || defined(_WIN64)
@@ -241,6 +246,7 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"enable_audio_2ch_34\": %s,\n", settings->enable_audio_2ch_34 ? "true" : "false");
     fprintf(f, "  \"audio_monitor_playback\": %s,\n", settings->audio_monitor_playback ? "true" : "false");
     fprintf(f, "  \"audio_monitor_ch34\": %s,\n", settings->audio_monitor_ch34 ? "true" : "false");
+    fprintf(f, "  \"misrc_mode\": %s,\n", settings->misrc_mode ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -367,6 +373,7 @@ static void strip_timestamp_prefix_inplace(char *s) {
 // macOS folder picker using osascript. Returns true if output_path changed.
 bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     if (!settings) return false;
+    char picked[512] = {0};
 
 #ifdef __APPLE__
     // Use AppleScript choose folder dialog and return POSIX path.
@@ -374,34 +381,60 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     const char *cmd = "osascript -e 'POSIX path of (choose folder with prompt \"Select output folder for MISRC captures\")'";
     FILE *fp = popen(cmd, "r");
     if (!fp) return false;
-
-    char buf[512] = {0};
+    if (!fgets(picked, sizeof(picked), fp)) {
     if (!fgets(buf, sizeof(buf), fp)) {
         pclose(fp);
         return false;
     }
     (void)pclose(fp);
+#elif defined(_WIN32) || defined(_WIN64)
+    // PowerShell folder picker (requires Windows Forms)
+    const char *cmd =
+        "powershell -NoProfile -Command "
+        "\"Add-Type -AssemblyName System.Windows.Forms; "
+        "$f=New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "if($f.ShowDialog() -eq 'OK'){ $f.SelectedPath }\"";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    if (!fgets(picked, sizeof(picked), fp)) {
+        pclose(fp);
+        return false;
+    }
+    (void)pclose(fp);
+#else
+    // Linux/BSD: try zenity first, then kdialog.
+    const char *cmd =
+        "sh -c '"
+        "if command -v zenity >/dev/null 2>&1; then "
+        "zenity --file-selection --directory --title=\"Select output folder for MISRC captures\"; "
+        "elif command -v kdialog >/dev/null 2>&1; then "
+        "kdialog --getexistingdirectory \"$HOME\" \"Select output folder for MISRC captures\"; "
+        "fi'";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    if (!fgets(picked, sizeof(picked), fp)) {
+        pclose(fp);
+        return false;
+    }
+    (void)pclose(fp);
+#endif
 
-    trim_newlines(buf);
-    if (buf[0] == '\0') return false;
+    trim_newlines(picked);
+    if (picked[0] == '\0') return false;
 
-    // Remove trailing slash
-    size_t len = strlen(buf);
-    while (len > 1 && buf[len - 1] == '/') {
-        buf[--len] = '\0';
+    // Remove trailing slash/backslash
+    size_t len = strlen(picked);
+    while (len > 1 && (picked[len - 1] == '/' || picked[len - 1] == '\\')) {
+        picked[--len] = '\0';
     }
 
-    if (strncmp(settings->output_path, buf, MAX_FILENAME_LEN) == 0) {
+    if (strncmp(settings->output_path, picked, MAX_FILENAME_LEN) == 0) {
         return false; // no change
     }
 
-    strncpy(settings->output_path, buf, MAX_FILENAME_LEN - 1);
+    strncpy(settings->output_path, picked, MAX_FILENAME_LEN - 1);
     settings->output_path[MAX_FILENAME_LEN - 1] = '\0';
     return true;
-#else
-    (void)settings;
-    return false;
-#endif
 }
 
 // Cross-platform (best-effort) playback file picker.
@@ -683,6 +716,9 @@ void gui_settings_load(gui_settings_t *settings) {
     }
     if ((value = find_value(content, "audio_monitor_ch34")) != NULL) {
         settings->audio_monitor_ch34 = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "misrc_mode")) != NULL) {
+        settings->misrc_mode = (strcmp(value, "true") == 0);
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

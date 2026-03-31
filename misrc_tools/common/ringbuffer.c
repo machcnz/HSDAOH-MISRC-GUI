@@ -125,23 +125,50 @@ int rb_init(ringbuffer_t *rb, char *name, size_t size) {
 }
 
 int rb_put(ringbuffer_t *rb, void *data, size_t size) {
-	if(rb->buffer_size - (rb->tail - rb->head) < size) {
+	size_t head = atomic_load(&rb->head);
+	size_t tail = atomic_load(&rb->tail);
+	size_t map_size = rb->buffer_size * 2;
+	if(tail < head) {
 		return 1;
 	}
-	memcpy(&rb->buffer[rb->tail], data, size);
+	if(rb->buffer_size - (tail - head) < size) {
+		return 1;
+	}
+	if(tail >= map_size || size > (map_size - tail)) {
+		return 1;
+	}
+	memcpy(&rb->buffer[tail], data, size);
 	rb->tail += size;
 	return 0;
 }
 
 void* rb_write_ptr(ringbuffer_t *rb, size_t size) {
-	if(rb->buffer_size - (rb->tail - rb->head) < size) {
+	size_t head = atomic_load(&rb->head);
+	size_t tail = atomic_load(&rb->tail);
+	size_t map_size = rb->buffer_size * 2;
+	if(tail < head) {
 		return NULL;
 	}
-	return &rb->buffer[rb->tail];
+	if(rb->buffer_size - (tail - head) < size) {
+		return NULL;
+	}
+	if(tail >= map_size || size > (map_size - tail)) {
+		return NULL;
+	}
+	return &rb->buffer[tail];
 }
 
 int rb_write_finished(ringbuffer_t *rb, size_t size) {
-	if(rb->buffer_size - (rb->tail - rb->head) < size) {
+	size_t head = atomic_load(&rb->head);
+	size_t tail = atomic_load(&rb->tail);
+	size_t map_size = rb->buffer_size * 2;
+	if(tail < head) {
+		return 1;
+	}
+	if(rb->buffer_size - (tail - head) < size) {
+		return 1;
+	}
+	if(tail >= map_size || size > (map_size - tail)) {
 		return 1;
 	}
 	rb->tail += size;
@@ -149,10 +176,19 @@ int rb_write_finished(ringbuffer_t *rb, size_t size) {
 }
 
 void* rb_read_ptr(ringbuffer_t *rb, size_t size) {
-	if(rb->tail - rb->head < size){
+	size_t head = atomic_load(&rb->head);
+	size_t tail = atomic_load(&rb->tail);
+	size_t map_size = rb->buffer_size * 2;
+	if(tail < head){
 		return NULL;
 	}
-	return &rb->buffer[rb->head];
+	if(tail - head < size){
+		return NULL;
+	}
+	if(head >= map_size || size > (map_size - head)) {
+		return NULL;
+	}
+	return &rb->buffer[head];
 }
 
 int rb_read_finished(ringbuffer_t *rb, size_t size) {
@@ -160,7 +196,7 @@ int rb_read_finished(ringbuffer_t *rb, size_t size) {
 		return 1;
 	}
 	rb->head += size;
-	if(rb->head > rb->buffer_size) {
+	if(rb->head >= rb->buffer_size) {
 		rb->head -= rb->buffer_size;
 		rb->tail -= rb->buffer_size;
 	}

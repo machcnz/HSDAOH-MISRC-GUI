@@ -220,6 +220,7 @@ typedef struct {
     // Audio monitoring
     bool audio_monitor_playback;               // If true, play monitored audio to system output
     bool audio_monitor_ch34;                   // If true, monitor CH3/4; if false, monitor CH1/2
+    bool misrc_mode;                           // If true, MISRC mode (default) with A/B channel swap
 
     // Per-channel audio labels (for auto naming, e.g. "linear", "baseband")
     char audio_1ch_labels[4][32];
