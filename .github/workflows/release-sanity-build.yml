@@ -140,7 +140,7 @@ jobs:
           Terminal=false
           EOF
 
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aO0AAAAASUVORK5CYII=' | base64 -d > AppDir/misrc.png
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/l9vyGQAAAABJRU5ErkJggg==' | base64 -d > AppDir/misrc.png
 
           curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -L -o linuxdeploy-plugin-appimage https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
@@ -183,7 +183,7 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libusb
-            mingw-w64-x86_64-soxr
+            mingw-w64-x86_64-libsoxr
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-ninja
@@ -318,7 +318,7 @@ jobs:
         run: |
           set -eux
           brew update
-          brew install cmake flac libusb libuvc meson nasm ninja pkg-config soxr
+          brew install cmake flac libusb libuvc meson nasm ninja pkg-config libsoxr
 
       - name: Build and package APP
         env:
