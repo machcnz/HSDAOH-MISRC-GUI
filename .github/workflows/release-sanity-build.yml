@@ -58,8 +58,10 @@ jobs:
             curl \
             git \
             libasound2-dev \
+            libflac-dev \
             libgl1-mesa-dev \
             libusb-1.0-0-dev \
+            libuvc-dev \
             libx11-dev \
             libxcursor-dev \
             libxi-dev \
@@ -166,8 +168,10 @@ jobs:
           install: >-
             git
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-flac
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-libuvc
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-ninja
@@ -266,7 +270,7 @@ jobs:
         run: |
           set -eux
           brew update
-          brew install cmake libusb meson nasm ninja pkg-config
+          brew install cmake flac libusb libuvc meson nasm ninja pkg-config
 
       - name: Build and package APP
         env:
