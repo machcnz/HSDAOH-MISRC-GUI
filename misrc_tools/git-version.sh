@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-V=$(git describe --tags --dirty --match 'misrc_tools-*' 2>/dev/null || true)
+V=$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)
 
 if [ -z "$V" ]; then
 	SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")
@@ -11,7 +11,13 @@ if [ -z "$V" ]; then
 	else
 		DIRTY="-dirty"
 	fi
-	V="misrc_gui-0.0.0-${SHA}${DIRTY}"
+	V="dev-${SHA}${DIRTY}"
 fi
 
-printf '%s\n' "${V#misrc_tools-}"
+case "$V" in
+	misrc_tools-*)
+		V="${V#misrc_tools-}"
+		;;
+esac
+
+printf '%s\n' "$V"

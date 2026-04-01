@@ -1,0 +1,393 @@
+name: Release sanity build
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub release and upload built assets"
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: "Tag to release when manually dispatched (example: v0.6.0)"
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  BUILD_DIR: build-gha
+
+jobs:
+  linux-appimage:
+    name: Linux AppImage sanity build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build version
+        id: version
+        run: |
+          set -eux
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            VERSION="${{ inputs.release_tag }}"
+          else
+            VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="dev-${GITHUB_SHA::7}"
+            fi
+          fi
+          case "$VERSION" in
+            misrc_tools-*) VERSION="${VERSION#misrc_tools-}" ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            curl \
+            git \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libusb-1.0-0-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            meson \
+            nasm \
+            ninja-build \
+            patchelf \
+            pkg-config
+
+      - name: Build and install hsdaoh + raylib
+        run: |
+          set -eux
+          DEPS_PREFIX="$PWD/.deps/install"
+          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+            -DINSTALL_UDEV_RULES=OFF
+          cmake --build .deps/hsdaoh/build --parallel
+          cmake --install .deps/hsdaoh/build
+
+          cmake -S raylib-5.5 -B .deps/raylib/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_GAMES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/raylib/build --parallel
+          cmake --install .deps/raylib/build
+
+      - name: Build MISRC tools (Meson)
+        run: |
+          set -eux
+          DEPS_PREFIX="$PWD/.deps/install"
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:$PKG_CONFIG_PATH"
+          meson setup "$BUILD_DIR" misrc_tools --buildtype release
+          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          test -x "$BUILD_DIR/misrc_gui"
+
+      - name: Package AppImage artifact
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eux
+          mkdir -p AppDir/usr/bin
+          cp "$BUILD_DIR/misrc_gui" AppDir/usr/bin/
+          cp "$BUILD_DIR/misrc_capture" AppDir/usr/bin/
+          cp "$BUILD_DIR/misrc_extract" AppDir/usr/bin/
+
+          cat > AppDir/AppRun <<'EOF'
+          #!/usr/bin/env bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/misrc_gui" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          cat > AppDir/misrc.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=MISRC GUI
+          Exec=misrc_gui
+          Icon=misrc
+          Categories=Utility;
+          Terminal=false
+          EOF
+
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aO0AAAAASUVORK5CYII=' | base64 -d > AppDir/misrc.png
+
+          curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -L -o linuxdeploy-plugin-appimage https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          chmod +x linuxdeploy linuxdeploy-plugin-appimage
+
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./linuxdeploy \
+            --appdir AppDir \
+            -e AppDir/usr/bin/misrc_gui \
+            -d AppDir/misrc.desktop \
+            -i AppDir/misrc.png \
+            --output appimage
+
+          APPIMAGE_NAME="misrc_gui-${BUILD_VERSION}-linux-x86_64.AppImage"
+          mv ./*.AppImage "$APPIMAGE_NAME"
+          test -f "$APPIMAGE_NAME"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: misrc_gui-*-linux-x86_64.AppImage
+          if-no-files-found: error
+
+  windows-exe:
+    name: Windows EXE sanity build
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+
+      - name: Resolve build version
+        id: version
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            VERSION="${{ inputs.release_tag }}"
+          else
+            VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="dev-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          case "$VERSION" in
+            misrc_tools-*) VERSION="${VERSION#misrc_tools-}" ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package EXE
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          DEPS_PREFIX="$PWD/.deps/install"
+
+          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+            -DINSTALL_UDEV_RULES=OFF
+          cmake --build .deps/hsdaoh/build --parallel
+          cmake --install .deps/hsdaoh/build
+
+          cmake -S raylib-5.5 -B .deps/raylib/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_GAMES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/raylib/build --parallel
+          cmake --install .deps/raylib/build
+
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:$PKG_CONFIG_PATH"
+          meson setup "$BUILD_DIR" misrc_tools --buildtype release
+          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+
+          mkdir -p dist
+          cp "$BUILD_DIR/misrc_gui.exe" dist/
+          cp "$BUILD_DIR/misrc_capture.exe" dist/
+          cp "$BUILD_DIR/misrc_extract.exe" dist/
+
+      - name: Create ZIP artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/*" -DestinationPath "misrc_gui-${{ steps.version.outputs.version }}-windows-x86_64.zip" -Force
+
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: misrc_gui-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  macos-app:
+    name: macOS APP sanity build
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build version
+        id: version
+        run: |
+          set -eux
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            VERSION="${{ inputs.release_tag }}"
+          else
+            VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="dev-${GITHUB_SHA::7}"
+            fi
+          fi
+          case "$VERSION" in
+            misrc_tools-*) VERSION="${VERSION#misrc_tools-}" ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          brew update
+          brew install cmake libusb meson nasm ninja pkg-config
+
+      - name: Build and package APP
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eux
+          DEPS_PREFIX="$PWD/.deps/install"
+
+          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+            -DINSTALL_UDEV_RULES=OFF
+          cmake --build .deps/hsdaoh/build --parallel
+          cmake --install .deps/hsdaoh/build
+
+          cmake -S raylib-5.5 -B .deps/raylib/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_GAMES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/raylib/build --parallel
+          cmake --install .deps/raylib/build
+
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:$PKG_CONFIG_PATH"
+          meson setup "$BUILD_DIR" misrc_tools --buildtype release
+          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+
+          APP_ROOT="dist/MISRC.app/Contents"
+          mkdir -p "$APP_ROOT/MacOS" "$APP_ROOT/Resources"
+          cp "$BUILD_DIR/misrc_gui" "$APP_ROOT/MacOS/MISRC"
+          chmod +x "$APP_ROOT/MacOS/MISRC"
+
+          cat > "$APP_ROOT/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>MISRC</string>
+            <key>CFBundleDisplayName</key>
+            <string>MISRC</string>
+            <key>CFBundleIdentifier</key>
+            <string>dev.misrc.gui</string>
+            <key>CFBundleVersion</key>
+            <string>__BUILD_VERSION__</string>
+            <key>CFBundleShortVersionString</key>
+            <string>__BUILD_VERSION__</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleExecutable</key>
+            <string>MISRC</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.15</string>
+          </dict>
+          </plist>
+          EOF
+          sed -i '' "s/__BUILD_VERSION__/${BUILD_VERSION}/g" "$APP_ROOT/Info.plist"
+
+          cp "$BUILD_DIR/misrc_capture" dist/
+          cp "$BUILD_DIR/misrc_extract" dist/
+          TAR_NAME="misrc_gui-${BUILD_VERSION}-macos-app.tar.gz"
+          tar -czf "$TAR_NAME" -C dist MISRC.app misrc_capture misrc_extract
+          test -f "$TAR_NAME"
+
+      - name: Upload macOS tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: misrc_gui-*-macos-app.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    runs-on: ubuntu-24.04
+    needs:
+      - linux-appimage
+      - windows-exe
+      - macos-app
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -eux
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ inputs.release_tag }}"
+            if [[ -z "$TAG" ]]; then
+              echo "release_tag is required when create_release=true" >&2
+              exit 1
+            fi
+            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "$TAG" "$GITHUB_SHA"
+              git push origin "$TAG"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/misrc_gui-*-linux-x86_64.AppImage
+            release-assets/**/misrc_gui-*-windows-x86_64.zip
+            release-assets/**/misrc_gui-*-macos-app.tar.gz

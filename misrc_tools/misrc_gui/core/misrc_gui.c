@@ -25,10 +25,15 @@
 #include "../ui/gui_popup.h"
 #include "../output/gui_record.h"
 #include "../output/gui_audio.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef MIRSC_TOOLS_VERSION
+#define MIRSC_TOOLS_VERSION "dev"
+#endif
 
 // Global exit flag (shared with capture thread)
 volatile atomic_int do_exit = 0;
@@ -63,7 +68,9 @@ int main(int argc, char **argv) {
     // Initialize raylib window
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     // Larger default so the Settings panel is usable without manual resizing.
-    InitWindow(1600, 900, "MISRC Capture");
+    char window_title[128];
+    snprintf(window_title, sizeof(window_title), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
+    InitWindow(1600, 900, window_title);
     SetWindowMinSize(1200, 750);
     SetTraceLogLevel(LOG_INFO);  // Enable debug logging (phosphor perf traces)
     SetTargetFPS(60);
