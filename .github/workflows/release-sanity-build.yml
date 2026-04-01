@@ -78,6 +78,7 @@ jobs:
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
           git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
@@ -85,7 +86,7 @@ jobs:
           cmake --build .deps/hsdaoh/build --parallel
           cmake --install .deps/hsdaoh/build
 
-          cmake -S raylib-5.5 -B .deps/raylib/build \
+          cmake -S .deps/raylib -B .deps/raylib/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_GAMES=OFF \
@@ -170,8 +171,8 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-flac
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libusb
-            mingw-w64-x86_64-libuvc
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-ninja
@@ -202,16 +203,26 @@ jobs:
         run: |
           set -euo pipefail
           DEPS_PREFIX="$PWD/.deps/install"
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${MINGW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          git clone --depth 1 https://github.com/libuvc/libuvc.git .deps/libuvc
+          cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLE=OFF \
+            -DBUILD_TEST=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/libuvc/build --parallel
+          cmake --install .deps/libuvc/build
 
           git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --parallel
           cmake --install .deps/hsdaoh/build
-
-          cmake -S raylib-5.5 -B .deps/raylib/build -G Ninja \
+          cmake -S .deps/raylib -B .deps/raylib/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_GAMES=OFF \
@@ -278,16 +289,18 @@ jobs:
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
+          FLAC_PREFIX="$(brew --prefix flac)"
 
           git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-I${FLAC_PREFIX}/include" \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --parallel
           cmake --install .deps/hsdaoh/build
-
-          cmake -S raylib-5.5 -B .deps/raylib/build \
+          cmake -S .deps/raylib -B .deps/raylib/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_GAMES=OFF \
