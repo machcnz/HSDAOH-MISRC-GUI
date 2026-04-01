@@ -282,6 +282,7 @@ static int audio_thread_main(void *ctx)
         }
         
 skip_monitoring:
+        ;
 
         // Check if recording state changed
         bool is_recording = a->app && a->app->is_recording;
@@ -354,6 +355,7 @@ a->total_bytes = 0;
         }
         
 skip_file_ops:
+        ;
         
         // RECORDING JUST STOPPED - close files and write headers
         if (was_recording && !is_recording) {

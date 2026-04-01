@@ -140,7 +140,7 @@ jobs:
           Terminal=false
           EOF
 
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/l9vyGQAAAABJRU5ErkJggg==' | base64 -d > AppDir/misrc.png
+          curl -L -o AppDir/misrc.png https://raw.githubusercontent.com/raysan5/raylib/master/logo/raylib_128x128.png
 
           curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -L -o linuxdeploy-plugin-appimage https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
@@ -253,6 +253,7 @@ jobs:
             exit 1
           fi
           cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          sed -i 's/^Libs: .*/Libs: -L${libdir} -lhsdaoh -luvc -lusb-1.0/' "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
