@@ -234,8 +234,14 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
-          cmake --build .deps/hsdaoh/build --parallel
-          cmake --install .deps/hsdaoh/build
+          cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
+          mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
+          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/"
+          cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"

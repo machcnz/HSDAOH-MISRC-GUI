@@ -118,6 +118,8 @@ static const char* const _FLAC_StreamEncoderSetNumThreadsStatusString[] = {
 #define BUFFER_AUDIO_READ_SIZE 65536*3
 #define BUFFER_TOTAL_SIZE 65536*1024
 #define BUFFER_READ_SIZE 65536*32
+#define CALLBACK_WAIT_SLEEP_MS 1
+#define CALLBACK_WAIT_MAX_RETRIES 8
 
 #define _FILE_OFFSET_BITS 64
 
@@ -149,6 +151,9 @@ typedef struct {
 	capture_handler_ctx_t handler;    /* Shared capture handler context */
 	ringbuffer_t rb;                  /* RF ringbuffer (handler.rb_rf points here) */
 	ringbuffer_t rb_audio;            /* Audio ringbuffer (handler.rb_audio points here) */
+	atomic_uint_fast32_t rb_wait_count;
+	atomic_uint_fast32_t rb_drop_count;
+	atomic_uint_fast32_t rb_audio_drop_count;
 } cli_capture_ctx_t;
 
 
@@ -389,7 +394,7 @@ static void cli_sync_event_cb(void *user_ctx, frame_sync_result_t result,
 			print_capture_message(NULL, HSDAOH_INFO, "Syncronized to HDMI input stream\n MISRC uses CRC: %s\n MISRC uses stream ids: %s\n",
 			                      yesno[((meta->crc_config == CRC_NONE) ? 0 : 1)],
 			                      yesno[((meta->flags & FLAG_STREAM_ID_PRESENT) ? 1 : 0)]);
-			if (ctx->handler.capture_audio) {
+			if (atomic_load(&ctx->handler.capture_audio)) {
 				if ((meta->flags & FLAG_STREAM_ID_PRESENT)) {
 					print_capture_message(NULL, HSDAOH_INFO, "Wait for RF and audio syncronisation...\n");
 				} else {
@@ -451,20 +456,42 @@ static void hsdaoh_callback(hsdaoh_data_info_t *data_info)
 	/* Allocate ringbuffer space */
 	uint8_t *buf_out = NULL;
 	uint8_t *buf_out_audio = NULL;
+	bool capture_rf = atomic_load(&handler->capture_rf);
+	bool capture_audio = atomic_load(&handler->capture_audio);
+	bool capture_audio_this_frame = capture_audio && handler->audio_sync_stage2;
 
-	if (handler->capture_rf) {
-		while ((buf_out = rb_write_ptr(&ctx->rb, data_info->len)) == NULL) {
+	if (capture_rf && result.stream0_bytes > 0) {
+		unsigned int tries = 0;
+		while ((buf_out = rb_write_ptr(&ctx->rb, result.stream0_bytes)) == NULL) {
 			if (do_exit) return;
-			print_capture_message(NULL, HSDAOH_WARNING, "Cannot get space in ringbuffer for next frame (RF)\n");
-			sleep_ms(4);
+			atomic_fetch_add(&ctx->rb_wait_count, 1);
+			tries++;
+			if (tries >= CALLBACK_WAIT_MAX_RETRIES) {
+				uint32_t drops = atomic_fetch_add(&ctx->rb_drop_count, 1) + 1;
+				if (drops <= 5) {
+					print_capture_message(NULL, HSDAOH_WARNING, "Dropped frame due to ringbuffer backpressure (RF)\n");
+				}
+				return;
+			}
+			sleep_ms(CALLBACK_WAIT_SLEEP_MS);
 		}
 	}
 
-	if (handler->capture_audio) {
-		while ((buf_out_audio = rb_write_ptr(&ctx->rb_audio, data_info->len)) == NULL) {
+	if (capture_audio_this_frame && result.stream1_bytes > 0) {
+		unsigned int tries = 0;
+		while ((buf_out_audio = rb_write_ptr(&ctx->rb_audio, result.stream1_bytes)) == NULL) {
 			if (do_exit) return;
-			print_capture_message(NULL, HSDAOH_WARNING, "Cannot get space in ringbuffer for next frame (audio)\n");
-			sleep_ms(4);
+			atomic_fetch_add(&ctx->rb_wait_count, 1);
+			tries++;
+			if (tries >= CALLBACK_WAIT_MAX_RETRIES) {
+				uint32_t drops = atomic_fetch_add(&ctx->rb_audio_drop_count, 1) + 1;
+				if (drops <= 5) {
+					print_capture_message(NULL, HSDAOH_WARNING, "Dropped frame due to ringbuffer backpressure (audio)\n");
+				}
+				buf_out_audio = NULL;
+				break;
+			}
+			sleep_ms(CALLBACK_WAIT_SLEEP_MS);
 		}
 	}
 
@@ -474,9 +501,9 @@ static void hsdaoh_callback(hsdaoh_data_info_t *data_info)
 	                        capture_handler_audio_filter, handler);
 
 	/* Commit to ringbuffers */
-	if (handler->capture_rf)
+	if (capture_rf && buf_out)
 		rb_write_finished(&ctx->rb, result.stream0_bytes);
-	if (handler->capture_audio)
+	if (capture_audio_this_frame && buf_out_audio)
 		rb_write_finished(&ctx->rb_audio, result.stream1_bytes);
 }
 
@@ -815,6 +842,9 @@ int main(int argc, char **argv)
 	thrd_start_t output_thread_func = (thrd_start_t)raw_file_writer;
 	cli_capture_ctx_t cap_ctx;
 	memset(&cap_ctx, 0, sizeof(cap_ctx));
+	atomic_init(&cap_ctx.rb_wait_count, 0);
+	atomic_init(&cap_ctx.rb_drop_count, 0);
+	atomic_init(&cap_ctx.rb_audio_drop_count, 0);
 	capture_handler_init(&cap_ctx.handler);
 	/* Set up CLI-specific callbacks */
 	cap_ctx.handler.progress_cb = cli_sync_progress_cb;
@@ -1021,7 +1051,7 @@ int main(int argc, char **argv)
 		usage();
 	}
 	else {
-		cap_ctx.handler.capture_rf = true;
+		atomic_store(&cap_ctx.handler.capture_rf, true);
 	}
 
 #if LIBSOXR_ENABLED == 1
@@ -1118,12 +1148,14 @@ int main(int argc, char **argv)
 	for(int i=0; i<2; i++) {
 		if (output_names[i] != NULL) {
 			if (file_open_write(&(thread_out_ctx[i].f),output_names[i],overwrite_files,true)) return -ENOENT;
+#if LIBSOXR_ENABLED == 1
 			thread_out_ctx[i].reduce_8bit = reduce_8bit[i];
 			if (out_size == 4) {
 				thread_out_ctx[i].init_scale = (reduce_8bit[i]) ? ((pad==1) ? 256.0 : 4096.0) : 65536.0;
 			} else {
 				thread_out_ctx[i].init_scale = (reduce_8bit[i]) ? ((pad==1) ? 0.00390625 : 0.0625) : 1.0;
 			}
+#endif
 #if LIBFLAC_ENABLED == 1
 			thread_out_ctx[i].flac_level = flac_level;
 			thread_out_ctx[i].flac_verify = flac_verify;
@@ -1154,7 +1186,7 @@ int main(int argc, char **argv)
 	{
 		//opening output file audio
 		if (file_open_write(&(thread_audio_ctx.f_4ch), output_name_4ch_audio, overwrite_files, true)) return -ENOENT;
-		cap_ctx.handler.capture_audio = true;
+		atomic_store(&cap_ctx.handler.capture_audio, true);
 	}
 
 	for(int i=0; i<2; i++) {
@@ -1162,7 +1194,7 @@ int main(int argc, char **argv)
 		{
 			//opening output file audio
 			if (file_open_write(&(thread_audio_ctx.f_2ch[i]), output_names_2ch_audio[i], overwrite_files, true)) return -ENOENT;
-			cap_ctx.handler.capture_audio = true;
+			atomic_store(&cap_ctx.handler.capture_audio, true);
 		}
 	}
 
@@ -1171,7 +1203,7 @@ int main(int argc, char **argv)
 		{
 			//opening output file audio
 			if (file_open_write(&(thread_audio_ctx.f_1ch[i]), output_names_1ch_audio[i], overwrite_files, true)) return -ENOENT;
-			cap_ctx.handler.capture_audio = true;
+			atomic_store(&cap_ctx.handler.capture_audio, true);
 		}
 	}
 
@@ -1187,7 +1219,7 @@ int main(int argc, char **argv)
 		if (file_open_write(&output_raw, output_name_raw, overwrite_files, true)) return -ENOENT;
 	}
 
-	if(cap_ctx.handler.capture_audio) {
+	if(atomic_load(&cap_ctx.handler.capture_audio)) {
 		rb_init(&cap_ctx.rb_audio,"capture_audio_ringbuffer",BUFFER_AUDIO_TOTAL_SIZE);
 		cap_ctx.handler.rb_audio = &cap_ctx.rb_audio;
 		thread_audio_ctx.rb = &cap_ctx.rb_audio;
@@ -1328,6 +1360,11 @@ int main(int argc, char **argv)
 		r = thrd_join(thread_audio, NULL);
 		if (r != thrd_success) fprintf(stderr, "Failed to join audio thread.\n");
 	}
+
+	fprintf(stderr, "[CAP] Backpressure summary: waits=%u rf_drops=%u audio_drops=%u\n",
+	        (unsigned)atomic_load(&cap_ctx.rb_wait_count),
+	        (unsigned)atomic_load(&cap_ctx.rb_drop_count),
+	        (unsigned)atomic_load(&cap_ctx.rb_audio_drop_count));
 
 	return 0;
 }
