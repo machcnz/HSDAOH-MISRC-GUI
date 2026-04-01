@@ -77,10 +77,13 @@ jobs:
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
-          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
+          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
+          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --parallel
@@ -222,10 +225,13 @@ jobs:
           cmake --build .deps/libuvc/build --parallel
           cmake --install .deps/libuvc/build
 
-          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
+          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
+          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --parallel
@@ -304,12 +310,17 @@ jobs:
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
           FLAC_PREFIX="$(brew --prefix flac)"
+          BREW_PREFIX="$(brew --prefix)"
+          export CPPFLAGS="-I${BREW_PREFIX}/include ${CPPFLAGS:-}"
 
-          git clone --depth 1 https://github.com/steve-m/hsdaoh.git .deps/hsdaoh
+          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
+          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
+          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-I${FLAC_PREFIX}/include" \
+            -DCMAKE_C_FLAGS="-I${FLAC_PREFIX}/include -I${BREW_PREFIX}/include" \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --parallel
