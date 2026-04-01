@@ -170,6 +170,8 @@ typedef struct {
     // FLAC supports 8/12/16; RAW supports 8/16 (12 is disabled in RAW UI).
     uint8_t rf_bits_a;
     uint8_t rf_bits_b;
+    // Optional per-channel RF tags used in auto naming (e.g. "luma", "chroma")
+    char rf_channel_tags[2][32];
 
     // Capture control
     uint64_t sample_count;                     // Number of samples (0 = infinite)
@@ -224,6 +226,8 @@ typedef struct {
 
     // Per-channel audio labels (for auto naming, e.g. "linear", "baseband")
     char audio_1ch_labels[4][32];
+    // Optional tags for non-mono audio outputs: [0]=4ch, [1]=stereo ch1/2, [2]=stereo ch3/4
+    char audio_output_tags[3][32];
 
     // Display settings (existing)
     bool show_grid;

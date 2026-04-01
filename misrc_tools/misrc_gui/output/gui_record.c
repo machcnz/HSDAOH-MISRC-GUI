@@ -577,48 +577,89 @@ static void gui_record_apply_auto_names(gui_app_t *app) {
     if (app->settings.use_flac) {
         uint8_t bits_a = clamp_rf_bits_flac(app->settings.rf_bits_a);
         uint8_t bits_b = clamp_rf_bits_flac(app->settings.rf_bits_b);
+        char rate_tag_a[32] = {0};
+        char rate_tag_b[32] = {0};
+        char rf_tag_a[40] = {0};
+        char rf_tag_b[40] = {0};
+        if (app->settings.enable_resample_a) format_msps_from_khz(rate_tag_a, sizeof(rate_tag_a), app->settings.resample_rate_a);
+        if (app->settings.enable_resample_b) format_msps_from_khz(rate_tag_b, sizeof(rate_tag_b), app->settings.resample_rate_b);
+        sanitize_tag(rf_tag_a, sizeof(rf_tag_a), app->settings.rf_channel_tags[0]);
+        sanitize_tag(rf_tag_b, sizeof(rf_tag_b), app->settings.rf_channel_tags[1]);
 
-        char tag_a[32] = {0};
-        char tag_b[32] = {0};
-        if (app->settings.enable_resample_a) format_msps_from_khz(tag_a, sizeof(tag_a), app->settings.resample_rate_a);
-        if (app->settings.enable_resample_b) format_msps_from_khz(tag_b, sizeof(tag_b), app->settings.resample_rate_b);
-
-        if (tag_a[0]) {
-            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_%s_chA.flac", base, (unsigned)bits_a, tag_a);
+        if (rf_tag_a[0] && rate_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.flac", base, rf_tag_a, (unsigned)bits_a, rate_tag_a);
+        } else if (rf_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit.flac", base, rf_tag_a, (unsigned)bits_a);
+        } else if (rate_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit_%s.flac", base, (unsigned)bits_a, rate_tag_a);
         } else {
-            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_chA.flac", base, (unsigned)bits_a);
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit.flac", base, (unsigned)bits_a);
         }
-        if (tag_b[0]) {
-            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_%s_chB.flac", base, (unsigned)bits_b, tag_b);
+        if (rf_tag_b[0] && rate_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.flac", base, rf_tag_b, (unsigned)bits_b, rate_tag_b);
+        } else if (rf_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit.flac", base, rf_tag_b, (unsigned)bits_b);
+        } else if (rate_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit_%s.flac", base, (unsigned)bits_b, rate_tag_b);
         } else {
-            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_chB.flac", base, (unsigned)bits_b);
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit.flac", base, (unsigned)bits_b);
         }
     } else {
         // RAW: 8/16 only
         uint8_t bits_a = rf_bits_for_raw(app->settings.rf_bits_a);
         uint8_t bits_b = rf_bits_for_raw(app->settings.rf_bits_b);
+        char rate_tag_a[32] = {0};
+        char rate_tag_b[32] = {0};
+        char rf_tag_a[40] = {0};
+        char rf_tag_b[40] = {0};
+        if (app->settings.enable_resample_a) format_msps_from_khz(rate_tag_a, sizeof(rate_tag_a), app->settings.resample_rate_a);
+        if (app->settings.enable_resample_b) format_msps_from_khz(rate_tag_b, sizeof(rate_tag_b), app->settings.resample_rate_b);
+        sanitize_tag(rf_tag_a, sizeof(rf_tag_a), app->settings.rf_channel_tags[0]);
+        sanitize_tag(rf_tag_b, sizeof(rf_tag_b), app->settings.rf_channel_tags[1]);
 
-        char tag_a[32] = {0};
-        char tag_b[32] = {0};
-        if (app->settings.enable_resample_a) format_msps_from_khz(tag_a, sizeof(tag_a), app->settings.resample_rate_a);
-        if (app->settings.enable_resample_b) format_msps_from_khz(tag_b, sizeof(tag_b), app->settings.resample_rate_b);
-
-        if (tag_a[0]) {
-            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_%s_chA.raw", base, (unsigned)bits_a, tag_a);
+        if (rf_tag_a[0] && rate_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.raw", base, rf_tag_a, (unsigned)bits_a, rate_tag_a);
+        } else if (rf_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit.raw", base, rf_tag_a, (unsigned)bits_a);
+        } else if (rate_tag_a[0]) {
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit_%s.raw", base, (unsigned)bits_a, rate_tag_a);
         } else {
-            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "%s_%u-bit_chA.raw", base, (unsigned)bits_a);
+            snprintf(app->settings.output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit.raw", base, (unsigned)bits_a);
         }
-        if (tag_b[0]) {
-            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_%s_chB.raw", base, (unsigned)bits_b, tag_b);
+        if (rf_tag_b[0] && rate_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.raw", base, rf_tag_b, (unsigned)bits_b, rate_tag_b);
+        } else if (rf_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit.raw", base, rf_tag_b, (unsigned)bits_b);
+        } else if (rate_tag_b[0]) {
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit_%s.raw", base, (unsigned)bits_b, rate_tag_b);
         } else {
-            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "%s_%u-bit_chB.raw", base, (unsigned)bits_b);
+            snprintf(app->settings.output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit.raw", base, (unsigned)bits_b);
         }
     }
 
     // Audio filenames (WAV)
-    snprintf(app->settings.audio_4ch_filename, MAX_FILENAME_LEN, "%s_quad_4ch.wav", base);
-    snprintf(app->settings.audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_stereo_ch1_ch2.wav", base);
-    snprintf(app->settings.audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_stereo_ch3_ch4.wav", base);
+    char audio_tag_4ch[40] = {0};
+    char audio_tag_12[40] = {0};
+    char audio_tag_34[40] = {0};
+    sanitize_tag(audio_tag_4ch, sizeof(audio_tag_4ch), app->settings.audio_output_tags[0]);
+    sanitize_tag(audio_tag_12, sizeof(audio_tag_12), app->settings.audio_output_tags[1]);
+    sanitize_tag(audio_tag_34, sizeof(audio_tag_34), app->settings.audio_output_tags[2]);
+
+    if (audio_tag_4ch[0]) {
+        snprintf(app->settings.audio_4ch_filename, MAX_FILENAME_LEN, "%s_%s_quad_4ch.wav", base, audio_tag_4ch);
+    } else {
+        snprintf(app->settings.audio_4ch_filename, MAX_FILENAME_LEN, "%s_quad_4ch.wav", base);
+    }
+    if (audio_tag_12[0]) {
+        snprintf(app->settings.audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_%s_stereo_ch1_ch2.wav", base, audio_tag_12);
+    } else {
+        snprintf(app->settings.audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_stereo_ch1_ch2.wav", base);
+    }
+    if (audio_tag_34[0]) {
+        snprintf(app->settings.audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_%s_stereo_ch3_ch4.wav", base, audio_tag_34);
+    } else {
+        snprintf(app->settings.audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_stereo_ch3_ch4.wav", base);
+    }
 
     for (int i = 0; i < 4; i++) {
         char tag[40];

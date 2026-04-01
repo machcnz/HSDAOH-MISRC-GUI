@@ -91,6 +91,151 @@ const char* gui_settings_get_desktop_path(void) {
     return desktop_path;
 }
 
+static uint8_t clamp_rf_bits_flac(uint8_t bits) {
+    if (bits == 8 || bits == 12 || bits == 16) return bits;
+    return 16;
+}
+
+static uint8_t rf_bits_for_raw(uint8_t requested) {
+    // RAW supports 8/16 only; treat 12 as 16.
+    return (requested == 8) ? 8 : 16;
+}
+
+static void format_msps_from_khz(char *dst, size_t dst_len, float khz) {
+    if (!dst || dst_len == 0) return;
+    uint32_t khz_u = (uint32_t)(khz + 0.5f);
+    if ((khz_u % 1000U) == 0U) {
+        snprintf(dst, dst_len, "%umsps", khz_u / 1000U);
+    } else {
+        snprintf(dst, dst_len, "%.1fmsps", (double)khz / 1000.0);
+    }
+}
+
+static void sanitize_tag(char *dst, size_t dst_len, const char *src) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!src || !src[0]) return;
+
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 1 < dst_len; i++) {
+        char c = src[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+            dst[j++] = c;
+        } else if (c == ' ' || c == '\t') {
+            dst[j++] = '-';
+        }
+    }
+    dst[j] = '\0';
+
+    while (j > 0 && dst[j - 1] == '-') {
+        dst[--j] = '\0';
+    }
+}
+
+// Keep derived filenames in sync with current auto-naming settings.
+// This refresh does NOT append capture-start timestamp (that is applied when recording starts).
+static void gui_settings_refresh_auto_names(gui_settings_t *settings) {
+    if (!settings) return;
+    if (!settings->auto_names_enabled) return;
+
+    const char *base = settings->output_base_name[0] ? settings->output_base_name : "capture";
+
+    if (settings->use_flac) {
+        uint8_t bits_a = clamp_rf_bits_flac(settings->rf_bits_a);
+        uint8_t bits_b = clamp_rf_bits_flac(settings->rf_bits_b);
+        char rate_tag_a[32] = {0};
+        char rate_tag_b[32] = {0};
+        char rf_tag_a[40] = {0};
+        char rf_tag_b[40] = {0};
+        if (settings->enable_resample_a) format_msps_from_khz(rate_tag_a, sizeof(rate_tag_a), settings->resample_rate_a);
+        if (settings->enable_resample_b) format_msps_from_khz(rate_tag_b, sizeof(rate_tag_b), settings->resample_rate_b);
+        sanitize_tag(rf_tag_a, sizeof(rf_tag_a), settings->rf_channel_tags[0]);
+        sanitize_tag(rf_tag_b, sizeof(rf_tag_b), settings->rf_channel_tags[1]);
+
+        if (rf_tag_a[0] && rate_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.flac", base, rf_tag_a, (unsigned)bits_a, rate_tag_a);
+        } else if (rf_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit.flac", base, rf_tag_a, (unsigned)bits_a);
+        } else if (rate_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit_%s.flac", base, (unsigned)bits_a, rate_tag_a);
+        } else {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit.flac", base, (unsigned)bits_a);
+        }
+        if (rf_tag_b[0] && rate_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.flac", base, rf_tag_b, (unsigned)bits_b, rate_tag_b);
+        } else if (rf_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit.flac", base, rf_tag_b, (unsigned)bits_b);
+        } else if (rate_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit_%s.flac", base, (unsigned)bits_b, rate_tag_b);
+        } else {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit.flac", base, (unsigned)bits_b);
+        }
+    } else {
+        uint8_t bits_a = rf_bits_for_raw(settings->rf_bits_a);
+        uint8_t bits_b = rf_bits_for_raw(settings->rf_bits_b);
+        char rate_tag_a[32] = {0};
+        char rate_tag_b[32] = {0};
+        char rf_tag_a[40] = {0};
+        char rf_tag_b[40] = {0};
+        if (settings->enable_resample_a) format_msps_from_khz(rate_tag_a, sizeof(rate_tag_a), settings->resample_rate_a);
+        if (settings->enable_resample_b) format_msps_from_khz(rate_tag_b, sizeof(rate_tag_b), settings->resample_rate_b);
+        sanitize_tag(rf_tag_a, sizeof(rf_tag_a), settings->rf_channel_tags[0]);
+        sanitize_tag(rf_tag_b, sizeof(rf_tag_b), settings->rf_channel_tags[1]);
+
+        if (rf_tag_a[0] && rate_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.raw", base, rf_tag_a, (unsigned)bits_a, rate_tag_a);
+        } else if (rf_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "%s_%s_%u-bit.raw", base, rf_tag_a, (unsigned)bits_a);
+        } else if (rate_tag_a[0]) {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit_%s.raw", base, (unsigned)bits_a, rate_tag_a);
+        } else {
+            snprintf(settings->output_filename_a, MAX_FILENAME_LEN, "rfA_%s_%u-bit.raw", base, (unsigned)bits_a);
+        }
+        if (rf_tag_b[0] && rate_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit_%s.raw", base, rf_tag_b, (unsigned)bits_b, rate_tag_b);
+        } else if (rf_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "%s_%s_%u-bit.raw", base, rf_tag_b, (unsigned)bits_b);
+        } else if (rate_tag_b[0]) {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit_%s.raw", base, (unsigned)bits_b, rate_tag_b);
+        } else {
+            snprintf(settings->output_filename_b, MAX_FILENAME_LEN, "rfB_%s_%u-bit.raw", base, (unsigned)bits_b);
+        }
+    }
+
+    char audio_tag_4ch[40] = {0};
+    char audio_tag_12[40] = {0};
+    char audio_tag_34[40] = {0};
+    sanitize_tag(audio_tag_4ch, sizeof(audio_tag_4ch), settings->audio_output_tags[0]);
+    sanitize_tag(audio_tag_12, sizeof(audio_tag_12), settings->audio_output_tags[1]);
+    sanitize_tag(audio_tag_34, sizeof(audio_tag_34), settings->audio_output_tags[2]);
+
+    if (audio_tag_4ch[0]) {
+        snprintf(settings->audio_4ch_filename, MAX_FILENAME_LEN, "%s_%s_quad_4ch.wav", base, audio_tag_4ch);
+    } else {
+        snprintf(settings->audio_4ch_filename, MAX_FILENAME_LEN, "%s_quad_4ch.wav", base);
+    }
+    if (audio_tag_12[0]) {
+        snprintf(settings->audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_%s_stereo_ch1_ch2.wav", base, audio_tag_12);
+    } else {
+        snprintf(settings->audio_2ch_12_filename, MAX_FILENAME_LEN, "%s_stereo_ch1_ch2.wav", base);
+    }
+    if (audio_tag_34[0]) {
+        snprintf(settings->audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_%s_stereo_ch3_ch4.wav", base, audio_tag_34);
+    } else {
+        snprintf(settings->audio_2ch_34_filename, MAX_FILENAME_LEN, "%s_stereo_ch3_ch4.wav", base);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        char tag[40];
+        sanitize_tag(tag, sizeof(tag), settings->audio_1ch_labels[i]);
+        if (tag[0]) {
+            snprintf(settings->audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_%s_audio_ch%d.wav", base, tag, i + 1);
+        } else {
+            snprintf(settings->audio_1ch_filenames[i], MAX_FILENAME_LEN, "%s_audio_ch%d.wav", base, i + 1);
+        }
+    }
+}
 void gui_settings_init_defaults(gui_settings_t *settings) {
     if (!settings) return;
     
@@ -118,8 +263,8 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->record_limit_seconds = 0;
 
     // Default filenames (used when auto naming is disabled)
-    strcpy(settings->output_filename_a, "capture_a.flac");
-    strcpy(settings->output_filename_b, "capture_b.flac");
+    strcpy(settings->output_filename_a, "rfA_capture.flac");
+    strcpy(settings->output_filename_b, "rfB_capture.flac");
     strcpy(settings->aux_filename, "aux_data.bin");
     strcpy(settings->raw_filename, "raw_data.bin");
     strcpy(settings->audio_4ch_filename, "quad_4ch.wav");
@@ -138,6 +283,14 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     // Per-channel audio labels (optional, used for auto naming)
     for (int i = 0; i < 4; i++) {
         settings->audio_1ch_labels[i][0] = '\0';
+    }
+    // Optional tags for non-mono audio outputs
+    for (int i = 0; i < 3; i++) {
+        settings->audio_output_tags[i][0] = '\0';
+    }
+    // Optional per-channel RF tags
+    for (int i = 0; i < 2; i++) {
+        settings->rf_channel_tags[i][0] = '\0';
     }
     
     // Capture control defaults
@@ -187,6 +340,9 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->show_grid = true;
     settings->time_scale = 1.0f;
     settings->amplitude_scale = 1.0f;
+
+    // Keep derived filenames coherent with default auto-naming state.
+    gui_settings_refresh_auto_names(settings);
 }
 
 // Simple JSON-like format for settings
@@ -218,6 +374,8 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"append_timestamp_on_capture_start\": %s,\n", settings->append_timestamp_on_capture_start ? "true" : "false");
     fprintf(f, "  \"rf_bits_a\": %u,\n", (unsigned)settings->rf_bits_a);
     fprintf(f, "  \"rf_bits_b\": %u,\n", (unsigned)settings->rf_bits_b);
+    fprintf(f, "  \"rf_tag_a\": \"%s\",\n", settings->rf_channel_tags[0]);
+    fprintf(f, "  \"rf_tag_b\": \"%s\",\n", settings->rf_channel_tags[1]);
     fprintf(f, "  \"output_filename_a\": \"%s\",\n", settings->output_filename_a);
     fprintf(f, "  \"output_filename_b\": \"%s\",\n", settings->output_filename_b);
     fprintf(f, "  \"capture_a\": %s,\n", settings->capture_a ? "true" : "false");
@@ -240,6 +398,9 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"audio_1ch_2_label\": \"%s\",\n", settings->audio_1ch_labels[1]);
     fprintf(f, "  \"audio_1ch_3_label\": \"%s\",\n", settings->audio_1ch_labels[2]);
     fprintf(f, "  \"audio_1ch_4_label\": \"%s\",\n", settings->audio_1ch_labels[3]);
+    fprintf(f, "  \"audio_tag_4ch\": \"%s\",\n", settings->audio_output_tags[0]);
+    fprintf(f, "  \"audio_tag_2ch_12\": \"%s\",\n", settings->audio_output_tags[1]);
+    fprintf(f, "  \"audio_tag_2ch_34\": \"%s\",\n", settings->audio_output_tags[2]);
 
     fprintf(f, "  \"enable_audio_4ch\": %s,\n", settings->enable_audio_4ch ? "true" : "false");
     fprintf(f, "  \"enable_audio_2ch_12\": %s,\n", settings->enable_audio_2ch_12 ? "true" : "false");
@@ -382,7 +543,6 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     FILE *fp = popen(cmd, "r");
     if (!fp) return false;
     if (!fgets(picked, sizeof(picked), fp)) {
-    if (!fgets(buf, sizeof(buf), fp)) {
         pclose(fp);
         return false;
     }
@@ -472,9 +632,14 @@ bool gui_settings_choose_playback_file(gui_settings_t *settings, int channel) {
     (void)pclose(fp);
     trim_newlines(picked);
 #else
-    // Linux/BSD: try zenity
-    // NOTE: if zenity is not installed, this returns false and the UI should tell user to edit settings.
-    const char *cmd = "sh -c 'command -v zenity >/dev/null 2>&1 && zenity --file-selection --title=\"Select FLAC playback file\" --file-filter=\"*.flac\"'";
+    // Linux/BSD: try zenity first, then kdialog.
+    const char *cmd =
+        "sh -c '"
+        "if command -v zenity >/dev/null 2>&1; then "
+        "zenity --file-selection --title=\"Select FLAC playback file\" --file-filter=\"*.flac\"; "
+        "elif command -v kdialog >/dev/null 2>&1; then "
+        "kdialog --getopenfilename \"$HOME\" \"*.flac|FLAC files (*.flac)\"; "
+        "fi'";
     FILE *fp = popen(cmd, "r");
     if (!fp) return false;
     if (!fgets(picked, sizeof(picked), fp)) {
@@ -559,6 +724,14 @@ void gui_settings_load(gui_settings_t *settings) {
     }
     if ((value = find_value(content, "rf_bits_b")) != NULL) {
         settings->rf_bits_b = (uint8_t)atoi(value);
+    }
+    if ((value = find_value(content, "rf_tag_a")) != NULL) {
+        strncpy(settings->rf_channel_tags[0], value, sizeof(settings->rf_channel_tags[0]) - 1);
+        settings->rf_channel_tags[0][sizeof(settings->rf_channel_tags[0]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "rf_tag_b")) != NULL) {
+        strncpy(settings->rf_channel_tags[1], value, sizeof(settings->rf_channel_tags[1]) - 1);
+        settings->rf_channel_tags[1][sizeof(settings->rf_channel_tags[1]) - 1] = '\0';
     }
 
     if ((value = find_value(content, "output_filename_a")) != NULL) {
@@ -701,6 +874,18 @@ void gui_settings_load(gui_settings_t *settings) {
         strncpy(settings->audio_1ch_labels[3], value, sizeof(settings->audio_1ch_labels[3]) - 1);
         settings->audio_1ch_labels[3][sizeof(settings->audio_1ch_labels[3]) - 1] = '\0';
     }
+    if ((value = find_value(content, "audio_tag_4ch")) != NULL) {
+        strncpy(settings->audio_output_tags[0], value, sizeof(settings->audio_output_tags[0]) - 1);
+        settings->audio_output_tags[0][sizeof(settings->audio_output_tags[0]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "audio_tag_2ch_12")) != NULL) {
+        strncpy(settings->audio_output_tags[1], value, sizeof(settings->audio_output_tags[1]) - 1);
+        settings->audio_output_tags[1][sizeof(settings->audio_output_tags[1]) - 1] = '\0';
+    }
+    if ((value = find_value(content, "audio_tag_2ch_34")) != NULL) {
+        strncpy(settings->audio_output_tags[2], value, sizeof(settings->audio_output_tags[2]) - 1);
+        settings->audio_output_tags[2][sizeof(settings->audio_output_tags[2]) - 1] = '\0';
+    }
 
     if ((value = find_value(content, "enable_audio_4ch")) != NULL) {
         settings->enable_audio_4ch = (strcmp(value, "true") == 0);
@@ -757,6 +942,9 @@ void gui_settings_load(gui_settings_t *settings) {
     if (settings->output_base_name[0] == '\0') {
         strcpy(settings->output_base_name, "capture");
     }
+
+    // Keep auto-derived names in sync on startup (RF prefixes are conditional on empty RF tags).
+    gui_settings_refresh_auto_names(settings);
 
     free(content);
 }
