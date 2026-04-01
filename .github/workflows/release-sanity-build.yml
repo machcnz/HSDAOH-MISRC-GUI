@@ -62,6 +62,7 @@ jobs:
             libgl1-mesa-dev \
             libusb-1.0-0-dev \
             libuvc-dev \
+            libsoxr-dev \
             libx11-dev \
             libxcursor-dev \
             libxi-dev \
@@ -182,6 +183,7 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-soxr
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-ninja
@@ -240,7 +242,16 @@ jobs:
           cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
           cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
           cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/"
+          if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh_static.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          elif [[ -f .deps/hsdaoh/build/src/hsdaoh_static.lib ]]; then
+            cp .deps/hsdaoh/build/src/hsdaoh_static.lib "$DEPS_PREFIX/lib/libhsdaoh.a"
+          else
+            echo "hsdaoh static library not found in expected build output paths" >&2
+            exit 1
+          fi
           cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
@@ -307,7 +318,7 @@ jobs:
         run: |
           set -eux
           brew update
-          brew install cmake flac libusb libuvc meson nasm ninja pkg-config
+          brew install cmake flac libusb libuvc meson nasm ninja pkg-config soxr
 
       - name: Build and package APP
         env:
