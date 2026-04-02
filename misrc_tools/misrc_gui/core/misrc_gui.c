@@ -47,10 +47,31 @@ static Font fonts[FONT_COUNT];
 void clay_error_handler(Clay_ErrorData error) {
     fprintf(stderr, "Clay Error: %s\n", error.errorText.chars);
 }
+static void print_usage(const char *program_name) {
+    fprintf(stdout,
+            "MISRC GUI %s\n"
+            "Usage:\n"
+            "  %s [--help] [--version] [--smoke-test]\n"
+            "\n"
+            "No arguments launch the GUI.\n",
+            MIRSC_TOOLS_VERSION,
+            program_name ? program_name : "misrc_gui");
+}
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    if (argc > 1) {
+        if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) {
+            print_usage(argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[1], "--version") == 0) {
+            fprintf(stdout, "%s\n", MIRSC_TOOLS_VERSION);
+            return 0;
+        }
+        if (strcmp(argv[1], "--smoke-test") == 0) {
+            return 0;
+        }
+    }
 
     // Initialize application state
     gui_app_t app = {0};

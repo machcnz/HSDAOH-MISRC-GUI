@@ -270,7 +270,6 @@ if raylib_dep.found()
     '-funroll-loops',         # Unroll loops for better performance
     '-ftree-vectorize',       # Enable auto-vectorization
     '-ffast-math',            # Fast floating-point (safe for video/audio processing)
-    '-march=native',          # Optimize for current CPU
   ]
 
   # GUI doesn't need all the ldflags_capture (e.g., onecore conflicts with raylib's CloseWindow)

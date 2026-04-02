@@ -24,8 +24,20 @@ env:
 
 jobs:
   linux-appimage:
-    name: Linux AppImage sanity build
-    runs-on: ubuntu-24.04
+    name: Linux AppImage sanity build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            linuxdeploy_arch: x86_64
+            artifact_suffix: linux-x86_64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            linuxdeploy_arch: aarch64
+            artifact_suffix: linux-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -113,9 +125,25 @@ jobs:
           meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
           test -x "$BUILD_DIR/misrc_gui"
 
+      - name: Smoke test built binaries
+        run: |
+          set -eux
+          "$BUILD_DIR/misrc_gui" --smoke-test
+          set +e
+          "$BUILD_DIR/misrc_capture" -h > /tmp/misrc_capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          "$BUILD_DIR/misrc_extract" -h > /tmp/misrc_extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" /tmp/misrc_capture_help.txt
+          grep -qi "Usage" /tmp/misrc_extract_help.txt
+
       - name: Package AppImage artifact
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
+          LINUXDEPLOY_ARCH: ${{ matrix.linuxdeploy_arch }}
         run: |
           set -eux
           mkdir -p AppDir/usr/bin
@@ -126,7 +154,22 @@ jobs:
           cat > AppDir/AppRun <<'EOF'
           #!/usr/bin/env bash
           HERE="$(dirname "$(readlink -f "$0")")"
-          exec "$HERE/usr/bin/misrc_gui" "$@"
+          if [[ $# -eq 0 ]]; then
+            exec "$HERE/usr/bin/misrc_gui"
+          fi
+          case "$1" in
+            capture)
+              shift
+              exec "$HERE/usr/bin/misrc_capture" "$@"
+              ;;
+            extract)
+              shift
+              exec "$HERE/usr/bin/misrc_extract" "$@"
+              ;;
+            *)
+              exec "$HERE/usr/bin/misrc_gui" "$@"
+              ;;
+          esac
           EOF
           chmod +x AppDir/AppRun
 
@@ -142,26 +185,38 @@ jobs:
 
           curl -L -o AppDir/misrc.png https://raw.githubusercontent.com/raysan5/raylib/master/logo/raylib_128x128.png
 
-          curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -L -o linuxdeploy-plugin-appimage https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          curl -L -o linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
+          curl -L -o linuxdeploy-plugin-appimage "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${LINUXDEPLOY_ARCH}.AppImage"
           chmod +x linuxdeploy linuxdeploy-plugin-appimage
 
-          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./linuxdeploy \
+          ARCH="$LINUXDEPLOY_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 ./linuxdeploy \
             --appdir AppDir \
             -e AppDir/usr/bin/misrc_gui \
             -d AppDir/misrc.desktop \
             -i AppDir/misrc.png \
             --output appimage
 
-          APPIMAGE_NAME="misrc_gui-${BUILD_VERSION}-linux-x86_64.AppImage"
+          APPIMAGE_NAME="misrc_gui-${BUILD_VERSION}-${{ matrix.artifact_suffix }}.AppImage"
           mv ./*.AppImage "$APPIMAGE_NAME"
           test -f "$APPIMAGE_NAME"
+
+          APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" --smoke-test
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" capture -h > /tmp/appimage_capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" extract -h > /tmp/appimage_extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" /tmp/appimage_capture_help.txt
+          grep -qi "Usage" /tmp/appimage_extract_help.txt
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
-          name: linux-appimage
-          path: misrc_gui-*-linux-x86_64.AppImage
+          name: linux-appimage-${{ matrix.arch }}
+          path: misrc_gui-*-${{ matrix.artifact_suffix }}.AppImage
           if-no-files-found: error
 
   windows-exe:
@@ -276,6 +331,43 @@ jobs:
           cp "$BUILD_DIR/misrc_gui.exe" dist/
           cp "$BUILD_DIR/misrc_capture.exe" dist/
           cp "$BUILD_DIR/misrc_extract.exe" dist/
+          copy_runtime_dlls() {
+            local target="$1"
+            while IFS= read -r dll; do
+              case "$dll" in
+                api-ms-win-*|KERNEL32.dll|USER32.dll|GDI32.dll|SHELL32.dll|WINMM.dll|ole32.dll|msvcrt.dll|MF.dll|MFPlat.DLL|MFReadWrite.dll)
+                  continue
+                  ;;
+              esac
+              local src
+              src="$(find "$MINGW_PREFIX/bin" -maxdepth 1 -iname "$dll" -print -quit)"
+              if [[ -z "$src" ]]; then
+                echo "Required runtime DLL not found in MINGW_PREFIX: $dll" >&2
+                exit 1
+              fi
+              local dst="dist/$(basename "$src")"
+              if [[ ! -f "$dst" ]]; then
+                cp "$src" "$dst"
+                copy_runtime_dlls "$dst"
+              fi
+            done < <(objdump -p "$target" | awk '/DLL Name:/ {print $3}')
+          }
+
+          for BIN in dist/*.exe; do
+            copy_runtime_dlls "$BIN"
+          done
+
+          ./dist/misrc_gui.exe --smoke-test
+          set +e
+          ./dist/misrc_capture.exe -h > capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          ./dist/misrc_extract.exe -h > extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" capture_help.txt
+          grep -qi "Usage" extract_help.txt
 
       - name: Create ZIP artifact
         shell: pwsh
@@ -289,9 +381,17 @@ jobs:
           path: misrc_gui-*-windows-x86_64.zip
           if-no-files-found: error
 
-  macos-app:
-    name: macOS APP sanity build
-    runs-on: macos-14
+  macos-app-build:
+    name: macOS APP build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -321,15 +421,19 @@ jobs:
           brew update
           brew install cmake flac libusb libuvc meson nasm ninja pkg-config libsoxr
 
-      - name: Build and package APP
+      - name: Build and stage architecture app bundle
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
+          MACOS_ARCH: ${{ matrix.arch }}
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
           FLAC_PREFIX="$(brew --prefix flac)"
           BREW_PREFIX="$(brew --prefix)"
           export CPPFLAGS="-I${BREW_PREFIX}/include ${CPPFLAGS:-}"
+          export CFLAGS="-arch ${MACOS_ARCH} ${CFLAGS:-}"
+          export CXXFLAGS="-arch ${MACOS_ARCH} ${CXXFLAGS:-}"
+          export LDFLAGS="-arch ${MACOS_ARCH} ${LDFLAGS:-}"
 
           HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
           git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
@@ -338,6 +442,7 @@ jobs:
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-I${FLAC_PREFIX}/include -I${BREW_PREFIX}/include" \
+            -DCMAKE_OSX_ARCHITECTURES="${MACOS_ARCH}" \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
@@ -350,6 +455,7 @@ jobs:
           done
           cmake -S .deps/raylib -B .deps/raylib/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="${MACOS_ARCH}" \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_GAMES=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
@@ -361,10 +467,25 @@ jobs:
           meson setup "$BUILD_DIR" misrc_tools --buildtype release
           meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
 
+          "$BUILD_DIR/misrc_gui" --smoke-test
+          set +e
+          "$BUILD_DIR/misrc_capture" -h > /tmp/macos_capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          "$BUILD_DIR/misrc_extract" -h > /tmp/macos_extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" /tmp/macos_capture_help.txt
+          grep -qi "Usage" /tmp/macos_extract_help.txt
+
           APP_ROOT="dist/MISRC.app/Contents"
-          mkdir -p "$APP_ROOT/MacOS" "$APP_ROOT/Resources"
+          FW_DIR="$APP_ROOT/Frameworks"
+          mkdir -p "$APP_ROOT/MacOS" "$APP_ROOT/Resources" "$FW_DIR"
           cp "$BUILD_DIR/misrc_gui" "$APP_ROOT/MacOS/MISRC"
-          chmod +x "$APP_ROOT/MacOS/MISRC"
+          cp "$BUILD_DIR/misrc_capture" "$APP_ROOT/MacOS/misrc_capture"
+          cp "$BUILD_DIR/misrc_extract" "$APP_ROOT/MacOS/misrc_extract"
+          chmod +x "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"
 
           cat > "$APP_ROOT/Info.plist" <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -392,9 +513,199 @@ jobs:
           EOF
           sed -i '' "s/__BUILD_VERSION__/${BUILD_VERSION}/g" "$APP_ROOT/Info.plist"
 
-          cp "$BUILD_DIR/misrc_capture" dist/
-          cp "$BUILD_DIR/misrc_extract" dist/
-          TAR_NAME="misrc_gui-${BUILD_VERSION}-macos-app.tar.gz"
+          cat > dist/misrc_capture <<'EOF'
+          #!/usr/bin/env bash
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          exec "$HERE/MISRC.app/Contents/MacOS/misrc_capture" "$@"
+          EOF
+          cat > dist/misrc_extract <<'EOF'
+          #!/usr/bin/env bash
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          exec "$HERE/MISRC.app/Contents/MacOS/misrc_extract" "$@"
+          EOF
+          chmod +x dist/misrc_capture dist/misrc_extract
+
+          shopt -s nullglob
+          is_system_lib() {
+            case "$1" in
+              /System/*|/usr/lib/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          resolve_dep_path() {
+            local dep="$1"
+            if [[ "$dep" == @rpath/* ]]; then
+              local name="${dep#@rpath/}"
+              local candidates=(
+                "$DEPS_PREFIX/lib/$name"
+                "$DEPS_PREFIX/lib64/$name"
+                "$BREW_PREFIX/lib/$name"
+                $BREW_PREFIX/opt/*/lib/"$name"
+              )
+              local candidate
+              for candidate in "${candidates[@]}"; do
+                if [[ -f "$candidate" ]]; then
+                  printf '%s\n' "$candidate"
+                  return 0
+                fi
+              done
+              return 1
+            fi
+            printf '%s\n' "$dep"
+          }
+
+          collect_dep_tree() {
+            local dep="$1"
+            if is_system_lib "$dep"; then
+              return 0
+            fi
+            local resolved
+            resolved="$(resolve_dep_path "$dep")" || {
+              echo "Unable to resolve dylib dependency: $dep" >&2
+              return 1
+            }
+            local base
+            base="$(basename "$resolved")"
+            if [[ ! -f "$FW_DIR/$base" ]]; then
+              cp "$resolved" "$FW_DIR/$base"
+              chmod +w "$FW_DIR/$base"
+              install_name_tool -id "@rpath/$base" "$FW_DIR/$base"
+              while IFS= read -r subdep; do
+                collect_dep_tree "$subdep"
+              done < <(otool -L "$FW_DIR/$base" | tail -n +2 | awk '{print $1}')
+            fi
+          }
+
+          patch_macho_refs() {
+            local target="$1"
+            chmod +w "$target" || true
+            while IFS= read -r dep; do
+              if is_system_lib "$dep"; then
+                continue
+              fi
+              local base
+              if [[ "$dep" == @rpath/* ]]; then
+                base="$(basename "${dep#@rpath/}")"
+              else
+                base="$(basename "$dep")"
+              fi
+              if [[ -f "$FW_DIR/$base" ]]; then
+                install_name_tool -change "$dep" "@rpath/$base" "$target" || true
+              fi
+            done < <(otool -L "$target" | tail -n +2 | awk '{print $1}')
+          }
+
+          for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+            while IFS= read -r dep; do
+              collect_dep_tree "$dep"
+            done < <(otool -L "$BIN" | tail -n +2 | awk '{print $1}')
+          done
+
+          for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
+            patch_macho_refs "$BIN"
+          done
+          for DYLIB in "$FW_DIR"/*.dylib; do
+            patch_macho_refs "$DYLIB"
+          done
+
+          if otool -L "$APP_ROOT/MacOS/MISRC" | grep -E '/opt/homebrew|/usr/local/opt'; then
+            echo "Found non-portable Homebrew dylib path in MISRC binary" >&2
+            exit 1
+          fi
+          if otool -L "$APP_ROOT/MacOS/misrc_capture" | grep -E '/opt/homebrew|/usr/local/opt'; then
+            echo "Found non-portable Homebrew dylib path in misrc_capture binary" >&2
+            exit 1
+          fi
+
+          "$APP_ROOT/MacOS/MISRC" --smoke-test
+          set +e
+          "$APP_ROOT/MacOS/misrc_capture" -h > /tmp/macos_bundle_capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          "$APP_ROOT/MacOS/misrc_extract" -h > /tmp/macos_bundle_extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" /tmp/macos_bundle_capture_help.txt
+          grep -qi "Usage" /tmp/macos_bundle_extract_help.txt
+
+          codesign --force --deep --sign - dist/MISRC.app
+          echo "$BUILD_VERSION" > dist/BUILD_VERSION.txt
+
+      - name: Upload macOS architecture stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-stage-${{ matrix.arch }}
+          path: |
+            dist/MISRC.app
+            dist/misrc_capture
+            dist/misrc_extract
+            dist/BUILD_VERSION.txt
+          if-no-files-found: error
+
+  macos-app-universal:
+    name: macOS APP sanity build (universal)
+    runs-on: macos-14
+    needs:
+      - macos-app-build
+    steps:
+      - name: Download arm64 stage
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app-stage-arm64
+          path: stage-arm64
+
+      - name: Download x86_64 stage
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app-stage-x86_64
+          path: stage-x86_64
+
+      - name: Merge universal app and package tarball
+        id: package
+        run: |
+          set -eux
+          BUILD_VERSION="$(cat stage-arm64/BUILD_VERSION.txt)"
+          echo "version=$BUILD_VERSION" >> "$GITHUB_OUTPUT"
+
+          mkdir -p dist
+          cp -R stage-arm64/MISRC.app dist/MISRC.app
+          cp stage-arm64/misrc_capture dist/misrc_capture
+          cp stage-arm64/misrc_extract dist/misrc_extract
+          chmod +x dist/misrc_capture dist/misrc_extract
+
+          while IFS= read -r rel; do
+            ARM_FILE="stage-arm64/${rel}"
+            X86_FILE="stage-x86_64/${rel}"
+            OUT_FILE="dist/${rel}"
+            if file "$ARM_FILE" | grep -q "Mach-O"; then
+              lipo -create "$ARM_FILE" "$X86_FILE" -output "$OUT_FILE"
+            else
+              cp "$ARM_FILE" "$OUT_FILE"
+            fi
+          done < <(cd stage-arm64 && find MISRC.app -type f | sort)
+
+          codesign --force --deep --sign - dist/MISRC.app
+
+          LIPO_ARCHS="$(lipo -archs dist/MISRC.app/Contents/MacOS/MISRC)"
+          echo "$LIPO_ARCHS" | grep -q 'arm64'
+          echo "$LIPO_ARCHS" | grep -q 'x86_64'
+
+          dist/MISRC.app/Contents/MacOS/MISRC --smoke-test
+          set +e
+          dist/MISRC.app/Contents/MacOS/misrc_capture -h > /tmp/macos_universal_capture_help.txt 2>&1
+          RC_CAPTURE=$?
+          dist/MISRC.app/Contents/MacOS/misrc_extract -h > /tmp/macos_universal_extract_help.txt 2>&1
+          RC_EXTRACT=$?
+          set -e
+          test "$RC_CAPTURE" -eq 1
+          test "$RC_EXTRACT" -eq 1
+          grep -qi "Usage" /tmp/macos_universal_capture_help.txt
+          grep -qi "Usage" /tmp/macos_universal_extract_help.txt
+
+          TAR_NAME="misrc_gui-${BUILD_VERSION}-macos-universal-app.tar.gz"
           tar -czf "$TAR_NAME" -C dist MISRC.app misrc_capture misrc_extract
           test -f "$TAR_NAME"
 
@@ -402,7 +713,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-app
-          path: misrc_gui-*-macos-app.tar.gz
+          path: misrc_gui-*-macos-universal-app.tar.gz
           if-no-files-found: error
 
   release:
@@ -411,7 +722,7 @@ jobs:
     needs:
       - linux-appimage
       - windows-exe
-      - macos-app
+      - macos-app-universal
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
     permissions:
       contents: write
@@ -455,5 +766,6 @@ jobs:
           generate_release_notes: true
           files: |
             release-assets/**/misrc_gui-*-linux-x86_64.AppImage
+            release-assets/**/misrc_gui-*-linux-arm64.AppImage
             release-assets/**/misrc_gui-*-windows-x86_64.zip
-            release-assets/**/misrc_gui-*-macos-app.tar.gz
+            release-assets/**/misrc_gui-*-macos-universal-app.tar.gz
