@@ -339,10 +339,18 @@ jobs:
                   continue
                   ;;
               esac
-              local src
-              src="$(find "$MINGW_PREFIX/bin" -maxdepth 1 -iname "$dll" -print -quit)"
+              local src=""
+              local search_dir
+              for search_dir in "$DEPS_PREFIX/bin" "$MINGW_PREFIX/bin" "$DEPS_PREFIX/lib"; do
+                if [[ -d "$search_dir" ]]; then
+                  src="$(find "$search_dir" -maxdepth 1 -iname "$dll" -print -quit)"
+                  if [[ -n "$src" ]]; then
+                    break
+                  fi
+                fi
+              done
               if [[ -z "$src" ]]; then
-                echo "Required runtime DLL not found in MINGW_PREFIX: $dll" >&2
+                echo "Required runtime DLL not found in dependency search paths: $dll" >&2
                 exit 1
               fi
               local dst="dist/$(basename "$src")"
@@ -686,6 +694,7 @@ jobs:
               cp "$ARM_FILE" "$OUT_FILE"
             fi
           done < <(cd stage-arm64 && find MISRC.app -type f | sort)
+          chmod +x dist/MISRC.app/Contents/MacOS/MISRC dist/MISRC.app/Contents/MacOS/misrc_capture dist/MISRC.app/Contents/MacOS/misrc_extract
 
           codesign --force --deep --sign - dist/MISRC.app
 
