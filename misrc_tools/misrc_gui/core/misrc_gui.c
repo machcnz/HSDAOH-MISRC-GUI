@@ -13,6 +13,7 @@
 
 #include "raylib.h"
 #include "../assets/inter_font_data.h"
+#include "../assets/misrc_icon_png_data.h"
 #include "../assets/space_mono_font_data.h"
 
 #include "gui_app.h"
@@ -29,7 +30,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #ifndef MIRSC_TOOLS_VERSION
 #define MIRSC_TOOLS_VERSION "dev"
@@ -51,28 +57,51 @@ static void print_usage(const char *program_name) {
     fprintf(stdout,
             "MISRC GUI %s\n"
             "Usage:\n"
-            "  %s [--help] [--version] [--smoke-test]\n"
+            "  %s [--help] [--version] [--smoke-test] [--debug-view]\n"
             "\n"
-            "No arguments launch the GUI.\n",
+            "No arguments launch the GUI.\n"
+            "Use --debug-view to enable verbose runtime logs.\n",
             MIRSC_TOOLS_VERSION,
             program_name ? program_name : "misrc_gui");
 }
 
+#if defined(_WIN32)
+static void gui_enable_debug_console(void) {
+    if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
+        FILE *stream = freopen("CONOUT$", "w", stdout);
+        (void)stream;
+        stream = freopen("CONOUT$", "w", stderr);
+        (void)stream;
+        stream = freopen("CONIN$", "r", stdin);
+        (void)stream;
+    }
+}
+#endif
+
 int main(int argc, char **argv) {
-    if (argc > 1) {
-        if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) {
+    bool debug_view = false;
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "--help") == 0) || (strcmp(argv[i], "-h") == 0)) {
             print_usage(argv[0]);
             return 0;
         }
-        if (strcmp(argv[1], "--version") == 0) {
+        if (strcmp(argv[i], "--debug-view") == 0) {
+            debug_view = true;
+        }
+        if (strcmp(argv[i], "--version") == 0) {
             fprintf(stdout, "%s\n", MIRSC_TOOLS_VERSION);
             return 0;
         }
-        if (strcmp(argv[1], "--smoke-test") == 0) {
+        if (strcmp(argv[i], "--smoke-test") == 0) {
             return 0;
         }
     }
 
+#if defined(_WIN32)
+    if (debug_view) {
+        gui_enable_debug_console();
+    }
+#endif
     // Initialize application state
     gui_app_t app = {0};
     app.fonts = fonts;
@@ -93,8 +122,13 @@ int main(int argc, char **argv) {
     char window_title[128];
     snprintf(window_title, sizeof(window_title), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
     InitWindow(1600, 900, window_title);
+    Image app_icon = LoadImageFromMemory(".png", misrc_icon_png_data, misrc_icon_png_data_size);
+    if (app_icon.data != NULL) {
+        SetWindowIcon(app_icon);
+        UnloadImage(app_icon);
+    }
     SetWindowMinSize(1200, 750);
-    SetTraceLogLevel(LOG_INFO);  // Enable debug logging (phosphor perf traces)
+    SetTraceLogLevel(debug_view ? LOG_INFO : LOG_WARNING);
     SetTargetFPS(60);
     SetExitKey(0);  // Disable escape key auto-close
 
@@ -161,14 +195,20 @@ int main(int argc, char **argv) {
     } else {
         gui_app_set_status(&app, "No devices found. Connect a device and restart.");
     }
-    int last_layout_width = GetScreenWidth();
-    int last_layout_height = GetScreenHeight();
+    int last_layout_width = -1;
+    int last_layout_height = -1;
 
     // Main loop
     while (!WindowShouldClose() && !atomic_load(&do_exit)) {
         float dt = GetFrameTime();
         int current_layout_width = GetScreenWidth();
         int current_layout_height = GetScreenHeight();
+        if (current_layout_width <= 0) {
+            current_layout_width = 1;
+        }
+        if (current_layout_height <= 0) {
+            current_layout_height = 1;
+        }
         if (current_layout_width != last_layout_width || current_layout_height != last_layout_height) {
             Clay_SetLayoutDimensions((Clay_Dimensions){
                 (float)current_layout_width, (float)current_layout_height

@@ -58,6 +58,7 @@ endif
 host_cpu_family = host_machine.cpu_family()
 
 host_system = host_machine.system()
+windows_static_deps = host_system == 'windows' or host_system == 'cygwin'
 
 if host_system == 'darwin'
   cflags += ['-D_DARWIN_C_SOURCE']
@@ -108,9 +109,9 @@ if host_cpu_family == 'x86_64'
 endif
 
 
-deps = [ dependency('hsdaoh') ]
+deps = [ dependency('hsdaoh', static: windows_static_deps) ]
 
-flac_dep =  dependency('flac', required : false)
+flac_dep =  dependency('flac', required : false, static: windows_static_deps)
 if flac_dep.found()
   deps += [ flac_dep ]
   cflags += ['-DLIBFLAC_ENABLED=1']
@@ -123,7 +124,7 @@ else
   message('FLAC not found, building without FLAC support')
 endif
 
-soxr_dep =  dependency('soxr', required : false)
+soxr_dep =  dependency('soxr', required : false, static: windows_static_deps)
 if soxr_dep.found()
   deps += [ soxr_dep ]
   cflags += ['-DLIBSOXR_ENABLED=1']
@@ -133,7 +134,7 @@ else
   message('libsoxr not found, building without resample support')
 endif
 
-fftw3f_dep = dependency('fftw3f', required : false)
+fftw3f_dep = dependency('fftw3f', required : false, static: windows_static_deps)
 if fftw3f_dep.found()
   cflags += ['-DLIBFFTW_ENABLED=1']
   message('FFTW3 (single precision) found, building with FFT support')
@@ -156,7 +157,7 @@ if host_system == 'linux'
   endif
 else
   # On non-Linux platforms, use libusb for FX3
-  libusb_dep = dependency('libusb-1.0', required : false)
+  libusb_dep = dependency('libusb-1.0', required : false, static: windows_static_deps)
   if libusb_dep.found()
     deps += [ libusb_dep ]
     cflags += ['-DENABLE_FX3=1']
@@ -174,7 +175,8 @@ if host_system == 'windows' or host_system == 'cygwin'
     sources_capture += [ 'getopt/getopt.c' ]
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
-  ldflags_capture += [ '-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lonecore', '-static' ]
+  ldflags += [ '-static', '-static-libgcc' ]
+  ldflags_capture += [ '-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lonecore' ]
   sources_capture += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
   if host_cpu_family == 'aarch64'
     ldflags += [ '-lwinpthread' ]
@@ -204,7 +206,7 @@ executable('misrc_capture',
               install: true)
 
 # GUI application (requires raylib)
-raylib_dep = dependency('raylib', required: false)
+raylib_dep = dependency('raylib', required: false, static: windows_static_deps)
 
 if raylib_dep.found()
   sources_gui = [
@@ -276,8 +278,7 @@ if raylib_dep.found()
   gui_ldflags = ldflags
 
   if host_system == 'windows' or host_system == 'cygwin'
-    gui_ldflags += ['-static']
-    # gui_ldflags += ['-mwindows']  # Hide console window - disabled for debugging
+    gui_ldflags += ['-mwindows']
     gui_ldflags += ['-lopengl32', '-lgdi32', '-lwinmm']
     # Need mincore for VirtualAlloc2/MapViewOfFile3 used by ringbuffer
     gui_ldflags += ['-lmincore']
