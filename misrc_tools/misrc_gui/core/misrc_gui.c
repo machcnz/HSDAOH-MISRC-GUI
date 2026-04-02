@@ -57,6 +57,33 @@ static void print_usage(const char *program_name) {
             MIRSC_TOOLS_VERSION,
             program_name ? program_name : "misrc_gui");
 }
+static int gui_layout_width(void) {
+    int width = GetRenderWidth();
+    if (width <= 0) {
+        width = GetScreenWidth();
+    }
+    return (width > 0) ? width : 1;
+}
+static int gui_layout_height(void) {
+    int height = GetRenderHeight();
+    if (height <= 0) {
+        height = GetScreenHeight();
+    }
+    return (height > 0) ? height : 1;
+}
+static void gui_sync_mouse_scale_to_layout(void) {
+    int screen_width = GetScreenWidth();
+    int screen_height = GetScreenHeight();
+    int layout_width = gui_layout_width();
+    int layout_height = gui_layout_height();
+    float mouse_scale_x = 1.0f;
+    float mouse_scale_y = 1.0f;
+    if (screen_width > 0 && screen_height > 0) {
+        mouse_scale_x = (float)layout_width / (float)screen_width;
+        mouse_scale_y = (float)layout_height / (float)screen_height;
+    }
+    SetMouseScale(mouse_scale_x, mouse_scale_y);
+}
 
 int main(int argc, char **argv) {
     if (argc > 1) {
@@ -87,7 +114,11 @@ int main(int argc, char **argv) {
     app.settings.capture_limit_seconds = 0;
 
     // Initialize raylib window
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT;
+#if defined(__APPLE__)
+    window_flags |= FLAG_WINDOW_HIGHDPI;
+#endif
+    SetConfigFlags(window_flags);
     // Larger default so the Settings panel is usable without manual resizing.
     char window_title[128];
     snprintf(window_title, sizeof(window_title), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
@@ -127,9 +158,10 @@ int main(int argc, char **argv) {
     }
 
     Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, clay_memory);
-    Clay_Initialize(clay_arena, (Clay_Dimensions){ (float)GetScreenWidth(), (float)GetScreenHeight() },
+    Clay_Initialize(clay_arena, (Clay_Dimensions){ (float)gui_layout_width(), (float)gui_layout_height() },
                     (Clay_ErrorHandler){ clay_error_handler });
     Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
+    gui_sync_mouse_scale_to_layout();
 
     // Initialize application
     gui_app_init(&app);
@@ -145,27 +177,37 @@ int main(int argc, char **argv) {
 
     // Autoconnect if a device is found
     if (app.device_count > 0) {
-        gui_app_set_status(&app, "Connecting...");
-        if (gui_app_start_capture(&app) == 0) {
-            gui_app_set_status(&app, "Connected");
+        if (app.devices[app.selected_device].type == DEVICE_TYPE_SIMPLE_CAPTURE) {
+            gui_app_set_status(&app, "Simple-capture devices are not supported by GUI capture");
         } else {
-            gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
-            app.reconnect_pending = true;
-            app.reconnect_attempt_time = GetTime();
+            gui_app_set_status(&app, "Connecting...");
+            if (gui_app_start_capture(&app) == 0) {
+                gui_app_set_status(&app, "Connected");
+            } else {
+                gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
+                app.reconnect_pending = true;
+                app.reconnect_attempt_time = GetTime();
+            }
         }
     } else {
         gui_app_set_status(&app, "No devices found. Connect a device and restart.");
     }
+    int last_layout_width = gui_layout_width();
+    int last_layout_height = gui_layout_height();
 
     // Main loop
     while (!WindowShouldClose() && !atomic_load(&do_exit)) {
         float dt = GetFrameTime();
-
-        // Handle window resize
-        if (IsWindowResized()) {
+        // Keep mouse and layout coordinates in sync, including HiDPI transitions.
+        gui_sync_mouse_scale_to_layout();
+        int current_layout_width = gui_layout_width();
+        int current_layout_height = gui_layout_height();
+        if (current_layout_width != last_layout_width || current_layout_height != last_layout_height) {
             Clay_SetLayoutDimensions((Clay_Dimensions){
-                (float)GetScreenWidth(), (float)GetScreenHeight()
+                (float)current_layout_width, (float)current_layout_height
             });
+            last_layout_width = current_layout_width;
+            last_layout_height = current_layout_height;
         }
 
         // Check for pending popup result (for async confirmations like file overwrite)
@@ -243,6 +285,11 @@ int main(int argc, char **argv) {
                     gui_app_enumerate_devices(&app);
 
                     if (app.device_count > 0) {
+                        if (app.devices[app.selected_device].type == DEVICE_TYPE_SIMPLE_CAPTURE) {
+                            app.reconnect_pending = false;
+                            gui_app_set_status(&app, "Simple-capture devices are not supported by GUI capture");
+                            continue;
+                        }
                         char status_buf[128];
                         snprintf(status_buf, sizeof(status_buf), "Reconnecting (attempt %d)...", app.reconnect_attempts);
                         gui_app_set_status(&app, status_buf);

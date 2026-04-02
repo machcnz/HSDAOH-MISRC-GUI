@@ -622,6 +622,9 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     if (app->device_count == 0) {
         gui_app_set_status(app, "No capture devices found");
     } else {
+        if (app->selected_device < 0 || app->selected_device >= app->device_count) {
+            app->selected_device = 0;
+        }
         char msg[128];
         snprintf(msg, sizeof(msg), "Found %d device(s)", app->device_count);
         gui_app_set_status(app, msg);
@@ -745,6 +748,10 @@ int gui_app_start_capture(gui_app_t *app) {
             return -1;
         }
         return gui_playback_start(app, file_a, file_b);
+    }
+    if (dev->type == DEVICE_TYPE_SIMPLE_CAPTURE) {
+        gui_app_set_status(app, "Simple-capture devices are not supported by GUI capture");
+        return -1;
     }
 
 #ifdef ENABLE_FX3

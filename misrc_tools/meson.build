@@ -133,7 +133,7 @@ else
   message('libsoxr not found, building without resample support')
 endif
 
-fftw3f_dep = dependency('fftw3f', required : false, static : true)
+fftw3f_dep = dependency('fftw3f', required : false)
 if fftw3f_dep.found()
   cflags += ['-DLIBFFTW_ENABLED=1']
   message('FFTW3 (single precision) found, building with FFT support')

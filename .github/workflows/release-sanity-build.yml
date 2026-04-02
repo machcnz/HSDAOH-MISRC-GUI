@@ -70,6 +70,7 @@ jobs:
             curl \
             git \
             libasound2-dev \
+            libfftw3-dev \
             libflac-dev \
             libgl1-mesa-dev \
             libusb-1.0-0-dev \
@@ -182,8 +183,9 @@ jobs:
           Categories=Utility;
           Terminal=false
           EOF
-
-          curl -L -o AppDir/misrc.png https://raw.githubusercontent.com/raysan5/raylib/master/logo/raylib_128x128.png
+          ICON_SRC="assets/Icons/MISRC_Icon.png"
+          test -f "$ICON_SRC"
+          cp "$ICON_SRC" AppDir/misrc.png
 
           curl -L -o linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
           curl -L -o linuxdeploy-plugin-appimage "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${LINUXDEPLOY_ARCH}.AppImage"
@@ -234,6 +236,7 @@ jobs:
           install: >-
             git
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-fftw
             mingw-w64-x86_64-flac
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libjpeg-turbo
@@ -328,6 +331,8 @@ jobs:
           meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
 
           mkdir -p dist
+          test -f assets/Icons/MISRC_Icon.png
+          cp assets/Icons/MISRC_Icon.png dist/MISRC_Icon.png
           cp "$BUILD_DIR/misrc_gui.exe" dist/
           cp "$BUILD_DIR/misrc_capture.exe" dist/
           cp "$BUILD_DIR/misrc_extract.exe" dist/
@@ -427,7 +432,7 @@ jobs:
         run: |
           set -eux
           brew update
-          brew install cmake flac libusb libuvc meson nasm ninja pkg-config libsoxr
+          brew install cmake fftw flac libusb libuvc meson nasm ninja pkg-config libsoxr
 
       - name: Build and stage architecture app bundle
         env:
@@ -490,6 +495,22 @@ jobs:
           APP_ROOT="dist/MISRC.app/Contents"
           FW_DIR="$APP_ROOT/Frameworks"
           mkdir -p "$APP_ROOT/MacOS" "$APP_ROOT/Resources" "$FW_DIR"
+          ICON_SRC="assets/Icons/MISRC_Icon.png"
+          test -f "$ICON_SRC"
+          ICONSET_DIR="dist/MISRC.iconset"
+          mkdir -p "$ICONSET_DIR"
+          sips -z 16 16 "$ICON_SRC" --out "$ICONSET_DIR/icon_16x16.png"
+          sips -z 32 32 "$ICON_SRC" --out "$ICONSET_DIR/icon_16x16@2x.png"
+          sips -z 32 32 "$ICON_SRC" --out "$ICONSET_DIR/icon_32x32.png"
+          sips -z 64 64 "$ICON_SRC" --out "$ICONSET_DIR/icon_32x32@2x.png"
+          sips -z 128 128 "$ICON_SRC" --out "$ICONSET_DIR/icon_128x128.png"
+          sips -z 256 256 "$ICON_SRC" --out "$ICONSET_DIR/icon_128x128@2x.png"
+          sips -z 256 256 "$ICON_SRC" --out "$ICONSET_DIR/icon_256x256.png"
+          sips -z 512 512 "$ICON_SRC" --out "$ICONSET_DIR/icon_256x256@2x.png"
+          sips -z 512 512 "$ICON_SRC" --out "$ICONSET_DIR/icon_512x512.png"
+          sips -z 1024 1024 "$ICON_SRC" --out "$ICONSET_DIR/icon_512x512@2x.png"
+          iconutil -c icns "$ICONSET_DIR" -o "$APP_ROOT/Resources/MISRC.icns"
+          rm -rf "$ICONSET_DIR"
           cp "$BUILD_DIR/misrc_gui" "$APP_ROOT/MacOS/MISRC"
           cp "$BUILD_DIR/misrc_capture" "$APP_ROOT/MacOS/misrc_capture"
           cp "$BUILD_DIR/misrc_extract" "$APP_ROOT/MacOS/misrc_extract"
@@ -513,6 +534,8 @@ jobs:
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleExecutable</key>
+            <string>MISRC</string>
+            <key>CFBundleIconFile</key>
             <string>MISRC</string>
             <key>LSMinimumSystemVersion</key>
             <string>10.15</string>
