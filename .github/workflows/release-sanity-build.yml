@@ -177,6 +177,13 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/misrc_capture_help.txt
           grep -qi "Usage" /tmp/misrc_extract_help.txt
+      - name: Run capture stability loops
+        run: |
+          set -eux
+          bash misrc_tools/test/capture_stability_ci.sh \
+            "$BUILD_DIR/misrc_capture" \
+            "$BUILD_DIR/misrc_extract" \
+            "capture-stability-${{ matrix.arch }}"
 
       - name: Package AppImage artifact
         env:
@@ -311,6 +318,12 @@ jobs:
         with:
           name: linux-appimage-${{ matrix.arch }}
           path: misrc_gui-*-${{ matrix.artifact_suffix }}.AppImage
+          if-no-files-found: error
+      - name: Upload capture stability logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-stability-linux-${{ matrix.arch }}
+          path: capture-stability-${{ matrix.arch }}
           if-no-files-found: error
 
   windows-exe:
@@ -462,6 +475,14 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" capture_help.txt
           grep -qi "Usage" extract_help.txt
+      - name: Run capture stability loops
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          bash misrc_tools/test/capture_stability_ci.sh \
+            "./dist/misrc_capture.exe" \
+            "./dist/misrc_extract.exe" \
+            "capture-stability-windows"
 
       - name: Create ZIP artifact
         shell: pwsh
@@ -473,6 +494,12 @@ jobs:
         with:
           name: windows-exe
           path: misrc_gui-*-windows-x86_64.zip
+          if-no-files-found: error
+      - name: Upload capture stability logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-stability-windows
+          path: capture-stability-windows
           if-no-files-found: error
 
   macos-app-build:
@@ -820,6 +847,10 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/macos_universal_capture_help.txt
           grep -qi "Usage" /tmp/macos_universal_extract_help.txt
+          bash misrc_tools/test/capture_stability_ci.sh \
+            "dist/MISRC.app/Contents/MacOS/misrc_capture" \
+            "dist/MISRC.app/Contents/MacOS/misrc_extract" \
+            "capture-stability-macos-universal"
 
           TAR_NAME="misrc_gui-${BUILD_VERSION}-macos-universal-app.tar.gz"
           tar -czf "$TAR_NAME" -C dist MISRC.app misrc_capture misrc_extract
@@ -830,6 +861,12 @@ jobs:
         with:
           name: macos-app
           path: misrc_gui-*-macos-universal-app.tar.gz
+          if-no-files-found: error
+      - name: Upload macOS capture stability logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-stability-macos-universal
+          path: capture-stability-macos-universal
           if-no-files-found: error
 
   release:

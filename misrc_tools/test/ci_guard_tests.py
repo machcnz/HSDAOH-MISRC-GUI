@@ -249,6 +249,39 @@ def check_windows_packaging_assertions(workflow_path: Path) -> int:
             return fail(f"Workflow is missing required Windows packaging assertion: {snippet}")
     return 0
 
+def check_capture_stability_contract(workflow_path: Path, script_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    required_workflow_snippets = [
+        "bash misrc_tools/test/capture_stability_ci.sh",
+        "capture-stability-${{ matrix.arch }}",
+        "capture-stability-linux-${{ matrix.arch }}",
+        "capture-stability-windows",
+        "capture-stability-macos-universal",
+        "Upload capture stability logs",
+        "Upload macOS capture stability logs",
+    ]
+    for snippet in required_workflow_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Workflow is missing capture-stability contract snippet: {snippet}")
+
+    if not script_path.exists():
+        return fail(f"Capture stability script is missing: {script_path}")
+
+    script_text = read_text(script_path)
+    required_script_snippets = [
+        "CAPTURE_STABILITY_HELP_LOOPS",
+        "\"$CAPTURE_BIN\" --devices",
+        "\"$CAPTURE_BIN\" -d 9999 -n 65536 -a",
+        "\"$EXTRACT_BIN\" -i \"$INPUT_FILE\" -a",
+        "run_with_timeout",
+        "timed_capture_result",
+        "skipped_no_device",
+    ]
+    for snippet in required_script_snippets:
+        if snippet not in script_text:
+            return fail(f"Capture stability script is missing required snippet: {snippet}")
+    return 0
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="MISRC CI guard tests")
@@ -264,6 +297,7 @@ def main() -> int:
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
     meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
+    capture_stability_script_path = repo_root / "misrc_tools/test/capture_stability_ci.sh"
 
     checks: List[Tuple[str, Callable[[], int]]] = [
         ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
@@ -274,6 +308,7 @@ def main() -> int:
         ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
+        ("capture stability contract", lambda: check_capture_stability_contract(workflow_path, capture_stability_script_path)),
     ]
     if not args.static_only:
         checks.insert(7, ("AppRun runtime behavior", lambda: check_apprun_runtime_behavior(workflow_path, icon_path)))
