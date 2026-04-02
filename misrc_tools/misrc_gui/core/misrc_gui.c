@@ -74,17 +74,25 @@ static void print_usage(const char *program_name) {
             program_name ? program_name : "misrc_gui");
 }
 static int gui_layout_width(void) {
+#if defined(__APPLE__)
+    int width = GetScreenWidth();
+#else
     int width = GetRenderWidth();
     if (width <= 0) {
         width = GetScreenWidth();
     }
+#endif
     return (width > 0) ? width : 1;
 }
 static int gui_layout_height(void) {
+#if defined(__APPLE__)
+    int height = GetScreenHeight();
+#else
     int height = GetRenderHeight();
     if (height <= 0) {
         height = GetScreenHeight();
     }
+#endif
     return (height > 0) ? height : 1;
 }
 

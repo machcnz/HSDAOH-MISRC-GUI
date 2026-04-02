@@ -156,7 +156,54 @@ jobs:
           cat > AppDir/AppRun <<'EOF'
           #!/usr/bin/env bash
           HERE="$(dirname "$(readlink -f "$0")")"
+          install_shortcuts() {
+            local appimage_path="${APPIMAGE:-}"
+            if [[ -z "$appimage_path" || ! -f "$appimage_path" ]]; then
+              return 0
+            fi
+            local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+            local apps_dir="$data_home/applications"
+            local icons_dir="$data_home/icons/hicolor/512x512/apps"
+            local launcher="$apps_dir/misrc_gui.desktop"
+            local escaped_appimage_path="$appimage_path"
+            escaped_appimage_path="${escaped_appimage_path//\\/\\\\}"
+            escaped_appimage_path="${escaped_appimage_path//\"/\\\"}"
+
+            mkdir -p "$apps_dir" "$icons_dir"
+            if [[ -f "$HERE/misrc.png" ]]; then
+              cp -f "$HERE/misrc.png" "$icons_dir/misrc.png" || true
+            fi
+            cat > "$launcher" <<LAUNCHER
+[Desktop Entry]
+Type=Application
+Name=MISRC GUI
+Exec="${escaped_appimage_path}" %U
+Icon=misrc
+Categories=Utility;
+StartupWMClass=misrc_gui
+Terminal=false
+StartupNotify=true
+LAUNCHER
+            chmod +x "$launcher" || true
+
+            local desktop_dir=""
+            if command -v xdg-user-dir >/dev/null 2>&1; then
+              desktop_dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+            fi
+            if [[ -z "$desktop_dir" ]]; then
+              desktop_dir="$HOME/Desktop"
+            fi
+            if [[ -d "$desktop_dir" ]]; then
+              cp -f "$launcher" "$desktop_dir/MISRC GUI.desktop" || true
+              chmod +x "$desktop_dir/MISRC GUI.desktop" || true
+            fi
+          }
+          if [[ "${1:-}" == "--create-shortcut" ]]; then
+            install_shortcuts
+            exit 0
+          fi
           if [[ $# -eq 0 ]]; then
+            install_shortcuts
             exec "$HERE/usr/bin/misrc_gui"
           fi
           case "$1" in
@@ -169,6 +216,9 @@ jobs:
               exec "$HERE/usr/bin/misrc_extract" "$@"
               ;;
             *)
+              if [[ "${1:-}" != "--smoke-test" ]]; then
+                install_shortcuts
+              fi
               exec "$HERE/usr/bin/misrc_gui" "$@"
               ;;
           esac
@@ -188,6 +238,9 @@ jobs:
           ICON_SRC="assets/Icons/MISRC_Icon.png"
           test -f "$ICON_SRC"
           convert "$ICON_SRC" -resize 512x512\! AppDir/misrc.png
+          ln -sf misrc.png AppDir/.DirIcon
+          mkdir -p AppDir/usr/share/icons/hicolor/512x512/apps
+          cp AppDir/misrc.png AppDir/usr/share/icons/hicolor/512x512/apps/misrc.png
 
           curl -L -o linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
           curl -L -o linuxdeploy-plugin-appimage "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${LINUXDEPLOY_ARCH}.AppImage"
