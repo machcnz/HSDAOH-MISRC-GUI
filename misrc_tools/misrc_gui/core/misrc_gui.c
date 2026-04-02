@@ -73,6 +73,20 @@ static void print_usage(const char *program_name) {
             MIRSC_TOOLS_VERSION,
             program_name ? program_name : "misrc_gui");
 }
+static int gui_layout_width(void) {
+    int width = GetRenderWidth();
+    if (width <= 0) {
+        width = GetScreenWidth();
+    }
+    return (width > 0) ? width : 1;
+}
+static int gui_layout_height(void) {
+    int height = GetRenderHeight();
+    if (height <= 0) {
+        height = GetScreenHeight();
+    }
+    return (height > 0) ? height : 1;
+}
 
 #if defined(_WIN32)
 static void gui_enable_debug_console(void) {
@@ -171,7 +185,7 @@ int main(int argc, char **argv) {
     }
 
     Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, clay_memory);
-    Clay_Initialize(clay_arena, (Clay_Dimensions){ (float)GetScreenWidth(), (float)GetScreenHeight() },
+    Clay_Initialize(clay_arena, (Clay_Dimensions){ (float)gui_layout_width(), (float)gui_layout_height() },
                     (Clay_ErrorHandler){ clay_error_handler });
     Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
 
@@ -210,14 +224,8 @@ int main(int argc, char **argv) {
     // Main loop
     while (!WindowShouldClose() && !atomic_load(&do_exit)) {
         float dt = GetFrameTime();
-        int current_layout_width = GetScreenWidth();
-        int current_layout_height = GetScreenHeight();
-        if (current_layout_width <= 0) {
-            current_layout_width = 1;
-        }
-        if (current_layout_height <= 0) {
-            current_layout_height = 1;
-        }
+        int current_layout_width = gui_layout_width();
+        int current_layout_height = gui_layout_height();
         if (current_layout_width != last_layout_width || current_layout_height != last_layout_height) {
             Clay_SetLayoutDimensions((Clay_Dimensions){
                 (float)current_layout_width, (float)current_layout_height

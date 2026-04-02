@@ -338,6 +338,7 @@ jobs:
           cp "$BUILD_DIR/misrc_extract.exe" dist/
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
           test "$(find dist -maxdepth 1 -name '*.exe' | wc -l)" -eq 3
+          test "$(objdump -p dist/misrc_gui.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')" = "00000002"
           assert_no_nonsystem_dlls() {
             local target="$1"
             while IFS= read -r dll; do
