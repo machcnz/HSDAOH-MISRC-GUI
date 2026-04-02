@@ -155,7 +155,6 @@ def check_apprun_static_contract(workflow_path: Path) -> int:
     required_snippets = [
         "install_shortcuts()",
         "--create-shortcut",
-        "Exec=\"${escaped_appimage_path}\" %U",
         "Icon=misrc",
         "StartupWMClass=misrc_gui",
         "StartupNotify=true",
@@ -163,6 +162,8 @@ def check_apprun_static_contract(workflow_path: Path) -> int:
     for snippet in required_snippets:
         if snippet not in apprun:
             return fail(f"AppRun shortcut contract is missing snippet: {snippet}")
+    if "Exec=\"${escaped_appimage_path}\" %U" not in apprun and "Exec=\\\"${escaped_appimage_path}\\\" %U" not in apprun:
+        return fail("AppRun shortcut contract is missing expected Exec launcher format")
     return 0
 
 

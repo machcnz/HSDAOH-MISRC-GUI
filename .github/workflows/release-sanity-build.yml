@@ -209,17 +209,18 @@ jobs:
             if [[ -f "$HERE/misrc.png" ]]; then
               cp -f "$HERE/misrc.png" "$icons_dir/misrc.png" || true
             fi
-            cat > "$launcher" <<LAUNCHER
-[Desktop Entry]
-Type=Application
-Name=MISRC GUI
-Exec="${escaped_appimage_path}" %U
-Icon=misrc
-Categories=Utility;
-StartupWMClass=misrc_gui
-Terminal=false
-StartupNotify=true
-LAUNCHER
+            {
+              printf '%s\n' \
+                "[Desktop Entry]" \
+                "Type=Application" \
+                "Name=MISRC GUI" \
+                "Exec=\"${escaped_appimage_path}\" %U" \
+                "Icon=misrc" \
+                "Categories=Utility;" \
+                "StartupWMClass=misrc_gui" \
+                "Terminal=false" \
+                "StartupNotify=true"
+            } > "$launcher"
             chmod +x "$launcher" || true
 
             local desktop_dir=""
