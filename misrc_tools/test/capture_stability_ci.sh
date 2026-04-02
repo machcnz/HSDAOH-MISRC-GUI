@@ -50,6 +50,29 @@ check_help_usage() {
   [[ "$rc" -eq 1 ]] || fail "expected -h to exit 1 for $bin, got $rc"
   grep -qi "Usage" "$log" || fail "missing Usage text in help output for $bin ($log)"
 }
+files_equal() {
+  local left="$1"
+  local right="$2"
+  if command -v cmp >/dev/null 2>&1; then
+    cmp -s "$left" "$right"
+    return $?
+  fi
+  if command -v cksum >/dev/null 2>&1; then
+    local left_sum right_sum
+    left_sum="$(cksum "$left" | awk '{print $1\":\"$2}')"
+    right_sum="$(cksum "$right" | awk '{print $1\":\"$2}')"
+    [[ "$left_sum" == "$right_sum" ]]
+    return $?
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    local left_sha right_sha
+    left_sha="$(sha256sum "$left" | awk '{print $1}')"
+    right_sha="$(sha256sum "$right" | awk '{print $1}')"
+    [[ "$left_sha" == "$right_sha" ]]
+    return $?
+  fi
+  fail "no supported file comparison utility available (cmp, cksum, or sha256sum)"
+}
 
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
@@ -98,9 +121,9 @@ for i in $(seq 1 "$EXTRACT_LOOPS"); do
   OUT_B="$ARTIFACT_DIR/extract_b_${i}.bin"
   OUT_X="$ARTIFACT_DIR/extract_x_${i}.bin"
   "$EXTRACT_BIN" -i "$INPUT_FILE" -a "$OUT_A" -b "$OUT_B" -x "$OUT_X" >"$ARTIFACT_DIR/extract_${i}.log" 2>&1
-  cmp -s "$REF_A" "$OUT_A" || fail "ADC A extract output mismatch at iteration $i"
-  cmp -s "$REF_B" "$OUT_B" || fail "ADC B extract output mismatch at iteration $i"
-  cmp -s "$REF_X" "$OUT_X" || fail "AUX extract output mismatch at iteration $i"
+  files_equal "$REF_A" "$OUT_A" || fail "ADC A extract output mismatch at iteration $i"
+  files_equal "$REF_B" "$OUT_B" || fail "ADC B extract output mismatch at iteration $i"
+  files_equal "$REF_X" "$OUT_X" || fail "AUX extract output mismatch at iteration $i"
   rm -f "$OUT_A" "$OUT_B" "$OUT_X"
 done
 
