@@ -175,7 +175,7 @@ if host_system == 'windows' or host_system == 'cygwin'
     sources_capture += [ 'getopt/getopt.c' ]
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
-  ldflags += [ '-static', '-static-libgcc' ]
+  ldflags += [ '-static', '-static-libgcc', '-lgomp' ]
   ldflags_capture += [ '-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lonecore' ]
   sources_capture += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
   if host_cpu_family == 'aarch64'
