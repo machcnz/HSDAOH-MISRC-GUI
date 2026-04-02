@@ -69,6 +69,7 @@ jobs:
             cmake \
             curl \
             git \
+            imagemagick \
             libasound2-dev \
             libfftw3-dev \
             libflac-dev \
@@ -185,7 +186,7 @@ jobs:
           EOF
           ICON_SRC="assets/Icons/MISRC_Icon.png"
           test -f "$ICON_SRC"
-          cp "$ICON_SRC" AppDir/misrc.png
+          convert "$ICON_SRC" -resize 512x512\! AppDir/misrc.png
 
           curl -L -o linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
           curl -L -o linuxdeploy-plugin-appimage "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${LINUXDEPLOY_ARCH}.AppImage"

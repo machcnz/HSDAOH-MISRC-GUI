@@ -294,9 +294,14 @@ if raylib_dep.found()
   endif
 
   gui_includes = include_directories('misrc_gui/ui')
+  gui_win_resources = []
+  if host_system == 'windows' or host_system == 'cygwin'
+    windows_mod = import('windows')
+    gui_win_resources = windows_mod.compile_resources('misrc_gui/assets/misrc_gui.rc')
+  endif
 
   executable('misrc_gui',
-              sources_gui,
+              sources_gui + gui_win_resources,
               dependencies: gui_deps,
               include_directories: gui_includes,
               link_args: gui_ldflags,
