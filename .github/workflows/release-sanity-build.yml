@@ -34,6 +34,28 @@ jobs:
         run: |
           set -eux
           python3 misrc_tools/test/ci_guard_tests.py
+  preflight-cross-platform-guards:
+    name: Cross-platform guard tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - windows-2022
+          - macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run static CI guard tests
+        run: |
+          python misrc_tools/test/ci_guard_tests.py --static-only
   linux-appimage:
     name: Linux AppImage sanity build (${{ matrix.arch }})
     strategy:
@@ -49,7 +71,9 @@ jobs:
             linuxdeploy_arch: aarch64
             artifact_suffix: linux-arm64
     runs-on: ${{ matrix.runner }}
-    needs: preflight-guard-tests
+    needs:
+      - preflight-guard-tests
+      - preflight-cross-platform-guards
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -291,7 +315,9 @@ LAUNCHER
   windows-exe:
     name: Windows EXE sanity build
     runs-on: windows-2022
-    needs: preflight-guard-tests
+    needs:
+      - preflight-guard-tests
+      - preflight-cross-platform-guards
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -459,7 +485,9 @@ LAUNCHER
           - arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    needs: preflight-guard-tests
+    needs:
+      - preflight-guard-tests
+      - preflight-cross-platform-guards
     steps:
       - name: Checkout
         uses: actions/checkout@v4

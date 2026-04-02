@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import re
 import shutil
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 def fail(message: str) -> int:
@@ -25,6 +27,79 @@ def extract_function_body(source: str, signature: str) -> str:
     if not match:
         raise RuntimeError(f"Could not find function body for {signature}")
     return match.group("body")
+
+
+def extract_apprun_script(workflow_text: str) -> str:
+    marker = "cat > AppDir/AppRun <<'EOF'"
+    start = workflow_text.find(marker)
+    if start < 0:
+        raise RuntimeError("Could not find AppRun heredoc start marker in workflow")
+    start = workflow_text.find("\n", start)
+    if start < 0:
+        raise RuntimeError("Malformed AppRun heredoc in workflow")
+    start += 1
+    end = workflow_text.find("\n          EOF", start)
+    if end < 0:
+        raise RuntimeError("Could not find AppRun heredoc end marker in workflow")
+    return textwrap.dedent(workflow_text[start:end]).lstrip("\n")
+
+
+def run_checked(command: List[str], *, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+    return subprocess.run(command, check=True, capture_output=True, text=True, env=env)
+
+
+def check_cross_platform_workflow_coverage(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    required_snippets = [
+        "linux-appimage:",
+        "arch: x86_64",
+        "arch: arm64",
+        "windows-exe:",
+        "runs-on: windows-2022",
+        "macos-app-build:",
+        "runner: macos-14",
+        "runner: macos-15-intel",
+        "macos-app-universal:",
+        "release:",
+        "- linux-appimage",
+        "- windows-exe",
+        "- macos-app-universal",
+    ]
+    for snippet in required_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Workflow cross-platform coverage is missing required snippet: {snippet}")
+    return 0
+
+
+def check_cross_platform_smoke_tests(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    required_smokes = [
+        "\"$BUILD_DIR/misrc_gui\" --smoke-test",
+        "APPIMAGE_EXTRACT_AND_RUN=1 \"./$APPIMAGE_NAME\" --smoke-test",
+        "./dist/misrc_gui.exe --smoke-test",
+        "dist/MISRC.app/Contents/MacOS/MISRC --smoke-test",
+    ]
+    for smoke in required_smokes:
+        if smoke not in workflow_text:
+            return fail(f"Missing expected smoke test command in workflow: {smoke}")
+    return 0
+
+
+def check_linux_desktop_metadata(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    required_desktop_fields = [
+        "cat > AppDir/misrc.desktop <<'EOF'",
+        "Exec=misrc_gui",
+        "Icon=misrc",
+        "StartupWMClass=misrc_gui",
+        "Terminal=false",
+        "StartupNotify=true",
+        "ln -sf misrc.png AppDir/.DirIcon",
+    ]
+    for field in required_desktop_fields:
+        if field not in workflow_text:
+            return fail(f"Missing Linux desktop integration field in workflow/AppRun: {field}")
+    return 0
 
 
 def check_macos_layout_policy(gui_c_path: Path) -> int:
@@ -47,26 +122,55 @@ def check_macos_layout_policy(gui_c_path: Path) -> int:
     return 0
 
 
-def extract_apprun_script(workflow_text: str) -> str:
-    marker = "cat > AppDir/AppRun <<'EOF'"
-    start = workflow_text.find(marker)
-    if start < 0:
-        raise RuntimeError("Could not find AppRun heredoc start marker in workflow")
-    start = workflow_text.find("\n", start)
-    if start < 0:
-        raise RuntimeError("Malformed AppRun heredoc in workflow")
-    start += 1
-    end = workflow_text.find("\n          EOF", start)
-    if end < 0:
-        raise RuntimeError("Could not find AppRun heredoc end marker in workflow")
-    return textwrap.dedent(workflow_text[start:end]).lstrip("\n")
+def check_windows_meson_subsystem_contract(meson_path: Path) -> int:
+    meson_text = read_text(meson_path)
+    required_snippets = [
+        "gui_win_subsystem = 'console'",
+        "gui_win_subsystem = 'windows'",
+        "win_subsystem: gui_win_subsystem",
+    ]
+    for snippet in required_snippets:
+        if snippet not in meson_text:
+            return fail(f"Missing Windows GUI subsystem contract snippet in meson.build: {snippet}")
+    return 0
 
 
-def run_checked(command: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(command, check=True, capture_output=True, text=True, env=env)
+def check_debug_view_contract(gui_c_path: Path) -> int:
+    source = read_text(gui_c_path)
+    required_snippets = [
+        "--debug-view",
+        "bool debug_view = false;",
+        "if (strcmp(argv[i], \"--debug-view\") == 0)",
+        "gui_enable_debug_console();",
+    ]
+    for snippet in required_snippets:
+        if snippet not in source:
+            return fail(f"Missing debug-view runtime contract snippet in misrc_gui.c: {snippet}")
+    return 0
 
 
-def check_apprun_script(workflow_path: Path, icon_path: Path) -> int:
+def check_apprun_static_contract(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    apprun = extract_apprun_script(workflow_text)
+    required_snippets = [
+        "install_shortcuts()",
+        "--create-shortcut",
+        "Exec=\"${escaped_appimage_path}\" %U",
+        "Icon=misrc",
+        "StartupWMClass=misrc_gui",
+        "StartupNotify=true",
+    ]
+    for snippet in required_snippets:
+        if snippet not in apprun:
+            return fail(f"AppRun shortcut contract is missing snippet: {snippet}")
+    return 0
+
+
+def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
+    if shutil.which("bash") is None:
+        print("SKIP: AppRun runtime behavior (bash not available)")
+        return 0
+
     workflow_text = read_text(workflow_path)
     script = extract_apprun_script(workflow_text)
 
@@ -146,16 +250,32 @@ def check_windows_packaging_assertions(workflow_path: Path) -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="MISRC CI guard tests")
+    parser.add_argument(
+        "--static-only",
+        action="store_true",
+        help="Run static/text invariants only (skip runtime AppRun simulation)",
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parents[2]
     workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
+    meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
 
-    checks = [
+    checks: List[Tuple[str, Callable[[], int]]] = [
+        ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
+        ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
+        ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),
-        ("AppRun shortcut behavior", lambda: check_apprun_script(workflow_path, icon_path)),
+        ("Windows meson subsystem contract", lambda: check_windows_meson_subsystem_contract(meson_path)),
+        ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
+        ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
     ]
+    if not args.static_only:
+        checks.insert(7, ("AppRun runtime behavior", lambda: check_apprun_runtime_behavior(workflow_path, icon_path)))
 
     for name, check in checks:
         rc = check()
