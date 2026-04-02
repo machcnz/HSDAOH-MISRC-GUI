@@ -278,7 +278,6 @@ if raylib_dep.found()
   gui_ldflags = ldflags
 
   if host_system == 'windows' or host_system == 'cygwin'
-    gui_ldflags += ['-mwindows', '-Wl,--subsystem,windows']
     gui_ldflags += ['-lopengl32', '-lgdi32', '-lwinmm']
     # Need mincore for VirtualAlloc2/MapViewOfFile3 used by ringbuffer
     gui_ldflags += ['-lmincore']
@@ -295,6 +294,10 @@ if raylib_dep.found()
   endif
 
   gui_includes = include_directories('misrc_gui/ui')
+  gui_win_subsystem = 'console'
+  if host_system == 'windows' or host_system == 'cygwin'
+    gui_win_subsystem = 'windows'
+  endif
   gui_win_resources = []
   if host_system == 'windows' or host_system == 'cygwin'
     windows_mod = import('windows')
@@ -307,6 +310,7 @@ if raylib_dep.found()
               include_directories: gui_includes,
               link_args: gui_ldflags,
               c_args: gui_cflags,
+              win_subsystem: gui_win_subsystem,
               install: true)
 
   message('raylib found, building GUI application')
