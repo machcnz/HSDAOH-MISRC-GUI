@@ -23,6 +23,17 @@ env:
   BUILD_DIR: build-gha
 
 jobs:
+  preflight-guard-tests:
+    name: Preflight guard tests
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run CI guard tests
+        run: |
+          set -eux
+          python3 misrc_tools/test/ci_guard_tests.py
   linux-appimage:
     name: Linux AppImage sanity build (${{ matrix.arch }})
     strategy:
@@ -38,6 +49,7 @@ jobs:
             linuxdeploy_arch: aarch64
             artifact_suffix: linux-arm64
     runs-on: ${{ matrix.runner }}
+    needs: preflight-guard-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -279,6 +291,7 @@ LAUNCHER
   windows-exe:
     name: Windows EXE sanity build
     runs-on: windows-2022
+    needs: preflight-guard-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -446,6 +459,7 @@ LAUNCHER
           - arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
+    needs: preflight-guard-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
