@@ -76,7 +76,7 @@ def check_cross_platform_smoke_tests(workflow_path: Path) -> int:
     required_smokes = [
         "\"$BUILD_DIR/misrc_gui\" --smoke-test",
         "APPIMAGE_EXTRACT_AND_RUN=1 \"./$APPIMAGE_NAME\" --smoke-test",
-        "./dist/misrc_gui.exe --smoke-test",
+        "./dist/MISRC.exe --smoke-test",
         "dist/MISRC.app/Contents/MacOS/MISRC --smoke-test",
     ]
     for smoke in required_smokes:
@@ -277,48 +277,102 @@ def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
 def check_windows_packaging_assertions(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     required_snippets = [
-        "test \"$(find dist -maxdepth 1 -type f | wc -l)\" -eq 3",
-        "test \"$(find dist -maxdepth 1 -name '*.exe' | wc -l)\" -eq 3",
-        "objdump -p dist/misrc_gui.exe",
-        "test \"$(objdump -p dist/misrc_gui.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')\" = \"00000002\"",
+        "test \"$(find dist -maxdepth 1 -type f | wc -l)\" -eq 1",
+        "test \"$(find dist -maxdepth 1 -name '*.exe' | wc -l)\" -eq 1",
+        "objdump -p dist/MISRC.exe",
+        "test \"$(objdump -p dist/MISRC.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')\" = \"00000002\"",
         "assert_no_nonsystem_dlls()",
+        "assert_no_nonsystem_dlls \"dist/MISRC.exe\"",
+        "$ZipPath = \"windows_MISRC_${{ steps.version.outputs.version }}_x86.zip\"",
+        "Compress-Archive -Path @(\"dist/MISRC.exe\")",
+        "if ($zip.Entries.Count -ne 1)",
+        "$entry.FullName.Contains('/') -or $entry.FullName.Contains('\\')",
     ]
     for snippet in required_snippets:
         if snippet not in workflow_text:
             return fail(f"Workflow is missing required Windows packaging assertion: {snippet}")
     return 0
 
-def check_capture_stability_contract(workflow_path: Path, script_path: Path) -> int:
+def check_release_artifact_naming_contract(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
-    required_workflow_snippets = [
+    required_snippets = [
+        "workflow_call:",
+        "artifact_suffix: x86",
+        "artifact_suffix: arm64",
+        "APPIMAGE_NAME=\"linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.AppImage\"",
+        "ZIP_NAME=\"linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip\"",
+        "path: linux_MISRC_*_${{ matrix.artifact_suffix }}.zip",
+        "$ZipPath = \"windows_MISRC_${{ steps.version.outputs.version }}_x86.zip\"",
+        "path: windows_MISRC_*_x86.zip",
+        "DMG_NAME=\"macos_MISRC_${BUILD_VERSION}_universal.dmg\"",
+        "path: macos_MISRC_*_universal.dmg",
+        "release-assets/**/linux_MISRC_*_x86.zip",
+        "release-assets/**/linux_MISRC_*_arm64.zip",
+        "release-assets/**/windows_MISRC_*_x86.zip",
+        "release-assets/**/macos_MISRC_*_universal.dmg",
+    ]
+    forbidden_snippets = [
+        "misrc_gui-*-windows-x86_64.zip",
+        "misrc_gui-*-macos-universal-app.tar.gz",
+        "MISRC_*_windows_x86.zip",
+        "MISRC_*_macos_universal.dmg",
+        "MISRC_*_linux_x86.zip",
+        "MISRC_*_linux_arm64.zip",
+        "release-assets/**/misrc_gui-*-linux-x86_64.AppImage",
+        "release-assets/**/misrc_gui-*-linux-arm64.AppImage",
+        "release-assets/**/misrc_gui-*-windows-x86_64.zip",
+        "release-assets/**/misrc_gui-*-macos-universal-app.tar.gz",
+        "release-assets/**/MISRC_*_linux_x86.zip",
+        "release-assets/**/MISRC_*_linux_arm64.zip",
+        "release-assets/**/MISRC_*_windows_x86.zip",
+        "release-assets/**/MISRC_*_macos_universal.dmg",
+    ]
+    for snippet in required_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Workflow is missing required release artifact naming snippet: {snippet}")
+    for snippet in forbidden_snippets:
+        if snippet in workflow_text:
+            return fail(f"Workflow still contains legacy release artifact naming snippet: {snippet}")
+    return 0
+
+def check_build_workflow_entrypoint_contract(build_workflow_path: Path) -> int:
+    if not build_workflow_path.exists():
+        return fail(f"Build workflow entrypoint is missing: {build_workflow_path}")
+    workflow_text = read_text(build_workflow_path)
+    required_snippets = [
+        "name: Build and release binary",
+        "workflow_dispatch:",
+        "create_release:",
+        "release_tag:",
+        "push:",
+        "- 'v*'",
+        "uses: ./.github/workflows/release-sanity-build.yml",
+        "create_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' }}",
+        "release_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || '' }}",
+    ]
+    for snippet in required_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Build workflow entrypoint is missing required snippet: {snippet}")
+    return 0
+
+
+def check_no_capture_stability_clutter(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    forbidden_workflow_snippets = [
         "bash misrc_tools/test/capture_stability_ci.sh",
         "capture-stability-${{ matrix.arch }}",
         "capture-stability-linux-${{ matrix.arch }}",
+        "capture-stability-linux-x86_64",
+        "capture-stability-linux-arm64",
         "capture-stability-windows",
         "capture-stability-macos-universal",
         "Upload capture stability logs",
         "Upload macOS capture stability logs",
+        "Run capture stability loops",
     ]
-    for snippet in required_workflow_snippets:
-        if snippet not in workflow_text:
-            return fail(f"Workflow is missing capture-stability contract snippet: {snippet}")
-
-    if not script_path.exists():
-        return fail(f"Capture stability script is missing: {script_path}")
-
-    script_text = read_text(script_path)
-    required_script_snippets = [
-        "CAPTURE_STABILITY_HELP_LOOPS",
-        "\"$CAPTURE_BIN\" --devices",
-        "\"$CAPTURE_BIN\" -d 9999 -n 65536 -a",
-        "\"$EXTRACT_BIN\" -i \"$INPUT_FILE\" -a",
-        "run_with_timeout",
-        "timed_capture_result",
-        "skipped_no_device",
-    ]
-    for snippet in required_script_snippets:
-        if snippet not in script_text:
-            return fail(f"Capture stability script is missing required snippet: {snippet}")
+    for snippet in forbidden_workflow_snippets:
+        if snippet in workflow_text:
+            return fail(f"Workflow still contains capture-stability Actions clutter snippet: {snippet}")
     return 0
 
 
@@ -333,10 +387,10 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parents[2]
     workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
+    build_workflow_path = repo_root / ".github/workflows/build.yml"
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
     meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
-    capture_stability_script_path = repo_root / "misrc_tools/test/capture_stability_ci.sh"
 
     checks: List[Tuple[str, Callable[[], int]]] = [
         ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
@@ -349,7 +403,9 @@ def main() -> int:
         ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
-        ("capture stability contract", lambda: check_capture_stability_contract(workflow_path, capture_stability_script_path)),
+        ("release artifact naming contract", lambda: check_release_artifact_naming_contract(workflow_path)),
+        ("build workflow entrypoint contract", lambda: check_build_workflow_entrypoint_contract(build_workflow_path)),
+        ("no capture-stability Actions clutter", lambda: check_no_capture_stability_clutter(workflow_path)),
     ]
     if not args.static_only:
         checks.insert(7, ("AppRun runtime behavior", lambda: check_apprun_runtime_behavior(workflow_path, icon_path)))

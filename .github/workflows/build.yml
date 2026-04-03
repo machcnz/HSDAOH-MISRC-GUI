@@ -1,0 +1,29 @@
+name: Build and release binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub release and upload built assets"
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: "Tag to release when manually dispatched (example: v1.0.0)"
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and release pipeline
+    uses: ./.github/workflows/release-sanity-build.yml
+    with:
+      create_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' }}
+      release_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || '' }}
+    secrets: inherit
