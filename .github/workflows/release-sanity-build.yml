@@ -543,7 +543,11 @@ jobs:
         run: |
           set -eux
           brew update
-          brew install cmake fftw flac libusb libuvc meson nasm ninja pkg-config libsoxr
+          for formula in cmake fftw flac libusb libuvc meson nasm ninja pkgconf libsoxr; do
+            if ! brew list --versions "$formula" >/dev/null 2>&1; then
+              brew install "$formula"
+            fi
+          done
 
       - name: Build and stage architecture app bundle
         env:

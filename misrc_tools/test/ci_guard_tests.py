@@ -105,6 +105,23 @@ def check_actions_runtime_policy(workflow_path: Path) -> int:
         if pin not in workflow_text:
             return fail(f"Workflow is missing expected modern action pin: {pin}")
     return 0
+def check_macos_brew_install_policy(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    forbidden_snippets = [
+        "brew install cmake fftw flac libusb libuvc meson nasm ninja pkg-config libsoxr",
+    ]
+    for snippet in forbidden_snippets:
+        if snippet in workflow_text:
+            return fail(f"Workflow contains non-conditional brew install that emits warning annotations: {snippet}")
+    required_snippets = [
+        "for formula in cmake fftw flac libusb libuvc meson nasm ninja pkgconf libsoxr; do",
+        "if ! brew list --versions \"$formula\" >/dev/null 2>&1; then",
+        "brew install \"$formula\"",
+    ]
+    for snippet in required_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Workflow is missing macOS conditional brew install snippet: {snippet}")
+    return 0
 
 
 def check_linux_desktop_metadata(workflow_path: Path) -> int:
@@ -324,6 +341,7 @@ def main() -> int:
     checks: List[Tuple[str, Callable[[], int]]] = [
         ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
         ("actions runtime policy", lambda: check_actions_runtime_policy(workflow_path)),
+        ("macOS brew install policy", lambda: check_macos_brew_install_policy(workflow_path)),
         ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
         ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),
