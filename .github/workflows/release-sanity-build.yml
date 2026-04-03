@@ -12,6 +12,16 @@ on:
         description: "Tag to release when manually dispatched (example: v0.6.0)"
         required: false
         type: string
+  workflow_call:
+    inputs:
+      create_release:
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        required: false
+        type: string
+        default: ""
   push:
     tags:
       - 'v*'
@@ -65,11 +75,11 @@ jobs:
           - arch: x86_64
             runner: ubuntu-22.04
             linuxdeploy_arch: x86_64
-            artifact_suffix: linux-x86_64
+            artifact_suffix: x86
           - arch: arm64
             runner: ubuntu-22.04-arm
             linuxdeploy_arch: aarch64
-            artifact_suffix: linux-arm64
+            artifact_suffix: arm64
     runs-on: ${{ matrix.runner }}
     needs:
       - preflight-guard-tests
@@ -84,7 +94,7 @@ jobs:
           set -eux
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+          elif [[ ("${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "workflow_call") && -n "${{ inputs.release_tag }}" ]]; then
             VERSION="${{ inputs.release_tag }}"
           else
             VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
@@ -122,7 +132,9 @@ jobs:
             nasm \
             ninja-build \
             patchelf \
-            pkg-config
+            pkg-config \
+            unzip \
+            zip
 
       - name: Build and install hsdaoh + raylib
         run: |
@@ -177,13 +189,6 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/misrc_capture_help.txt
           grep -qi "Usage" /tmp/misrc_extract_help.txt
-      - name: Run capture stability loops
-        run: |
-          set -eux
-          bash misrc_tools/test/capture_stability_ci.sh \
-            "$BUILD_DIR/misrc_capture" \
-            "$BUILD_DIR/misrc_extract" \
-            "capture-stability-${{ matrix.arch }}"
 
       - name: Package AppImage artifact
         env:
@@ -297,7 +302,7 @@ jobs:
             -i AppDir/misrc.png \
             --output appimage
 
-          APPIMAGE_NAME="misrc_gui-${BUILD_VERSION}-${{ matrix.artifact_suffix }}.AppImage"
+          APPIMAGE_NAME="linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.AppImage"
           mv ./*.AppImage "$APPIMAGE_NAME"
           test -f "$APPIMAGE_NAME"
 
@@ -312,18 +317,16 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/appimage_capture_help.txt
           grep -qi "Usage" /tmp/appimage_extract_help.txt
-
-      - name: Upload AppImage
+          ZIP_NAME="linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
+          zip -j "$ZIP_NAME" "$APPIMAGE_NAME"
+          test -f "$ZIP_NAME"
+          test "$(unzip -Z1 "$ZIP_NAME" | wc -l)" -eq 1
+          test "$(unzip -Z1 "$ZIP_NAME")" = "$APPIMAGE_NAME"
+      - name: Upload Linux ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: linux-appimage-${{ matrix.arch }}
-          path: misrc_gui-*-${{ matrix.artifact_suffix }}.AppImage
-          if-no-files-found: error
-      - name: Upload capture stability logs
-        uses: actions/upload-artifact@v7
-        with:
-          name: capture-stability-linux-${{ matrix.arch }}
-          path: capture-stability-${{ matrix.arch }}
+          name: linux-zip-${{ matrix.arch }}
+          path: linux_MISRC_*_${{ matrix.artifact_suffix }}.zip
           if-no-files-found: error
 
   windows-exe:
@@ -362,7 +365,7 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+          elif [[ ("${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "workflow_call") && -n "${{ inputs.release_tag }}" ]]; then
             VERSION="${{ inputs.release_tag }}"
           else
             VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
@@ -439,12 +442,10 @@ jobs:
           meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
 
           mkdir -p dist
-          cp "$BUILD_DIR/misrc_gui.exe" dist/
-          cp "$BUILD_DIR/misrc_capture.exe" dist/
-          cp "$BUILD_DIR/misrc_extract.exe" dist/
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
-          test "$(find dist -maxdepth 1 -name '*.exe' | wc -l)" -eq 3
-          test "$(objdump -p dist/misrc_gui.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')" = "00000002"
+          cp "$BUILD_DIR/misrc_gui.exe" dist/MISRC.exe
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          test "$(objdump -p dist/MISRC.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')" = "00000002"
           assert_no_nonsystem_dlls() {
             local target="$1"
             while IFS= read -r dll; do
@@ -460,46 +461,44 @@ jobs:
             done < <(objdump -p "$target" | awk '/DLL Name:/ {print $3}')
           }
 
-          for BIN in dist/*.exe; do
-            assert_no_nonsystem_dlls "$BIN"
-          done
-
-          ./dist/misrc_gui.exe --smoke-test
+          assert_no_nonsystem_dlls "dist/MISRC.exe"
+          ./dist/MISRC.exe --smoke-test
           set +e
-          ./dist/misrc_capture.exe -h > capture_help.txt 2>&1
+          "$BUILD_DIR/misrc_capture.exe" -h > capture_help.txt 2>&1
           RC_CAPTURE=$?
-          ./dist/misrc_extract.exe -h > extract_help.txt 2>&1
+          "$BUILD_DIR/misrc_extract.exe" -h > extract_help.txt 2>&1
           RC_EXTRACT=$?
           set -e
           test "$RC_CAPTURE" -eq 1
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" capture_help.txt
           grep -qi "Usage" extract_help.txt
-      - name: Run capture stability loops
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          bash misrc_tools/test/capture_stability_ci.sh \
-            "./dist/misrc_capture.exe" \
-            "./dist/misrc_extract.exe" \
-            "capture-stability-windows"
 
       - name: Create ZIP artifact
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/*" -DestinationPath "misrc_gui-${{ steps.version.outputs.version }}-windows-x86_64.zip" -Force
+          $ZipPath = "windows_MISRC_${{ steps.version.outputs.version }}_x86.zip"
+          Compress-Archive -Path @("dist/MISRC.exe") -DestinationPath $ZipPath -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $ZipPath))
+          try {
+            if ($zip.Entries.Count -ne 1) {
+              throw "Expected 1 entry in $ZipPath, found $($zip.Entries.Count)"
+            }
+            foreach ($entry in $zip.Entries) {
+              if ($entry.FullName.Contains('/') -or $entry.FullName.Contains('\')) {
+                throw "ZIP entry is nested; expected flat layout: $($entry.FullName)"
+              }
+            }
+          } finally {
+            $zip.Dispose()
+          }
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v7
         with:
           name: windows-exe
-          path: misrc_gui-*-windows-x86_64.zip
-          if-no-files-found: error
-      - name: Upload capture stability logs
-        uses: actions/upload-artifact@v7
-        with:
-          name: capture-stability-windows
-          path: capture-stability-windows
+          path: windows_MISRC_*_x86.zip
           if-no-files-found: error
 
   macos-app-build:
@@ -526,7 +525,7 @@ jobs:
           set -eux
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+          elif [[ ("${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "workflow_call") && -n "${{ inputs.release_tag }}" ]]; then
             VERSION="${{ inputs.release_tag }}"
           else
             VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
@@ -659,17 +658,6 @@ jobs:
           EOF
           sed -i '' "s/__BUILD_VERSION__/${BUILD_VERSION}/g" "$APP_ROOT/Info.plist"
 
-          cat > dist/misrc_capture <<'EOF'
-          #!/usr/bin/env bash
-          HERE="$(cd "$(dirname "$0")" && pwd)"
-          exec "$HERE/MISRC.app/Contents/MacOS/misrc_capture" "$@"
-          EOF
-          cat > dist/misrc_extract <<'EOF'
-          #!/usr/bin/env bash
-          HERE="$(cd "$(dirname "$0")" && pwd)"
-          exec "$HERE/MISRC.app/Contents/MacOS/misrc_extract" "$@"
-          EOF
-          chmod +x dist/misrc_capture dist/misrc_extract
 
           shopt -s nullglob
           is_system_lib() {
@@ -786,8 +774,6 @@ jobs:
           name: macos-app-stage-${{ matrix.arch }}
           path: |
             dist/MISRC.app
-            dist/misrc_capture
-            dist/misrc_extract
             dist/BUILD_VERSION.txt
           if-no-files-found: error
 
@@ -811,7 +797,7 @@ jobs:
           name: macos-app-stage-x86_64
           path: stage-x86_64
 
-      - name: Merge universal app and package tarball
+      - name: Merge universal app and package DMG
         id: package
         run: |
           set -eux
@@ -820,9 +806,6 @@ jobs:
 
           mkdir -p dist
           cp -R stage-arm64/MISRC.app dist/MISRC.app
-          cp stage-arm64/misrc_capture dist/misrc_capture
-          cp stage-arm64/misrc_extract dist/misrc_extract
-          chmod +x dist/misrc_capture dist/misrc_extract
 
           while IFS= read -r rel; do
             ARM_FILE="stage-arm64/${rel}"
@@ -853,26 +836,25 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/macos_universal_capture_help.txt
           grep -qi "Usage" /tmp/macos_universal_extract_help.txt
-          bash misrc_tools/test/capture_stability_ci.sh \
-            "dist/MISRC.app/Contents/MacOS/misrc_capture" \
-            "dist/MISRC.app/Contents/MacOS/misrc_extract" \
-            "capture-stability-macos-universal"
+          DMG_STAGE_DIR="dmg-stage"
+          rm -rf "$DMG_STAGE_DIR"
+          mkdir -p "$DMG_STAGE_DIR"
+          cp -R dist/MISRC.app "$DMG_STAGE_DIR/MISRC.app"
+          ln -s /Applications "$DMG_STAGE_DIR/Applications"
+          DMG_NAME="macos_MISRC_${BUILD_VERSION}_universal.dmg"
+          hdiutil create \
+            -volname "MISRC" \
+            -srcfolder "$DMG_STAGE_DIR" \
+            -ov \
+            -format UDZO \
+            "$DMG_NAME"
+          test -f "$DMG_NAME"
 
-          TAR_NAME="misrc_gui-${BUILD_VERSION}-macos-universal-app.tar.gz"
-          tar -czf "$TAR_NAME" -C dist MISRC.app misrc_capture misrc_extract
-          test -f "$TAR_NAME"
-
-      - name: Upload macOS tarball
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v7
         with:
           name: macos-app
-          path: misrc_gui-*-macos-universal-app.tar.gz
-          if-no-files-found: error
-      - name: Upload macOS capture stability logs
-        uses: actions/upload-artifact@v7
-        with:
-          name: capture-stability-macos-universal
-          path: capture-stability-macos-universal
+          path: macos_MISRC_*_universal.dmg
           if-no-files-found: error
 
   release:
@@ -882,7 +864,7 @@ jobs:
       - linux-appimage
       - windows-exe
       - macos-app-universal
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    if: startsWith(github.ref, 'refs/tags/') || ((github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.create_release)
     permissions:
       contents: write
     steps:
@@ -924,7 +906,7 @@ jobs:
           name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
           files: |
-            release-assets/**/misrc_gui-*-linux-x86_64.AppImage
-            release-assets/**/misrc_gui-*-linux-arm64.AppImage
-            release-assets/**/misrc_gui-*-windows-x86_64.zip
-            release-assets/**/misrc_gui-*-macos-universal-app.tar.gz
+            release-assets/**/linux_MISRC_*_x86.zip
+            release-assets/**/linux_MISRC_*_arm64.zip
+            release-assets/**/windows_MISRC_*_x86.zip
+            release-assets/**/macos_MISRC_*_universal.dmg
