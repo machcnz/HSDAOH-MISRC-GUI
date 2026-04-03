@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run CI guard tests
         run: |
@@ -46,10 +46,10 @@ jobs:
           - macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -76,7 +76,7 @@ jobs:
       - preflight-cross-platform-guards
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve build version
         id: version
@@ -314,13 +314,13 @@ jobs:
           grep -qi "Usage" /tmp/appimage_extract_help.txt
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-appimage-${{ matrix.arch }}
           path: misrc_gui-*-${{ matrix.artifact_suffix }}.AppImage
           if-no-files-found: error
       - name: Upload capture stability logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: capture-stability-linux-${{ matrix.arch }}
           path: capture-stability-${{ matrix.arch }}
@@ -334,7 +334,7 @@ jobs:
       - preflight-cross-platform-guards
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
@@ -490,13 +490,13 @@ jobs:
           Compress-Archive -Path "dist/*" -DestinationPath "misrc_gui-${{ steps.version.outputs.version }}-windows-x86_64.zip" -Force
 
       - name: Upload Windows ZIP
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-exe
           path: misrc_gui-*-windows-x86_64.zip
           if-no-files-found: error
       - name: Upload capture stability logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: capture-stability-windows
           path: capture-stability-windows
@@ -518,7 +518,7 @@ jobs:
       - preflight-cross-platform-guards
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve build version
         id: version
@@ -777,7 +777,7 @@ jobs:
           echo "$BUILD_VERSION" > dist/BUILD_VERSION.txt
 
       - name: Upload macOS architecture stage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-app-stage-${{ matrix.arch }}
           path: |
@@ -794,15 +794,15 @@ jobs:
       - macos-app-build
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Download arm64 stage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-app-stage-arm64
           path: stage-arm64
 
       - name: Download x86_64 stage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-app-stage-x86_64
           path: stage-x86_64
@@ -859,13 +859,13 @@ jobs:
           test -f "$TAR_NAME"
 
       - name: Upload macOS tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-app
           path: misrc_gui-*-macos-universal-app.tar.gz
           if-no-files-found: error
       - name: Upload macOS capture stability logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: capture-stability-macos-universal
           path: capture-stability-macos-universal
@@ -883,12 +883,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 

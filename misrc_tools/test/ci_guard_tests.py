@@ -83,6 +83,28 @@ def check_cross_platform_smoke_tests(workflow_path: Path) -> int:
         if smoke not in workflow_text:
             return fail(f"Missing expected smoke test command in workflow: {smoke}")
     return 0
+def check_actions_runtime_policy(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    forbidden_action_pins = [
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ]
+    for pin in forbidden_action_pins:
+        if pin in workflow_text:
+            return fail(f"Workflow contains deprecated action pin that triggers warning annotations: {pin}")
+
+    required_action_pins = [
+        "actions/checkout@v6",
+        "actions/setup-python@v6",
+        "actions/upload-artifact@v7",
+        "actions/download-artifact@v8",
+    ]
+    for pin in required_action_pins:
+        if pin not in workflow_text:
+            return fail(f"Workflow is missing expected modern action pin: {pin}")
+    return 0
 
 
 def check_linux_desktop_metadata(workflow_path: Path) -> int:
@@ -301,6 +323,7 @@ def main() -> int:
 
     checks: List[Tuple[str, Callable[[], int]]] = [
         ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
+        ("actions runtime policy", lambda: check_actions_runtime_policy(workflow_path)),
         ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
         ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),
