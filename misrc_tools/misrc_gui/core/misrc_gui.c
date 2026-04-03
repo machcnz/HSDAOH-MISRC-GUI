@@ -149,16 +149,20 @@ int main(int argc, char **argv) {
     // Initialize raylib window
     unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT;
     SetConfigFlags(window_flags);
-    // Larger default so the Settings panel is usable without manual resizing.
+    // Keep defaults usable while fitting common laptop screens.
+    const int default_window_width = 1360;
+    const int default_window_height = 720;
+    const int min_window_width = 1000;
+    const int min_window_height = 650;
     char window_title[128];
     snprintf(window_title, sizeof(window_title), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
-    InitWindow(1600, 900, window_title);
+    InitWindow(default_window_width, default_window_height, window_title);
     Image app_icon = LoadImageFromMemory(".png", misrc_icon_png_data, misrc_icon_png_data_size);
     if (app_icon.data != NULL) {
         SetWindowIcon(app_icon);
         UnloadImage(app_icon);
     }
-    SetWindowMinSize(1200, 750);
+    SetWindowMinSize(min_window_width, min_window_height);
     SetTraceLogLevel(debug_view ? LOG_INFO : LOG_WARNING);
     SetTargetFPS(60);
     SetExitKey(0);  // Disable escape key auto-close

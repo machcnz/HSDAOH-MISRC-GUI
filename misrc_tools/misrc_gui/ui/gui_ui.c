@@ -168,6 +168,14 @@ static CustomLayoutElement s_vu_a_element;
 static CustomLayoutElement s_vu_b_element;
 static CustomLayoutElement s_settings_icon_element;
 
+static int toolbar_title_font_size(void) {
+    int width = GetScreenWidth();
+    if (width <= 1280) return 18;
+    if (width <= 1440) return 20;
+    if (width <= 1680) return 22;
+    return 24;
+}
+
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
     if (!app->settings_panel_open) return;
@@ -654,7 +662,7 @@ static void render_toolbar(gui_app_t *app) {
         // Title
         snprintf(temp_title_buf, sizeof(temp_title_buf), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
         CLAY_TEXT(make_string(temp_title_buf),
-            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_TITLE, .textColor = to_clay_color(COLOR_TEXT) }));
+            CLAY_TEXT_CONFIG({ .fontSize = toolbar_title_font_size(), .textColor = to_clay_color(COLOR_TEXT) }));
 
         // Spacer
         CLAY(CLAY_ID("ToolbarSpacer1"), {

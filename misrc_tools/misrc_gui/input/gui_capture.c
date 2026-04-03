@@ -844,7 +844,8 @@ int gui_app_start_capture(gui_app_t *app) {
     if (r < 0) {
         fprintf(stderr, "[GUI] hsdaoh_open2 failed: %d\n", r);
         gui_app_set_status(app, "Failed to open device");
-        hsdaoh_close(app->hs_dev);
+        /* hsdaoh_open2() may already free the allocated handle on failure
+         * (for example on access/permission errors), so do not close here. */
         app->hs_dev = NULL;
         return -1;
     }
