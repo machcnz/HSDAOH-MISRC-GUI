@@ -27,6 +27,7 @@
 #include "../processing/gui_display_thread.h"
 #include "../output/gui_audio.h"
 #include <hsdaoh.h>
+#include "../../misrc_capture/simple_capture/simple_capture.h"
 
 #ifndef HSDAOH_UPSTREAM
 // Frame-based mode only (MISRC)
@@ -326,6 +327,23 @@ void gui_capture_callback(void *data_info_ptr) {
     if (s_callback_count <= 3 && misrc_debug_enabled()) {
         fprintf(stderr, "[CB] Wrote %zu bytes to ringbuffer\n", result.stream0_bytes);
     }
+}
+
+static void gui_simple_capture_callback(sc_data_info_t *sc_data_info)
+{
+    if (!sc_data_info) {
+        return;
+    }
+
+    hsdaoh_data_info_t hs_data_info;
+    memset(&hs_data_info, 0, sizeof(hs_data_info));
+    hs_data_info.ctx = sc_data_info->ctx;
+    hs_data_info.buf = (unsigned char *)sc_data_info->data;
+    hs_data_info.width = sc_data_info->width;
+    hs_data_info.height = sc_data_info->height;
+    hs_data_info.len = sc_data_info->len;
+
+    gui_capture_callback(&hs_data_info);
 }
 //#endif /* HSDAOH_UPSTREAM */
 #else /* HSDAOH_UPSTREAM */
@@ -749,10 +767,6 @@ int gui_app_start_capture(gui_app_t *app) {
         }
         return gui_playback_start(app, file_a, file_b);
     }
-    if (dev->type == DEVICE_TYPE_SIMPLE_CAPTURE) {
-        gui_app_set_status(app, "Simple-capture devices are not supported by GUI capture");
-        return -1;
-    }
 
 #ifdef ENABLE_FX3
     // Handle FX3 device
@@ -818,56 +832,85 @@ int gui_app_start_capture(gui_app_t *app) {
  
 // Open device
     int r = -1;
+    app->hs_dev = NULL;
+    app->sc_dev = NULL;
 
+    if (dev->type == DEVICE_TYPE_SIMPLE_CAPTURE) {
 #ifdef HSDAOH_UPSTREAM
-    fprintf(stderr, "[GUI] Opening device index %d (HSDAOH_UPSTREAM)...\n", dev->index);
-
-    r = hsdaoh_open(&app->hs_dev, dev->index);
-    if (r < 0 || !app->hs_dev) {
-        fprintf(stderr, "[GUI] RP-hsdaoh_open failed: %d\n", r);
-        gui_app_set_status(app, "Failed to open device");
-        app->hs_dev = NULL;
+        gui_app_set_status(app, "Simple-capture unavailable in HSDAOH_UPSTREAM build");
         return -1;
-    }
-    hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
 #else
-    fprintf(stderr, "[GUI] Allocating device...\n");
+        fprintf(stderr, "[GUI] Opening %s device %s...\n", sc_get_impl_name(), dev->serial);
+        r = sc_start_capture(dev->serial, 1920, 1080, SC_CODEC_YUYV, 60, 1,
+                             gui_simple_capture_callback, app, &app->sc_dev);
+        if (r < 0 || !app->sc_dev) {
+            fprintf(stderr, "[GUI] sc_start_capture failed: %d\n", r);
+            gui_app_set_status(app, "Failed to open simple-capture device");
+            app->sc_dev = NULL;
+            return -1;
+        }
+#endif
+    } else {
+#ifdef HSDAOH_UPSTREAM
+        fprintf(stderr, "[GUI] Opening device index %d (HSDAOH_UPSTREAM)...\n", dev->index);
 
-    r = hsdaoh_alloc(&app->hs_dev); // MISRC original path
-    if (r < 0) {
-        fprintf(stderr, "[GUI] hsdaoh_alloc failed: %d\n", r);
-        gui_app_set_status(app, "Failed to allocate device");
-        return -1;
-    }
+        r = hsdaoh_open(&app->hs_dev, dev->index);
+        if (r < 0 || !app->hs_dev) {
+            fprintf(stderr, "[GUI] RP-hsdaoh_open failed: %d\n", r);
+            if (r == -3) {
+                gui_app_set_status(app, "Permission denied opening MS2130 via libusb; run misrc_gui with sudo");
+                return -3;
+            } else {
+                gui_app_set_status(app, "Failed to open device");
+            }
+            app->hs_dev = NULL;
+            return -1;
+        }
+        hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
+#else
+        fprintf(stderr, "[GUI] Allocating device...\n");
 
-    r = hsdaoh_open2(app->hs_dev, dev->index);
-    if (r < 0) {
-        fprintf(stderr, "[GUI] hsdaoh_open2 failed: %d\n", r);
-        gui_app_set_status(app, "Failed to open device");
-        /* hsdaoh_open2() may already free the allocated handle on failure
-         * (for example on access/permission errors), so do not close here. */
-        app->hs_dev = NULL;
-        return -1;
-    }
+        r = hsdaoh_alloc(&app->hs_dev); // MISRC original path
+        if (r < 0) {
+            fprintf(stderr, "[GUI] hsdaoh_alloc failed: %d\n", r);
+            gui_app_set_status(app, "Failed to allocate device");
+            return -1;
+        }
 
-    hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
-    hsdaoh_raw_callback(app->hs_dev, true);
+        r = hsdaoh_open2(app->hs_dev, dev->index);
+        if (r < 0) {
+            fprintf(stderr, "[GUI] hsdaoh_open2 failed: %d\n", r);
+            if (r == -3) {
+                gui_app_set_status(app, "Permission denied opening MS2130 via libusb; run misrc_gui with sudo");
+                return -3;
+            } else {
+                gui_app_set_status(app, "Failed to open device");
+            }
+            /* hsdaoh_open2() may already free the allocated handle on failure
+             * (for example on access/permission errors), so do not close here. */
+            app->hs_dev = NULL;
+            return -1;
+        }
+
+        hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
+        hsdaoh_raw_callback(app->hs_dev, true);
 #endif
 
-    fprintf(stderr, "[GUI] Starting stream...\n");
+        fprintf(stderr, "[GUI] Starting stream...\n");
 
 #ifdef HSDAOH_UPSTREAM
-    r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
+        r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
 #else
-    r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
+        r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
 #endif
 
-    if (r < 0) {
-        fprintf(stderr, "[GUI] hsdaoh_start_stream failed: %d\n", r);
-        gui_app_set_status(app, "Failed to start stream");
-        hsdaoh_close(app->hs_dev);
-        app->hs_dev = NULL;
-        return -1;
+        if (r < 0) {
+            fprintf(stderr, "[GUI] hsdaoh_start_stream failed: %d\n", r);
+            gui_app_set_status(app, "Failed to start stream");
+            hsdaoh_close(app->hs_dev);
+            app->hs_dev = NULL;
+            return -1;
+        }
     }
 
 
@@ -901,9 +944,15 @@ int gui_app_start_capture(gui_app_t *app) {
     if (r < 0) {
         fprintf(stderr, "[GUI] Failed to start extraction thread\n");
         gui_app_set_status(app, "Failed to start extraction");
-        hsdaoh_stop_stream(app->hs_dev);
-        hsdaoh_close(app->hs_dev);
-        app->hs_dev = NULL;
+        if (app->hs_dev) {
+            hsdaoh_stop_stream(app->hs_dev);
+            hsdaoh_close(app->hs_dev);
+            app->hs_dev = NULL;
+        }
+        if (app->sc_dev) {
+            sc_stop_capture(app->sc_dev);
+            app->sc_dev = NULL;
+        }
         app->is_capturing = false;
         return -1;
     }
@@ -972,6 +1021,10 @@ void gui_app_stop_capture(gui_app_t *app) {
         hsdaoh_stop_stream(app->hs_dev);
         hsdaoh_close(app->hs_dev);
         app->hs_dev = NULL;
+    }
+    if (app->sc_dev) {
+        sc_stop_capture(app->sc_dev);
+        app->sc_dev = NULL;
     }
 
     atomic_store(&app->stream_synced, false);

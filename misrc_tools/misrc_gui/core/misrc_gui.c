@@ -32,6 +32,14 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <unistd.h>
+#include <limits.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <mach-o/dyld.h>
+extern char **environ;
+#endif
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -95,6 +103,129 @@ static int gui_layout_height(void) {
 #endif
     return (height > 0) ? height : 1;
 }
+static bool gui_status_is_permission_denied(const gui_app_t *app) {
+    if (!app) return false;
+    return strstr(app->status_message, "Permission denied") != NULL;
+}
+
+#if defined(__APPLE__)
+static bool gui_append_text(char *dst, size_t dst_cap, size_t *len, const char *src)
+{
+    if (!dst || !len || !src || dst_cap == 0) return false;
+    while (*src) {
+        if ((*len + 1) >= dst_cap) {
+            return false;
+        }
+        dst[(*len)++] = *src++;
+    }
+    dst[*len] = '\0';
+    return true;
+}
+
+static bool gui_append_shell_quoted_arg(char *dst, size_t dst_cap, size_t *len, const char *arg)
+{
+    if (!dst || !len || !arg) return false;
+    if (!gui_append_text(dst, dst_cap, len, "'")) return false;
+    for (const char *p = arg; *p; ++p) {
+        if (*p == '\'') {
+            if (!gui_append_text(dst, dst_cap, len, "'\\''")) return false;
+        } else {
+            char ch[2] = { *p, '\0' };
+            if (!gui_append_text(dst, dst_cap, len, ch)) return false;
+        }
+    }
+    return gui_append_text(dst, dst_cap, len, "'");
+}
+
+static bool gui_get_executable_path(const char *argv0, char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0) return false;
+    out[0] = '\0';
+
+    uint32_t n = (uint32_t)out_cap;
+    if (_NSGetExecutablePath(out, &n) == 0) {
+        char resolved[PATH_MAX];
+        if (realpath(out, resolved)) {
+            snprintf(out, out_cap, "%s", resolved);
+        }
+        return true;
+    }
+
+    if (argv0 && realpath(argv0, out)) {
+        return true;
+    }
+    if (argv0 && argv0[0] != '\0') {
+        snprintf(out, out_cap, "%s", argv0);
+        return true;
+    }
+    return false;
+}
+
+static bool gui_build_elevated_command(int argc, char **argv, char *out, size_t out_cap)
+{
+    if (!argv || !out || out_cap == 0) return false;
+    out[0] = '\0';
+    size_t len = 0;
+
+    char exe_path[PATH_MAX];
+    if (!gui_get_executable_path(argv[0], exe_path, sizeof(exe_path))) {
+        return false;
+    }
+
+    if (!gui_append_text(out, out_cap, &len, "MISRC_GUI_ELEVATED=1 ")) return false;
+    if (!gui_append_shell_quoted_arg(out, out_cap, &len, exe_path)) return false;
+
+    for (int i = 1; i < argc; i++) {
+        if (!gui_append_text(out, out_cap, &len, " ")) return false;
+        if (!gui_append_shell_quoted_arg(out, out_cap, &len, argv[i])) return false;
+    }
+
+    return true;
+}
+
+static int gui_macos_relaunch_as_admin_if_needed(int argc, char **argv)
+{
+    if (geteuid() == 0) {
+        return 0;
+    }
+
+    const char *already_elevated = getenv("MISRC_GUI_ELEVATED");
+    if (already_elevated && strcmp(already_elevated, "1") == 0) {
+        return -1;
+    }
+
+    char command[4096];
+    if (!gui_build_elevated_command(argc, argv, command, sizeof(command))) {
+        return -1;
+    }
+
+    char *const osascript_argv[] = {
+        "osascript",
+        "-e", "on run argv",
+        "-e", "do shell script (item 1 of argv) with administrator privileges",
+        "-e", "end run",
+        command,
+        NULL
+    };
+
+    pid_t pid = 0;
+    int spawn_rc = posix_spawn(&pid, "/usr/bin/osascript", NULL, NULL, osascript_argv, environ);
+    if (spawn_rc != 0) {
+        return -1;
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return -1;
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return 1;
+    }
+
+    return -1;
+}
+#endif
 
 #if defined(_WIN32)
 static void gui_enable_debug_console(void) {
@@ -127,6 +258,16 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
+#if defined(__APPLE__)
+    int elevate_rc = gui_macos_relaunch_as_admin_if_needed(argc, argv);
+    if (elevate_rc > 0) {
+        return 0;
+    }
+    if (elevate_rc < 0) {
+        fprintf(stderr, "Administrator permissions are required for MS2130 hsdaoh/libusb capture.\n");
+        return 1;
+    }
+#endif
 
 #if defined(_WIN32)
     if (debug_view) {
@@ -215,12 +356,14 @@ int main(int argc, char **argv) {
 
     // Autoconnect if a device is found
     if (app.device_count > 0) {
-        if (app.devices[app.selected_device].type == DEVICE_TYPE_SIMPLE_CAPTURE) {
-            gui_app_set_status(&app, "Simple-capture devices are not supported by GUI capture");
+        int connect_rc = 0;
+        gui_app_set_status(&app, "Connecting...");
+        connect_rc = gui_app_start_capture(&app);
+        if (connect_rc == 0) {
+            gui_app_set_status(&app, "Connected");
         } else {
-            gui_app_set_status(&app, "Connecting...");
-            if (gui_app_start_capture(&app) == 0) {
-                gui_app_set_status(&app, "Connected");
+            if (connect_rc == -3 || gui_status_is_permission_denied(&app)) {
+                app.reconnect_pending = false;
             } else {
                 gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
                 app.reconnect_pending = true;
@@ -321,24 +464,22 @@ int main(int argc, char **argv) {
                     gui_app_enumerate_devices(&app);
 
                     if (app.device_count > 0) {
-                        if (app.devices[app.selected_device].type == DEVICE_TYPE_SIMPLE_CAPTURE) {
-                            app.reconnect_pending = false;
-                            gui_app_set_status(&app, "Simple-capture devices are not supported by GUI capture");
-                            continue;
-                        }
+                        int reconnect_rc = 0;
                         char status_buf[128];
                         snprintf(status_buf, sizeof(status_buf), "Reconnecting (attempt %d)...", app.reconnect_attempts);
                         gui_app_set_status(&app, status_buf);
-
-                        if (gui_app_start_capture(&app) == 0) {
+                        reconnect_rc = gui_app_start_capture(&app);
+                        if (reconnect_rc == 0) {
                             app.reconnect_pending = false;
                             app.reconnect_attempts = 0;
                             gui_app_set_status(&app, "Reconnected");
+                        } else if (reconnect_rc == -3 || gui_status_is_permission_denied(&app)) {
+                            app.reconnect_pending = false;
                         }
                     } else {
-                        char status_buf[128];
-                        snprintf(status_buf, sizeof(status_buf), "No device found (attempt %d)", app.reconnect_attempts);
-                        gui_app_set_status(&app, status_buf);
+                        char status_buf_no_dev[128];
+                        snprintf(status_buf_no_dev, sizeof(status_buf_no_dev), "No device found (attempt %d)", app.reconnect_attempts);
+                        gui_app_set_status(&app, status_buf_no_dev);
                     }
                 }
             }
