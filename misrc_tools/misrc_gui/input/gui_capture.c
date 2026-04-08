@@ -10,6 +10,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOGDI
+#define NOGDI
+#endif
 #endif
 
 #include "gui_capture.h"
@@ -32,7 +35,15 @@
 #include "../processing/gui_display_thread.h"
 #include "../output/gui_audio.h"
 #include <hsdaoh.h>
+#if defined(_WIN32)
+#define CloseWindow Win32_CloseWindow
+#define ShowCursor Win32_ShowCursor
+#endif
 #include "../../misrc_capture/simple_capture/simple_capture.h"
+#if defined(_WIN32)
+#undef ShowCursor
+#undef CloseWindow
+#endif
 
 #ifndef HSDAOH_UPSTREAM
 // Frame-based mode only (MISRC)
