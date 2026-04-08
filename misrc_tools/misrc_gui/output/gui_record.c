@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <math.h>
+#include <time.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <io.h>
@@ -57,6 +58,26 @@ static void format_file_size_u64(uint64_t size, char *buf, size_t buf_size) {
     }
 }
 
+static void gui_record_build_system_timestamp(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    time_t t = time(NULL);
+    if (t == (time_t)-1) return;
+    struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+    if (localtime_s(&tmv, &t) != 0) return;
+#else
+    if (!localtime_r(&t, &tmv)) return;
+#endif
+    snprintf(dst, dst_len, "%04d.%02d.%02d_%02d.%02d.%02d",
+             (tmv.tm_year + 1900),
+             tmv.tm_mon + 1,
+             tmv.tm_mday,
+             tmv.tm_hour,
+             tmv.tm_min,
+             tmv.tm_sec);
+}
+
 // do_exit is declared in gui_capture.h (defined in misrc_gui.c)
 
 // Writer threads
@@ -73,9 +94,11 @@ static gui_app_t *s_recording_app = NULL;
 static bool s_overwrite_pending = false;
 static gui_app_t *s_pending_app = NULL;
 
-// Backpressure stats at recording start (to compute delta)
-static uint32_t s_start_wait_count = 0;
-static uint32_t s_start_drop_count = 0;
+// Record-buffer backpressure stats at recording start (to compute per-session deltas)
+static uint32_t s_start_rec_a_wait_count = 0;
+static uint32_t s_start_rec_a_drop_count = 0;
+static uint32_t s_start_rec_b_wait_count = 0;
+static uint32_t s_start_rec_b_drop_count = 0;
 
 // File writer context
 typedef struct {
@@ -566,11 +589,16 @@ static void gui_record_apply_auto_names(gui_app_t *app) {
 
     const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
 
-    // Optionally append capture-start timestamp (does not mutate output_base_name)
+    // Optionally append system timestamp sampled at record-start.
+    // This does not mutate output_base_name.
     char base_with_ts[256];
-    if (app->settings.append_timestamp_on_capture_start && app->capture_timestamp[0]) {
-        snprintf(base_with_ts, sizeof(base_with_ts), "%s_%s", base, app->capture_timestamp);
-        base = base_with_ts;
+    if (app->settings.append_timestamp_on_capture_start) {
+        char timestamp_now[32];
+        gui_record_build_system_timestamp(timestamp_now, sizeof(timestamp_now));
+        if (timestamp_now[0]) {
+            snprintf(base_with_ts, sizeof(base_with_ts), "%s_%s", base, timestamp_now);
+            base = base_with_ts;
+        }
     }
 
     // RF filenames
@@ -871,12 +899,25 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         config_b.sample_rate = (app->settings.enable_resample_b && app->settings.resample_rate_b > 0.0f)
                                  ? (uint32_t)(app->settings.resample_rate_b)
                                  : 40000;
+        int effective_flac_level = app->settings.flac_level;
+        bool high_rate_capture = ((app->settings.capture_a &&
+                                   !app->settings.enable_resample_a &&
+                                   config_a.sample_rate >= 20000) ||
+                                  (app->settings.capture_b &&
+                                   !app->settings.enable_resample_b &&
+                                   config_b.sample_rate >= 20000));
+        if (high_rate_capture && effective_flac_level > 1) {
+            fprintf(stderr,
+                    "[REC] FLAC level %d reduced to 1 for realtime high-rate capture stability\\n",
+                    app->settings.flac_level);
+            effective_flac_level = 1;
+        }
 
         // bits_per_sample is set per-channel below
         config_a.bits_per_sample = 16;
         config_b.bits_per_sample = 16;
-        config_a.compression_level = app->settings.flac_level;
-        config_b.compression_level = app->settings.flac_level;
+        config_a.compression_level = effective_flac_level;
+        config_b.compression_level = effective_flac_level;
         config_a.verify = app->settings.flac_verification;
         config_b.verify = app->settings.flac_verification;
         config_a.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto
@@ -925,10 +966,14 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_b = NULL;
             s_ctx_b.writer = NULL;
         }
+        bool started_a = false;
+        bool started_b = false;
 
-        // Capture backpressure stats at recording start
-        s_start_wait_count = atomic_load(&app->rb_wait_count);
-        s_start_drop_count = atomic_load(&app->rb_drop_count);
+        // Capture record-buffer backpressure stats at recording start
+        s_start_rec_a_wait_count = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
+        s_start_rec_a_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
+        s_start_rec_b_wait_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
+        s_start_rec_b_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
 
         // Boost process priority during recording - affects all threads including FLAC encoder threads
         proc_set_priority(PROC_PRIORITY_ABOVE);
@@ -940,12 +985,37 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         // Start writer threads BEFORE enabling recording in extraction thread
         // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
-            thrd_create(&s_writer_thread_a, flac_writer_thread, &s_ctx_a);
+            if (thrd_create(&s_writer_thread_a, flac_writer_thread, &s_ctx_a) != thrd_success) {
+                gui_app_set_status(app, "Failed to start FLAC writer A");
+                app->is_recording = false;
+                proc_set_priority(PROC_PRIORITY_NORMAL);
+                if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
+                if (s_flac_writer_b) { flac_writer_abort(s_flac_writer_b); s_flac_writer_b = NULL; }
+                if (s_file_a) fclose(s_file_a);
+                if (s_file_b) fclose(s_file_b);
+                s_file_a = s_file_b = NULL;
+                s_recording_app = NULL;
+                return RECORD_ERROR;
+            }
+            started_a = true;
         }
         if (app->settings.capture_b) {
-            thrd_create(&s_writer_thread_b, flac_writer_thread, &s_ctx_b);
+            if (thrd_create(&s_writer_thread_b, flac_writer_thread, &s_ctx_b) != thrd_success) {
+                gui_app_set_status(app, "Failed to start FLAC writer B");
+                app->is_recording = false;
+                if (started_a) thrd_join(s_writer_thread_a, NULL);
+                proc_set_priority(PROC_PRIORITY_NORMAL);
+                if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
+                if (s_flac_writer_b) { flac_writer_abort(s_flac_writer_b); s_flac_writer_b = NULL; }
+                if (s_file_a) fclose(s_file_a);
+                if (s_file_b) fclose(s_file_b);
+                s_file_a = s_file_b = NULL;
+                s_recording_app = NULL;
+                return RECORD_ERROR;
+            }
+            started_b = true;
         }
-        s_writer_threads_running = true;
+        s_writer_threads_running = started_a || started_b;
 
         // Small delay to let writer threads initialize and start waiting on buffers
         thrd_sleep_ms(10);
@@ -1004,10 +1074,14 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_ctx_b.soxr = NULL;
         s_ctx_b.soxr_rate_khz = 0.0f;
 #endif
+        bool started_a = false;
+        bool started_b = false;
 
-        // Capture backpressure stats at recording start
-        s_start_wait_count = atomic_load(&app->rb_wait_count);
-        s_start_drop_count = atomic_load(&app->rb_drop_count);
+        // Capture record-buffer backpressure stats at recording start
+        s_start_rec_a_wait_count = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
+        s_start_rec_a_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
+        s_start_rec_b_wait_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
+        s_start_rec_b_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
 
         // Boost process priority during recording
         proc_set_priority(PROC_PRIORITY_ABOVE);
@@ -1019,12 +1093,33 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         // Start writer threads BEFORE enabling recording in extraction thread
         // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
-            thrd_create(&s_writer_thread_a, raw_writer_thread, &s_ctx_a);
+            if (thrd_create(&s_writer_thread_a, raw_writer_thread, &s_ctx_a) != thrd_success) {
+                gui_app_set_status(app, "Failed to start RAW writer A");
+                app->is_recording = false;
+                proc_set_priority(PROC_PRIORITY_NORMAL);
+                if (s_file_a) fclose(s_file_a);
+                if (s_file_b) fclose(s_file_b);
+                s_file_a = s_file_b = NULL;
+                s_recording_app = NULL;
+                return RECORD_ERROR;
+            }
+            started_a = true;
         }
         if (app->settings.capture_b) {
-            thrd_create(&s_writer_thread_b, raw_writer_thread, &s_ctx_b);
+            if (thrd_create(&s_writer_thread_b, raw_writer_thread, &s_ctx_b) != thrd_success) {
+                gui_app_set_status(app, "Failed to start RAW writer B");
+                app->is_recording = false;
+                if (started_a) thrd_join(s_writer_thread_a, NULL);
+                proc_set_priority(PROC_PRIORITY_NORMAL);
+                if (s_file_a) fclose(s_file_a);
+                if (s_file_b) fclose(s_file_b);
+                s_file_a = s_file_b = NULL;
+                s_recording_app = NULL;
+                return RECORD_ERROR;
+            }
+            started_b = true;
         }
-        s_writer_threads_running = true;
+        s_writer_threads_running = started_a || started_b;
 
         // Small delay to let writer threads initialize and start waiting on buffers
         thrd_sleep_ms(10);
@@ -1106,14 +1201,16 @@ void gui_record_stop(gui_app_t *app) {
     double duration = GetTime() - app->recording_start_time;
     uint64_t raw_a = atomic_load(&app->recording_raw_a);
     uint64_t raw_b = atomic_load(&app->recording_raw_b);
-    uint32_t end_wait = atomic_load(&app->rb_wait_count);
-    uint32_t end_drop = atomic_load(&app->rb_drop_count);
-    uint32_t rec_waits = end_wait - s_start_wait_count;
-    uint32_t rec_drops = end_drop - s_start_drop_count;
-    uint32_t rec_a_waits = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
-    uint32_t rec_a_drops = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
-    uint32_t rec_b_waits = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
-    uint32_t rec_b_drops = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
+    uint32_t end_rec_a_waits = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
+    uint32_t end_rec_a_drops = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
+    uint32_t end_rec_b_waits = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
+    uint32_t end_rec_b_drops = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
+    uint32_t rec_a_waits = end_rec_a_waits - s_start_rec_a_wait_count;
+    uint32_t rec_a_drops = end_rec_a_drops - s_start_rec_a_drop_count;
+    uint32_t rec_b_waits = end_rec_b_waits - s_start_rec_b_wait_count;
+    uint32_t rec_b_drops = end_rec_b_drops - s_start_rec_b_drop_count;
+    uint32_t rec_waits = rec_a_waits + rec_b_waits;
+    uint32_t rec_drops = rec_a_drops + rec_b_drops;
 
     char size_a[32], size_b[32];
     format_file_size_u64(raw_a, size_a, sizeof(size_a));

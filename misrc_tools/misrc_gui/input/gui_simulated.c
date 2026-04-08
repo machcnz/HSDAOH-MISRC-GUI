@@ -722,6 +722,7 @@ static int simulated_capture_thread(void *ctx) {
 
 int gui_simulated_start(gui_app_t *app) {
     fprintf(stderr, "[SIM] Starting simulated capture\n");
+    bufmgr_reset_stats(&app->buffers, BUF_COUNT);
 
     // Reset statistics
     atomic_store(&app->total_samples, 0);

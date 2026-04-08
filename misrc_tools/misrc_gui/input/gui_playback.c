@@ -718,6 +718,7 @@ int gui_playback_start(gui_app_t *app, const char *file_a, const char *file_b) {
     if (s_playback.info_b.total_samples > s_playback.total_samples) {
         s_playback.total_samples = s_playback.info_b.total_samples;
     }
+    bufmgr_reset_stats(&app->buffers, BUF_COUNT);
 
     // Reset app statistics
     atomic_store(&app->total_samples, 0);

@@ -156,7 +156,7 @@ typedef struct {
     char output_base_name[MAX_FILENAME_LEN];   // Base name for outputs (no extension)
 
     // Timestamp behavior
-    // If true, append a system-time timestamp captured at *capture start* to the base name when generating output filenames.
+    // If true, append a system-time timestamp captured at *record start* to the base name when generating output filenames.
     // This does not mutate output_base_name; it only affects derived filenames.
     bool append_timestamp_on_capture_start;
 
@@ -223,6 +223,7 @@ typedef struct {
     bool audio_monitor_playback;               // If true, play monitored audio to system output
     bool audio_monitor_ch34;                   // If true, monitor CH3/4; if false, monitor CH1/2
     bool misrc_mode;                           // If true, MISRC mode (default) with A/B channel swap
+    bool stop_on_dropout;                      // If true, automatically stop capture when stream dropout is detected
 
     // Per-channel audio labels (for auto naming, e.g. "linear", "baseband")
     char audio_1ch_labels[4][32];
@@ -238,6 +239,15 @@ typedef struct {
     char playback_file_a[MAX_FILENAME_LEN];   // FLAC file for channel A playback
     char playback_file_b[MAX_FILENAME_LEN];   // FLAC file for channel B playback
 } gui_settings_t;
+
+typedef enum {
+    GUI_DROPOUT_NONE = 0,
+    GUI_DROPOUT_MISSED_FRAME = 1,
+    GUI_DROPOUT_FRAME_ERROR = 2,
+    GUI_DROPOUT_ERROR_BURST = 3,
+    GUI_DROPOUT_CALLBACK_GAP = 4,
+    GUI_DROPOUT_DEVICE_ERROR = 5,
+} gui_dropout_reason_t;
 
 // Main application state
 typedef struct gui_app {
@@ -348,6 +358,10 @@ typedef struct gui_app {
     bool reconnect_pending;
     double reconnect_attempt_time;
     int reconnect_attempts;
+
+    // Stop-on-dropout request path (set from capture thread, consumed on main thread)
+    atomic_bool dropout_stop_requested;
+    atomic_uint_fast32_t dropout_stop_reason;
 
     // Device disconnect detection (timestamp of last successful callback)
     atomic_uint_fast64_t last_callback_time_ms;

@@ -335,6 +335,7 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->audio_monitor_playback = false;
     settings->audio_monitor_ch34 = false;  // Default to CH1/2
     settings->misrc_mode = true;           // Default to MISRC mode (A/B swapped)
+    settings->stop_on_dropout = false;
     
     // Display settings
     settings->show_grid = true;
@@ -408,6 +409,7 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"audio_monitor_playback\": %s,\n", settings->audio_monitor_playback ? "true" : "false");
     fprintf(f, "  \"audio_monitor_ch34\": %s,\n", settings->audio_monitor_ch34 ? "true" : "false");
     fprintf(f, "  \"misrc_mode\": %s,\n", settings->misrc_mode ? "true" : "false");
+    fprintf(f, "  \"stop_on_dropout\": %s,\n", settings->stop_on_dropout ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -904,6 +906,9 @@ void gui_settings_load(gui_settings_t *settings) {
     }
     if ((value = find_value(content, "misrc_mode")) != NULL) {
         settings->misrc_mode = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "stop_on_dropout")) != NULL) {
+        settings->stop_on_dropout = (strcmp(value, "true") == 0);
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

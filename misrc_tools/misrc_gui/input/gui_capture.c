@@ -6,6 +6,17 @@
 
 #include <stdarg.h>
 #include <stdatomic.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOGDI
+#define NOGDI
+#endif
+#ifndef NOUSER
+#define NOUSER
+#endif
+#endif
 
 #include "gui_capture.h"
 #include "../core/gui_app.h"
@@ -47,9 +58,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
+#endif
 
 // Define M_PI if not available (Windows compatibility)
 #ifndef M_PI
@@ -68,6 +84,50 @@ static capture_handler_ctx_t s_capture_handler;
 #else
 // Upstream mode audio enable/disable (used by gui_capture_set_audio_capture + upstream callback)
 static atomic_bool s_upstream_capture_audio = ATOMIC_VAR_INIT(true);
+#endif
+
+#if defined(__APPLE__)
+static IOPMAssertionID s_idle_sleep_assertion_id = kIOPMNullAssertionID;
+static IOPMAssertionID s_display_sleep_assertion_id = kIOPMNullAssertionID;
+
+static void gui_capture_hold_power_assertions(void)
+{
+    if (s_idle_sleep_assertion_id == kIOPMNullAssertionID) {
+        IOReturn r = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoIdleSleep,
+                                                 kIOPMAssertionLevelOn,
+                                                 CFSTR("MISRC GUI active capture"),
+                                                 &s_idle_sleep_assertion_id);
+        if (r != kIOReturnSuccess) {
+            fprintf(stderr, "[GUI] Failed to create NoIdleSleep assertion: 0x%x\n", r);
+            s_idle_sleep_assertion_id = kIOPMNullAssertionID;
+        }
+    }
+    if (s_display_sleep_assertion_id == kIOPMNullAssertionID) {
+        IOReturn r = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                                                 kIOPMAssertionLevelOn,
+                                                 CFSTR("MISRC GUI active capture"),
+                                                 &s_display_sleep_assertion_id);
+        if (r != kIOReturnSuccess) {
+            fprintf(stderr, "[GUI] Failed to create display-sleep assertion: 0x%x\n", r);
+            s_display_sleep_assertion_id = kIOPMNullAssertionID;
+        }
+    }
+}
+
+static void gui_capture_release_power_assertions(void)
+{
+    if (s_idle_sleep_assertion_id != kIOPMNullAssertionID) {
+        IOPMAssertionRelease(s_idle_sleep_assertion_id);
+        s_idle_sleep_assertion_id = kIOPMNullAssertionID;
+    }
+    if (s_display_sleep_assertion_id != kIOPMNullAssertionID) {
+        IOPMAssertionRelease(s_display_sleep_assertion_id);
+        s_display_sleep_assertion_id = kIOPMNullAssertionID;
+    }
+}
+#else
+static void gui_capture_hold_power_assertions(void) {}
+static void gui_capture_release_power_assertions(void) {}
 #endif
 
 // Message callback for hsdaoh
@@ -98,7 +158,17 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    bool counted = false;
+    const char *level_str = "INFO";
+    if (level == HSDAOH_WARNING) level_str = "WARN";
+    else if (level == HSDAOH_ERROR) level_str = "ERROR";
+    else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
+
+    if (!app->is_capturing) {
+        if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
+            fprintf(stderr, "[%s] %s", level_str, buffer);
+        }
+        return;
+    }
     
 #ifdef HSDAOH_UPSTREAM
     /*
@@ -119,19 +189,13 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
             atomic_fetch_add(&app->error_count, (unsigned int)n);
         else
             atomic_fetch_add(&app->error_count, 1);
-        counted = true;
     } else if (strstr(buffer, "Buffer dropped due to overrun")) {
         atomic_fetch_add(&app->rb_drop_count, 1);
-        counted = true;
     }
     // 2) Cache the last message for the UI thread to apply (no GUI mutation here)
     gui_hsdaoh_cache_message(app, level, buffer);
    
     // Print to console only when debug enabled, except always show ERROR/CRITICAL
-    const char *level_str = "INFO";
-    if (level == HSDAOH_WARNING) level_str = "WARN";
-    else if (level == HSDAOH_ERROR) level_str = "ERROR";
-    else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
 
     if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()){
         fprintf(stderr, "[%s] %s", level_str, buffer);
@@ -146,10 +210,6 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         atomic_fetch_add(&app->error_count, 1);
     }
 
-    const char *level_str = "INFO";
-    if (level == HSDAOH_WARNING) level_str = "WARN";
-    else if (level == HSDAOH_ERROR) level_str = "ERROR";
-    else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
 
     if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
         fprintf(stderr, "[%s] %s", level_str, buffer);
@@ -159,6 +219,52 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
 
 // Debug counter
 static int s_callback_count = 0;
+static uint32_t s_capture_last_wait_count = 0;
+static uint32_t s_capture_last_drop_count = 0;
+static uint32_t s_capture_missed_streak = 0;
+static uint32_t s_capture_error_streak = 0;
+static uint64_t s_capture_prev_callback_time_ms = 0;
+// Only treat substantial callback stalls as parser-desync events.
+// Short scheduler jitter should not force a parser reset.
+static const uint64_t s_capture_gap_resync_threshold_ms = 1000;
+static const int s_capture_error_burst_resync_threshold = 64;
+static const backpressure_policy_t s_capture_rf_write_policy = {
+    .max_wait_attempts = 8,
+    .wait_timeout_ms = 1,
+    .log_first_wait = true,
+    .log_drops = true,
+};
+static const backpressure_policy_t s_capture_audio_write_policy = {
+    .max_wait_attempts = 8,
+    .wait_timeout_ms = 1,
+    .log_first_wait = true,
+    .log_drops = true,
+};
+
+static inline void gui_capture_update_backpressure_counters(gui_app_t *app)
+{
+    if (!app) return;
+
+    uint32_t waits = atomic_load(&app->buffers.stats[BUF_CAPTURE_RF].write_waits);
+    uint32_t drops = atomic_load(&app->buffers.stats[BUF_CAPTURE_RF].write_drops);
+
+    if (waits > s_capture_last_wait_count) {
+        atomic_fetch_add(&app->rb_wait_count, waits - s_capture_last_wait_count);
+    }
+    if (drops > s_capture_last_drop_count) {
+        atomic_fetch_add(&app->rb_drop_count, drops - s_capture_last_drop_count);
+    }
+
+    s_capture_last_wait_count = waits;
+    s_capture_last_drop_count = drops;
+}
+
+static inline void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_reason_t reason)
+{
+    if (!app || !app->settings.stop_on_dropout) return;
+    atomic_store(&app->dropout_stop_reason, (uint32_t)reason);
+    atomic_store(&app->dropout_stop_requested, true);
+}
 
 void gui_capture_set_audio_capture(bool enabled)
 {
@@ -192,6 +298,7 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 fprintf(stderr, "[CB] Lost sync to HDMI input stream\n");
             }
             atomic_store(&app->stream_synced, false);
+            s_capture_missed_streak = 0;
             break;
         case FRAME_SYNC_MISSED:
             if (misrc_debug_enabled()) {
@@ -203,16 +310,24 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                     fprintf(stderr, "[CB] Missed frame(s)\n");
                 }
             }
-            atomic_fetch_add(&app->missed_frame_count, 1);
+            s_capture_missed_streak++;
+            if (s_capture_missed_streak >= 2) {
+                atomic_fetch_add(&app->missed_frame_count, 1);
+                gui_capture_request_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
+            }
             break;
         case FRAME_SYNC_ACQUIRED:
             if (misrc_debug_enabled()) {
                 fprintf(stderr, "[CB] Synchronized to HDMI input stream\n");
             }
             atomic_store(&app->stream_synced, true);
+            s_capture_missed_streak = 0;
             break;
         case FRAME_SYNC_DUPLICATE:
+            s_capture_missed_streak = 0;
+            break;
         case FRAME_SYNC_OK:
+            s_capture_missed_streak = 0;
             break;
     }
 }
@@ -233,12 +348,40 @@ void gui_capture_callback(void *data_info_ptr) {
     if (!app) return;
     if (!data_info->buf) return;
     // Any callback activity means the capture path is still alive.
-    atomic_store(&app->last_callback_time_ms, get_time_ms());
+    uint64_t now_ms = get_time_ms();
+    atomic_store(&app->last_callback_time_ms, now_ms);
+    if (s_capture_prev_callback_time_ms != 0) {
+        uint64_t elapsed = now_ms - s_capture_prev_callback_time_ms;
+        if (now_ms < s_capture_prev_callback_time_ms) {
+            elapsed = (UINT64_MAX - s_capture_prev_callback_time_ms) + now_ms + 1;
+        }
+        if (elapsed > s_capture_gap_resync_threshold_ms) {
+            if (app->settings.stop_on_dropout) {
+                gui_capture_request_dropout_stop(app, GUI_DROPOUT_CALLBACK_GAP);
+                s_capture_prev_callback_time_ms = now_ms;
+                return;
+            }
+            if (misrc_debug_enabled()) {
+                fprintf(stderr,
+                        "[CB] Callback gap %" PRIu64 "ms detected, forcing parser resync\n",
+                        elapsed);
+            }
+            frame_parser_init(&s_capture_handler.frame_state);
+            capture_handler_reset_audio_sync(&s_capture_handler);
+            atomic_store(&app->stream_synced, false);
+            s_capture_missed_streak = 0;
+            s_capture_error_streak = 0;
+            s_capture_prev_callback_time_ms = now_ms;
+            return;
+        }
+    }
+    s_capture_prev_callback_time_ms = now_ms;
     if (data_info->width == 0 || data_info->height == 0) return;
 
     if (data_info->device_error) {
         atomic_store(&app->stream_synced, false);
         s_capture_handler.frame_state.sync.stream_synced = false;
+        gui_capture_request_dropout_stop(app, GUI_DROPOUT_DEVICE_ERROR);
         return;
     }
 
@@ -279,9 +422,32 @@ void gui_capture_callback(void *data_info_ptr) {
         if (misrc_debug_enabled()) {
             fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
         }
-        atomic_fetch_add(&app->error_count, result.error_count);
+        if (result.error_count >= s_capture_error_burst_resync_threshold) {
+            if (app->settings.stop_on_dropout) {
+                gui_capture_request_dropout_stop(app, GUI_DROPOUT_ERROR_BURST);
+                return;
+            }
+            if (misrc_debug_enabled()) {
+                fprintf(stderr,
+                        "[CB] Error burst %d detected, forcing parser resync\n",
+                        result.error_count);
+            }
+            frame_parser_init(&s_capture_handler.frame_state);
+            capture_handler_reset_audio_sync(&s_capture_handler);
+            atomic_store(&app->stream_synced, false);
+            s_capture_missed_streak = 0;
+            s_capture_error_streak = 0;
+            atomic_fetch_add(&app->error_count, 1);
+            return;
+        }
+        s_capture_error_streak++;
+        if (s_capture_error_streak >= 2) {
+            atomic_fetch_add(&app->error_count, 1);
+            gui_capture_request_dropout_stop(app, GUI_DROPOUT_FRAME_ERROR);
+        }
         return;  // Discard frame with errors
     }
+    s_capture_error_streak = 0;
 
     // Don't process if no payload
     if (!result.valid || result.stream0_bytes == 0) {
@@ -293,11 +459,11 @@ void gui_capture_callback(void *data_info_ptr) {
 
     // Write to capture ringbuffer via buffer manager
     // Buffer manager handles backpressure according to default policy for BUF_CAPTURE_RF
-    buf_out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, result.stream0_bytes, NULL);
+    buf_out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, result.stream0_bytes, &s_capture_rf_write_policy);
+    gui_capture_update_backpressure_counters(app);
     if (!buf_out) {
         // Buffer full after waiting - drop frame (policy allows this)
-        atomic_fetch_add(&app->rb_drop_count, 1);
-    if (atomic_load(&app->rb_drop_count) <= 5) {
+        if (atomic_load(&app->rb_drop_count) <= 5) {
             if (misrc_debug_enabled()) {
                 fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
             }
@@ -307,7 +473,7 @@ void gui_capture_callback(void *data_info_ptr) {
 
     // If audio capture enabled, reserve space in audio buffer via buffer manager
     if (atomic_load(&s_capture_handler.capture_audio) && result.stream1_bytes > 0) {
-        buf_out_audio = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, result.stream1_bytes, NULL);
+        buf_out_audio = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, result.stream1_bytes, &s_capture_audio_write_policy);
         // buf_out_audio may be NULL if buffer full
     }
 
@@ -419,6 +585,8 @@ void gui_app_init(gui_app_t *app) {
 
     // Initialize sample rate to default (will be updated when device connects)
     atomic_store(&app->sample_rate, DEFAULT_SAMPLE_RATE);
+    atomic_store(&app->dropout_stop_requested, false);
+    atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
     TraceLog(LOG_INFO, "APP INIT: sample_rate set to %u", DEFAULT_SAMPLE_RATE);
 
     // Initialize trigger state for channel A
@@ -668,9 +836,9 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         size_t sample_count = data_info->len / sizeof(uint16_t);
 
         size_t packed_bytes = sample_count * sizeof(uint32_t);
-        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, NULL);
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, &s_capture_rf_write_policy);
+        gui_capture_update_backpressure_counters(app);
         if (!out) {
-            atomic_fetch_add(&app->rb_drop_count, 1);
             return;
         }
 
@@ -706,7 +874,7 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         
         size_t padded_len = frames * 12;
         
-        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, NULL);
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, &s_capture_audio_write_policy);
         if (!out) return;
         
         memset(out, 0, padded_len);
@@ -754,7 +922,11 @@ int gui_app_start_capture(gui_app_t *app) {
 
     // Handle simulated device separately
     if (dev->type == DEVICE_TYPE_SIMULATED) {
-        return gui_simulated_start(app);
+        int sim_rc = gui_simulated_start(app);
+        if (sim_rc == 0) {
+            gui_capture_hold_power_assertions();
+        }
+        return sim_rc;
     }
 
     // Handle playback device
@@ -765,7 +937,11 @@ int gui_app_start_capture(gui_app_t *app) {
             gui_app_set_status(app, "No playback files selected");
             return -1;
         }
-        return gui_playback_start(app, file_a, file_b);
+        int playback_rc = gui_playback_start(app, file_a, file_b);
+        if (playback_rc == 0) {
+            gui_capture_hold_power_assertions();
+        }
+        return playback_rc;
     }
 
 #ifdef ENABLE_FX3
@@ -777,7 +953,11 @@ int gui_app_start_capture(gui_app_t *app) {
             gui_app_set_status(app, "Failed to open FX3 device");
             return -1;
         }
-        return gui_fx3_start(app);
+        int fx3_rc = gui_fx3_start(app);
+        if (fx3_rc == 0) {
+            gui_capture_hold_power_assertions();
+        }
+        return fx3_rc;
     }
 #endif
 
@@ -787,6 +967,7 @@ int gui_app_start_capture(gui_app_t *app) {
         gui_app_set_status(app, "Failed to initialize capture buffer");
         return -1;
     }
+    bufmgr_reset_stats(&app->buffers, BUF_COUNT);
 
     // Reset statistics
     atomic_store(&app->total_samples, 0);
@@ -806,6 +987,13 @@ int gui_app_start_capture(gui_app_t *app) {
     atomic_store(&app->stream_synced, false);
     atomic_store(&app->sample_rate, DEFAULT_SAMPLE_RATE);
     atomic_store(&app->last_callback_time_ms, get_time_ms());
+    atomic_store(&app->dropout_stop_requested, false);
+    atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    s_capture_last_wait_count = 0;
+    s_capture_last_drop_count = 0;
+    s_capture_missed_streak = 0;
+    s_capture_error_streak = 0;
+    s_capture_prev_callback_time_ms = 0;
 
     // Reset display buffers (per-channel)
     app->display_samples_available_a = 0;
@@ -965,6 +1153,7 @@ int gui_app_start_capture(gui_app_t *app) {
             // Non-fatal - display will use legacy path
         }
     }
+    gui_capture_hold_power_assertions();
 
     gui_app_set_status(app, "Capturing...");
 
@@ -980,6 +1169,7 @@ void gui_app_stop_capture(gui_app_t *app) {
     if (app->is_recording) {
         gui_app_stop_recording(app);
     }
+    gui_capture_release_power_assertions();
 
     // Check if this is a simulated, playback, or FX3 capture
     device_info_t *dev = &app->devices[app->selected_device];
@@ -1199,13 +1389,12 @@ bool gui_capture_device_timeout(gui_app_t *app, uint32_t timeout_ms) {
 
     uint64_t last_cb = atomic_load(&app->last_callback_time_ms);
     uint64_t now = get_time_ms();
-
-    // Handle wrap-around (GetTickCount wraps every ~49 days)
-    uint64_t elapsed = now - last_cb;
+    // If time moved backwards (e.g., non-monotonic fallback), reset baseline.
+    // This avoids treating a backward jump as a giant timeout.
     if (now < last_cb) {
-        // Wrap-around occurred
-        elapsed = (UINT64_MAX - last_cb) + now + 1;
+        atomic_store(&app->last_callback_time_ms, now);
+        return false;
     }
 
-    return elapsed > timeout_ms;
+    return (now - last_cb) > timeout_ms;
 }

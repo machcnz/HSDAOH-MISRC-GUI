@@ -190,6 +190,12 @@
 
   /* Get current time in milliseconds (for timeouts, elapsed time tracking) */
   static inline uint64_t get_time_ms(void) {
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+      return (uint64_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    }
+#endif
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
@@ -197,6 +203,12 @@
 
   /* Get current time in microseconds (for performance measurements) */
   static inline uint64_t get_time_us(void) {
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+      return (uint64_t)(ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
+    }
+#endif
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)(tv.tv_sec * 1000000 + tv.tv_usec);

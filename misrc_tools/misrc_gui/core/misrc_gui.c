@@ -26,6 +26,7 @@
 #include "../ui/gui_popup.h"
 #include "../output/gui_record.h"
 #include "../output/gui_audio.h"
+#include "../../common/threading.h"
 #include "version.h"
 
 #include <stdio.h>
@@ -106,6 +107,86 @@ static int gui_layout_height(void) {
 static bool gui_status_is_permission_denied(const gui_app_t *app) {
     if (!app) return false;
     return strstr(app->status_message, "Permission denied") != NULL;
+}
+static const char *gui_dropout_reason_status(gui_dropout_reason_t reason) {
+    switch (reason) {
+        case GUI_DROPOUT_MISSED_FRAME:
+            return "Capture stopped: dropout (missed frames)";
+        case GUI_DROPOUT_FRAME_ERROR:
+            return "Capture stopped: dropout (frame errors)";
+        case GUI_DROPOUT_ERROR_BURST:
+            return "Capture stopped: dropout (error burst)";
+        case GUI_DROPOUT_CALLBACK_GAP:
+            return "Capture stopped: dropout (callback gap)";
+        case GUI_DROPOUT_DEVICE_ERROR:
+            return "Capture stopped: dropout (device error)";
+        case GUI_DROPOUT_NONE:
+        default:
+            return "Capture stopped: dropout detected";
+    }
+}
+typedef struct {
+    bool valid;
+    device_type_t type;
+    int index;
+    char name[64];
+    char serial[64];
+} gui_reconnect_target_t;
+static int gui_find_first_device_of_type(const gui_app_t *app, device_type_t type) {
+    if (!app) return -1;
+    for (int i = 0; i < app->device_count; i++) {
+        if (app->devices[i].type == type) {
+            return i;
+        }
+    }
+    return -1;
+}
+static void gui_set_reconnect_target_from_selected(const gui_app_t *app, gui_reconnect_target_t *target) {
+    if (!target) return;
+    target->valid = false;
+    target->type = DEVICE_TYPE_HSDAOH;
+    target->index = -1;
+    target->name[0] = '\0';
+    target->serial[0] = '\0';
+    if (!app) return;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return;
+    const device_info_t *dev = &app->devices[app->selected_device];
+    target->valid = true;
+    target->type = dev->type;
+    target->index = dev->index;
+    snprintf(target->name, sizeof(target->name), "%s", dev->name);
+    snprintf(target->serial, sizeof(target->serial), "%s", dev->serial);
+}
+static int gui_find_reconnect_device(const gui_app_t *app, const gui_reconnect_target_t *target) {
+    if (!app || !target || !target->valid) return -1;
+    int fallback_same_type = -1;
+    for (int i = 0; i < app->device_count; i++) {
+        const device_info_t *dev = &app->devices[i];
+        if (dev->type != target->type) {
+            continue;
+        }
+        if (fallback_same_type < 0) {
+            fallback_same_type = i;
+        }
+        if (target->type == DEVICE_TYPE_HSDAOH) {
+            if (target->name[0] && strcmp(dev->name, target->name) == 0) {
+                return i;
+            }
+            if (target->index >= 0 && dev->index == target->index) {
+                return i;
+            }
+        } else if (target->type == DEVICE_TYPE_SIMPLE_CAPTURE) {
+            if (target->serial[0] && strcmp(dev->serial, target->serial) == 0) {
+                return i;
+            }
+            if (target->name[0] && strcmp(dev->name, target->name) == 0) {
+                return i;
+            }
+        } else {
+            return i;
+        }
+    }
+    return fallback_same_type;
 }
 
 #if defined(__APPLE__)
@@ -277,6 +358,7 @@ int main(int argc, char **argv) {
     // Initialize application state
     gui_app_t app = {0};
     app.fonts = fonts;
+    gui_reconnect_target_t reconnect_target = {0};
 
     // Initialize sample rate early (before any capture/rendering can occur)
     atomic_store(&app.sample_rate, DEFAULT_SAMPLE_RATE);
@@ -291,9 +373,9 @@ int main(int argc, char **argv) {
     unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT;
     SetConfigFlags(window_flags);
     // Keep defaults usable while fitting common laptop screens.
-    const int default_window_width = 1360;
+    const int default_window_width = 1420;
     const int default_window_height = 720;
-    const int min_window_width = 1000;
+    const int min_window_width = 1040;
     const int min_window_height = 650;
     char window_title[128];
     snprintf(window_title, sizeof(window_title), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
@@ -339,7 +421,10 @@ int main(int argc, char **argv) {
 
     Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, clay_memory);
     Clay_Initialize(clay_arena, (Clay_Dimensions){ (float)gui_layout_width(), (float)gui_layout_height() },
-                    (Clay_ErrorHandler){ clay_error_handler });
+                    (Clay_ErrorHandler){
+                        .errorHandlerFunction = clay_error_handler,
+                        .userData = NULL,
+                    });
     Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
 
     // Initialize application
@@ -350,24 +435,51 @@ int main(int argc, char **argv) {
 
     // Enumerate available devices
     gui_app_enumerate_devices(&app);
+    {
+        int hs_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_HSDAOH);
+        if (hs_idx >= 0) {
+            app.selected_device = hs_idx;
+        }
+    }
 
     // Enable auto-reconnect by default
     app.auto_reconnect_enabled = true;
 
-    // Autoconnect if a device is found
+    // Autoconnect hsdaoh if available
     if (app.device_count > 0) {
-        int connect_rc = 0;
-        gui_app_set_status(&app, "Connecting...");
-        connect_rc = gui_app_start_capture(&app);
-        if (connect_rc == 0) {
-            gui_app_set_status(&app, "Connected");
-        } else {
-            if (connect_rc == -3 || gui_status_is_permission_denied(&app)) {
-                app.reconnect_pending = false;
+        int hs_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_HSDAOH);
+        if (hs_idx >= 0) {
+            int connect_rc = 0;
+            app.selected_device = hs_idx;
+            gui_set_reconnect_target_from_selected(&app, &reconnect_target);
+            gui_app_set_status(&app, "Connecting...");
+            connect_rc = gui_app_start_capture(&app);
+            if (connect_rc == 0) {
+                gui_app_set_status(&app, "Connected");
             } else {
-                gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
+                if (connect_rc == -3 || gui_status_is_permission_denied(&app)) {
+                    app.reconnect_pending = false;
+                } else {
+                    gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
+                    app.reconnect_pending = true;
+                    app.reconnect_attempt_time = GetTime();
+                }
+            }
+        } else {
+            int sc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_SIMPLE_CAPTURE);
+            if (sc_idx >= 0) {
+                app.selected_device = sc_idx;
+                reconnect_target.valid = true;
+                reconnect_target.type = DEVICE_TYPE_HSDAOH;
+                reconnect_target.index = -1;
+                reconnect_target.name[0] = '\0';
+                reconnect_target.serial[0] = '\0';
                 app.reconnect_pending = true;
                 app.reconnect_attempt_time = GetTime();
+                app.reconnect_attempts = 0;
+                gui_app_set_status(&app, "MS2130 hsdaoh path not ready; waiting to reconnect.");
+            } else {
+                gui_app_set_status(&app, "No hsdaoh devices found. Select device and click Connect.");
             }
         }
     } else {
@@ -375,9 +487,20 @@ int main(int argc, char **argv) {
     }
     int last_layout_width = -1;
     int last_layout_height = -1;
+    bool recording_fps_throttle = false;
 
     // Main loop
     while (!WindowShouldClose() && !atomic_load(&do_exit)) {
+        bool was_capturing = app.is_capturing;
+        if (app.is_recording) {
+            if (!recording_fps_throttle) {
+                SetTargetFPS(30);
+                recording_fps_throttle = true;
+            }
+        } else if (recording_fps_throttle) {
+            SetTargetFPS(60);
+            recording_fps_throttle = false;
+        }
         float dt = GetFrameTime();
         int current_layout_width = gui_layout_width();
         int current_layout_height = gui_layout_height();
@@ -437,6 +560,17 @@ int main(int argc, char **argv) {
             GetMouseWheelMoveV().y * 20.0f
         }, dt);
 
+        // stop-on-dropout requests are posted from capture callbacks and consumed here.
+        if (app.is_capturing && atomic_exchange(&app.dropout_stop_requested, false)) {
+            gui_dropout_reason_t reason =
+                (gui_dropout_reason_t)atomic_exchange(&app.dropout_stop_reason, GUI_DROPOUT_NONE);
+            gui_app_stop_capture(&app);
+            app.reconnect_pending = false;
+            app.reconnect_attempts = 0;
+            gui_app_set_status(&app, gui_dropout_reason_status(reason));
+            continue;
+        }
+
         // Auto-reconnect logic
         if (app.auto_reconnect_enabled) {
             double now = GetTime();
@@ -445,6 +579,7 @@ int main(int argc, char **argv) {
             if (app.is_capturing && gui_capture_device_timeout(&app, 2000)) {
                 // Device was disconnected unexpectedly - clean up properly
                 fprintf(stderr, "[GUI] Device timeout detected, disconnecting...\n");
+                gui_set_reconnect_target_from_selected(&app, &reconnect_target);
                 gui_app_stop_capture(&app);
                 gui_app_clear_display(&app);
                 app.reconnect_pending = true;
@@ -464,12 +599,31 @@ int main(int argc, char **argv) {
                     gui_app_enumerate_devices(&app);
 
                     if (app.device_count > 0) {
+                        if (reconnect_target.valid) {
+                            int reconnect_dev = gui_find_reconnect_device(&app, &reconnect_target);
+                            if (reconnect_dev < 0) {
+                                if (reconnect_target.type == DEVICE_TYPE_HSDAOH) {
+                                    char status_waiting[128];
+                                    snprintf(status_waiting, sizeof(status_waiting),
+                                             "Waiting for MS2130 hsdaoh device (attempt %d)", app.reconnect_attempts);
+                                    gui_app_set_status(&app, status_waiting);
+                                } else {
+                                    char status_waiting[128];
+                                    snprintf(status_waiting, sizeof(status_waiting),
+                                             "Waiting for selected device (attempt %d)", app.reconnect_attempts);
+                                    gui_app_set_status(&app, status_waiting);
+                                }
+                                continue;
+                            }
+                            app.selected_device = reconnect_dev;
+                        }
                         int reconnect_rc = 0;
                         char status_buf[128];
                         snprintf(status_buf, sizeof(status_buf), "Reconnecting (attempt %d)...", app.reconnect_attempts);
                         gui_app_set_status(&app, status_buf);
                         reconnect_rc = gui_app_start_capture(&app);
                         if (reconnect_rc == 0) {
+                            gui_set_reconnect_target_from_selected(&app, &reconnect_target);
                             app.reconnect_pending = false;
                             app.reconnect_attempts = 0;
                             gui_app_set_status(&app, "Reconnected");
@@ -501,6 +655,9 @@ int main(int argc, char **argv) {
 
         // Handle Clay interactions
         gui_handle_interactions(&app);
+        if (!was_capturing && app.is_capturing) {
+            gui_set_reconnect_target_from_selected(&app, &reconnect_target);
+        }
 
         // Handle panel scroll events (e.g., waveform/FFT zoom)
         float wheel = GetMouseWheelMove();

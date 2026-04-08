@@ -501,7 +501,7 @@ int gui_audio_start(gui_app_t *app, buffer_manager_t *bufmgr)
     }
 
     for (int i = 0; i < 4; i++) {
-        if (app->settings.enable_audio_1ch[i]) {
+        if (write_files && app->settings.enable_audio_1ch[i]) {
             snprintf(path, sizeof(path), "%s/%s", app->settings.output_path, app->settings.audio_1ch_filenames[i]);
             s_audio_ctx.f_1ch[i] = fopen(path, "wb");
             if (!s_audio_ctx.f_1ch[i]) {

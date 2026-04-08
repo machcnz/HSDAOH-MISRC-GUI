@@ -82,6 +82,9 @@ static char stat_b_peak_neg[16];
 static char stat_b_clip_pos[16];
 static char stat_b_clip_neg[16];
 static char stat_b_errors[16];
+static char stat_rec_raw[2][32];
+static char stat_rec_flac[2][32];
+static char stat_rec_ratio[2][24];
 
 // Playback file display buffers
 static char playback_file_a_display[64];
@@ -104,7 +107,6 @@ static char settings_flac_level_display[64];
 static char settings_flac_threads_display[64];
 static char settings_resample_a_display[32];
 static char settings_resample_b_display[32];
-static char status_wait_drop_display[48];
 static char status_sample_rate_display[32];
 static char status_samples_display[32];
 static char status_frames_display[32];
@@ -253,6 +255,13 @@ static void render_settings_panel(gui_app_t *app) {
                 CLAY_TEXT(app->settings.append_timestamp_on_capture_start ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(ts_fg) }));
             }
             CLAY_TEXT(CLAY_STRING("Add Time/Date"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(ts_fg) }));
+
+            Color stop_drop_bg = app->settings.stop_on_dropout ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+            Color stop_drop_fg = COLOR_TEXT;
+            CLAY(CLAY_ID("StopOnDropoutToggle"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(stop_drop_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                CLAY_TEXT(app->settings.stop_on_dropout ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(stop_drop_fg) }));
+            }
+            CLAY_TEXT(CLAY_STRING("Stop on Dropout"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(stop_drop_fg) }));
         }
 
         CLAY(CLAY_ID("BaseNameRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
@@ -849,6 +858,8 @@ static void render_channel_stats(gui_app_t *app, int channel) {
     uint32_t clip_pos, clip_neg, errors;
     float peak_pos, peak_neg;
     char *buf_peak_pos, *buf_peak_neg, *buf_clip_pos, *buf_clip_neg, *buf_errors;
+    char *buf_rec_raw, *buf_rec_flac, *buf_rec_ratio;
+    Color channel_value_color = (channel == 0) ? COLOR_CHANNEL_A : COLOR_CHANNEL_B;
 
     if (channel == 0) {
         clip_pos = atomic_load(&app->clip_count_a_pos);
@@ -861,6 +872,9 @@ static void render_channel_stats(gui_app_t *app, int channel) {
         buf_clip_pos = stat_a_clip_pos;
         buf_clip_neg = stat_a_clip_neg;
         buf_errors = stat_a_errors;
+        buf_rec_raw = stat_rec_raw[0];
+        buf_rec_flac = stat_rec_flac[0];
+        buf_rec_ratio = stat_rec_ratio[0];
     } else {
         clip_pos = atomic_load(&app->clip_count_b_pos);
         clip_neg = atomic_load(&app->clip_count_b_neg);
@@ -872,6 +886,9 @@ static void render_channel_stats(gui_app_t *app, int channel) {
         buf_clip_pos = stat_b_clip_pos;
         buf_clip_neg = stat_b_clip_neg;
         buf_errors = stat_b_errors;
+        buf_rec_raw = stat_rec_raw[1];
+        buf_rec_flac = stat_rec_flac[1];
+        buf_rec_ratio = stat_rec_ratio[1];
     }
 
     // Format stats (peak/clip/errors)
@@ -883,7 +900,7 @@ static void render_channel_stats(gui_app_t *app, int channel) {
 
     CLAY(CLAY_IDI("StatsPanel", channel), {
         .layout = {
-            .sizing = { CLAY_SIZING_FIXED(150), CLAY_SIZING_GROW(0) },
+            .sizing = { CLAY_SIZING_FIXED(185), CLAY_SIZING_GROW(0) },
             .layoutDirection = CLAY_TOP_TO_BOTTOM,
             .padding = { 6, 6, 4, 4 },
             .childGap = 2
@@ -943,6 +960,42 @@ static void render_channel_stats(gui_app_t *app, int channel) {
             }
             CLAY_TEXT(make_string(buf_errors),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
+        }
+
+        if (app->is_recording) {
+
+            uint64_t raw_bytes = (channel == 0)
+                                    ? atomic_load(&app->recording_raw_a)
+                                    : atomic_load(&app->recording_raw_b);
+            uint64_t comp_bytes = (channel == 0)
+                                    ? atomic_load(&app->recording_compressed_a)
+                                    : atomic_load(&app->recording_compressed_b);
+            double raw_mb = (double)raw_bytes / (1024.0 * 1024.0);
+            snprintf(buf_rec_raw, 32, "RAW: %.1f MB", raw_mb);
+            if (app->settings.use_flac) {
+                double comp_mb = (double)comp_bytes / (1024.0 * 1024.0);
+                double ratio = (comp_bytes > 0) ? ((double)raw_bytes / (double)comp_bytes) : 0.0;
+                snprintf(buf_rec_flac, 32, "FLAC: %.1f MB", comp_mb);
+                snprintf(buf_rec_ratio, 24, "Ratio: %.1fx", ratio);
+            } else {
+                buf_rec_flac[0] = '\0';
+                buf_rec_ratio[0] = '\0';
+            }
+
+            CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                CLAY_TEXT(make_string(buf_rec_raw),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+            }
+            if (app->settings.use_flac) {
+                CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                    CLAY_TEXT(make_string(buf_rec_flac),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+                }
+                CLAY(CLAY_IDI("RecRatioRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                    CLAY_TEXT(make_string(buf_rec_ratio),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+                }
+            }
         }
 
         // Separator line before panel configuration
@@ -1247,79 +1300,23 @@ static void render_status_bar(gui_app_t *app) {
             }
         }) {
             if (app->is_recording) {
-                // Recording indicator
                 CLAY(CLAY_ID("RecIndicator"), {
                     .layout = { .sizing = { CLAY_SIZING_FIXED(12), CLAY_SIZING_FIXED(12) } },
                     .backgroundColor = to_clay_color(COLOR_CLIP_RED),
                     .cornerRadius = CLAY_CORNER_RADIUS(6)
                 }) {}
 
-                // Recording duration
                 double duration = GetTime() - app->recording_start_time;
                 int hours = (int)(duration / 3600);
-                int mins = (int)(duration / 60) % 60;
-                int secs = (int)duration % 60;
+                int mins = ((int)(duration / 60)) % 60;
+                int secs = ((int)duration) % 60;
                 snprintf(temp_buf1, sizeof(temp_buf1), "%02d:%02d:%02d", hours, mins, secs);
                 CLAY_TEXT(make_string(temp_buf1),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
-
-                // Get per-channel stats
-                uint64_t raw_a = atomic_load(&app->recording_raw_a);
-                uint64_t raw_b = atomic_load(&app->recording_raw_b);
-                uint64_t comp_a = atomic_load(&app->recording_compressed_a);
-                uint64_t comp_b = atomic_load(&app->recording_compressed_b);
-
-                if (app->settings.use_flac && (raw_a > 0 || raw_b > 0)) {
-                    // FLAC mode: show per-channel raw/compressed/ratio
-                    double raw_a_mb = (double)raw_a / (1024.0 * 1024.0);
-                    double raw_b_mb = (double)raw_b / (1024.0 * 1024.0);
-                    double comp_a_mb = (double)comp_a / (1024.0 * 1024.0);
-                    double comp_b_mb = (double)comp_b / (1024.0 * 1024.0);
-                    double ratio_a = (raw_a > 0) ? (double)raw_a / (double)comp_a : 0;
-                    double ratio_b = (raw_b > 0) ? (double)raw_b / (double)comp_b : 0;
-
-                    snprintf(temp_buf2, sizeof(temp_buf2), "A RAW: %.1fMB FLAC: %.1fMB Ratio: %.1fx", raw_a_mb, comp_a_mb, ratio_a);
-                    CLAY_TEXT(make_string(temp_buf2),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_CHANNEL_A) }));
-
-                    snprintf(temp_buf3, sizeof(temp_buf3), "B RAW: %.1fMB FLAC: %.1fMB Ratio: %.1fx", raw_b_mb, comp_b_mb, ratio_b);
-                    CLAY_TEXT(make_string(temp_buf3),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_CHANNEL_B) }));
-                } else {
-                    // RAW mode or no data yet: show total bytes
-                    uint64_t bytes = atomic_load(&app->recording_bytes);
-                    double mb = (double)bytes / (1024.0 * 1024.0);
-                    snprintf(temp_buf2, sizeof(temp_buf2), "RAW: %.1f MB", mb);
-                    CLAY_TEXT(make_string(temp_buf2),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                }
-
-                // Show backpressure stats if any waits/drops occurred
-                uint32_t wait_count = atomic_load(&app->rb_wait_count);
-                uint32_t drop_count = atomic_load(&app->rb_drop_count);
-                if (wait_count > 0 || drop_count > 0) {
-                    snprintf(status_wait_drop_display, sizeof(status_wait_drop_display), "Wait:%u Drop:%u", wait_count, drop_count);
-                    Color bp_color = (drop_count > 0) ? COLOR_CLIP_RED : COLOR_METER_YELLOW;
-                    CLAY_TEXT(make_string(status_wait_drop_display),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(bp_color) }));
-                }
             } else {
-                // Status message
                 snprintf(temp_buf1, sizeof(temp_buf1), "%s", app->status_message);
                 CLAY_TEXT(make_string(temp_buf1),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-
-                // Show backpressure stats during capture even when not recording
-                if (app->is_capturing) {
-                    uint32_t wait_count = atomic_load(&app->rb_wait_count);
-                    uint32_t drop_count = atomic_load(&app->rb_drop_count);
-                    if (wait_count > 0 || drop_count > 0) {
-                        snprintf(status_wait_drop_display, sizeof(status_wait_drop_display), "Wait:%u Drop:%u", wait_count, drop_count);
-                        Color bp_color = (drop_count > 0) ? COLOR_CLIP_RED : COLOR_METER_YELLOW;
-                        CLAY_TEXT(make_string(status_wait_drop_display),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(bp_color) }));
-                    }
-                }
             }
         }
 
@@ -1421,7 +1418,7 @@ static void render_status_bar(gui_app_t *app) {
             }
 
             // Missed frames count
-            uint32_t missed = atomic_load(&app->missed_frame_count);
+            uint32_t missed = app->is_capturing ? atomic_load(&app->missed_frame_count) : 0;
             //if (missed > 0) {
                 snprintf(status_missed_display, sizeof(status_missed_display), "%u", missed);
                 CLAY(CLAY_ID("MissedStatus"), {
@@ -1443,7 +1440,7 @@ static void render_status_bar(gui_app_t *app) {
             //}
 
             // Total errors
-            uint32_t errors = atomic_load(&app->error_count);
+            uint32_t errors = app->is_capturing ? atomic_load(&app->error_count) : 0;
             //if (errors > 0) {
                 snprintf(status_errors_display, sizeof(status_errors_display), "%u", errors);
                 CLAY(CLAY_ID("ErrorStatus"), {
@@ -1845,8 +1842,13 @@ void gui_handle_interactions(gui_app_t *app) {
         if (Clay_PointerOver(CLAY_ID("ConnectButton"))) {
             if (app->is_capturing) {
                 gui_app_stop_capture(app);
+                app->reconnect_pending = false;
+                app->reconnect_attempts = 0;
             } else {
-                gui_app_start_capture(app);
+                if (gui_app_start_capture(app) == 0) {
+                    app->reconnect_pending = false;
+                    app->reconnect_attempts = 0;
+                }
             }
         }
         if (Clay_PointerOver(CLAY_ID("CaptureModeToggle"))) {
@@ -1855,6 +1857,13 @@ void gui_handle_interactions(gui_app_t *app) {
             gui_app_set_status(app, app->settings.misrc_mode
                 ? "Capture mode set to MISRC (A/B swapped)"
                 : "Capture mode set to HSDAOH (A/B normal)");
+        }
+        if (Clay_PointerOver(CLAY_ID("StopOnDropoutToggle"))) {
+            app->settings.stop_on_dropout = !app->settings.stop_on_dropout;
+            gui_settings_save(&app->settings);
+            gui_app_set_status(app, app->settings.stop_on_dropout
+                ? "Stop on dropout enabled"
+                : "Stop on dropout disabled");
         }
 
 

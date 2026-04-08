@@ -59,13 +59,13 @@ static atomic_bool s_use_flac = false;
 static atomic_uchar s_rf_bits_a = 16;
 static atomic_uchar s_rf_bits_b = 16;
 
-// Record path must never stall extraction/RF ingestion.
-// If record buffers are full, drop record blocks immediately.
+// Record path must never block extraction long enough to starve RF ingestion.
+// If writer throughput falls behind, drop record writes instead of stalling.
 static const backpressure_policy_t s_record_write_policy = {
     .max_wait_attempts = 0,
     .wait_timeout_ms = 0,
-    .log_first_wait = true,
-    .log_drops = true,
+    .log_first_wait = false,
+    .log_drops = false,
 };
 
 static conv_16to8_t s_conv_16to8 = NULL;

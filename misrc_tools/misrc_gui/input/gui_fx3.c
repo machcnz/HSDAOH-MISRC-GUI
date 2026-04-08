@@ -878,6 +878,8 @@ int gui_fx3_start(gui_app_t *app) {
     // This matches sigrok's behavior - USB transfers must be pending BEFORE
     // CMD_START, otherwise data is lost because FX3 sends immediately.
 
+    bufmgr_reset_stats(&app->buffers, BUF_COUNT);
+
     // Reset statistics
     atomic_store(&app->total_samples, 0);
     atomic_store(&app->samples_a, 0);
