@@ -94,28 +94,8 @@
 
   /* Get current time in microseconds (for performance measurements) */
   static inline uint64_t get_time_us(void) {
-    /* Layout-compatible with LARGE_INTEGER for when windows.h is included */
-    typedef union { int64_t i64; struct { unsigned long lo, hi; } parts; } perf_counter_t;
-    static int64_t freq = 0;
-    perf_counter_t counter, freq_val;
-    #ifdef _PROFILEAPI_H_
-    /* windows.h was included - use the already-declared functions with cast */
-    if (freq == 0) {
-      QueryPerformanceFrequency((LARGE_INTEGER*)&freq_val);
-      freq = freq_val.i64;
-    }
-    QueryPerformanceCounter((LARGE_INTEGER*)&counter);
-    #else
-    /* Declare functions ourselves */
-    extern __declspec(dllimport) int __stdcall QueryPerformanceCounter(perf_counter_t*);
-    extern __declspec(dllimport) int __stdcall QueryPerformanceFrequency(perf_counter_t*);
-    if (freq == 0) {
-      QueryPerformanceFrequency(&freq_val);
-      freq = freq_val.i64;
-    }
-    QueryPerformanceCounter(&counter);
-    #endif
-    return (uint64_t)(counter.i64 * 1000000 / freq);
+    extern __declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
+    return (uint64_t)GetTickCount64() * 1000ULL;
   }
 
 #else

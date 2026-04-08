@@ -46,12 +46,6 @@ extern char **environ;
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#ifndef NOGDI
-#define NOGDI
-#endif
-#ifndef NOUSER
-#define NOUSER
-#endif
 #include <windows.h>
 #endif
 
@@ -262,6 +256,7 @@ static bool gui_build_elevated_command(int argc, char **argv, char *out, size_t 
     }
 
     return true;
+    return true;
 }
 
 static int gui_macos_relaunch_as_admin_if_needed(int argc, char **argv)
@@ -295,19 +290,10 @@ static int gui_macos_relaunch_as_admin_if_needed(int argc, char **argv)
         return -1;
     }
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        return -1;
-    }
-
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        return 1;
-    }
-
-    return -1;
+    (void)pid;
+    return 1;
 }
 #endif
-
 #if defined(_WIN32)
 static void gui_enable_debug_console(void) {
     if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {

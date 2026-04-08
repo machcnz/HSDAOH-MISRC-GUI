@@ -160,6 +160,20 @@ def check_macos_layout_policy(gui_c_path: Path) -> int:
         return fail("gui_layout_height() must use GetRenderHeight() for non-macOS")
     return 0
 
+def check_macos_admin_elevation_contract(gui_c_path: Path) -> int:
+    source = read_text(gui_c_path)
+    required_snippets = [
+        "static int gui_macos_relaunch_as_admin_if_needed(int argc, char **argv)",
+        "MISRC_GUI_ELEVATED",
+        "do shell script (item 1 of argv) with administrator privileges",
+        "int elevate_rc = gui_macos_relaunch_as_admin_if_needed(argc, argv);",
+        "Administrator permissions are required for MS2130 hsdaoh/libusb capture.",
+    ]
+    for snippet in required_snippets:
+        if snippet not in source:
+            return fail(f"Missing required macOS startup elevation contract snippet in misrc_gui.c: {snippet}")
+    return 0
+
 
 def check_windows_meson_subsystem_contract(meson_path: Path) -> int:
     meson_text = read_text(meson_path)
@@ -399,6 +413,7 @@ def main() -> int:
         ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
         ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),
+        ("macOS startup admin elevation contract", lambda: check_macos_admin_elevation_contract(gui_c_path)),
         ("Windows meson subsystem contract", lambda: check_windows_meson_subsystem_contract(meson_path)),
         ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
