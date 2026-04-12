@@ -131,6 +131,7 @@ def check_linux_desktop_metadata(workflow_path: Path) -> int:
         "Exec=misrc_gui",
         "Icon=misrc",
         "StartupWMClass=misrc_gui",
+        "X-GNOME-WMClass=misrc_gui",
         "Terminal=false",
         "StartupNotify=true",
         "ln -sf misrc.png AppDir/.DirIcon",
@@ -208,14 +209,17 @@ def check_apprun_static_contract(workflow_path: Path) -> int:
     required_snippets = [
         "install_shortcuts()",
         "--create-shortcut",
+        "local stable_appimage=\"$local_bin_dir/misrc_gui.AppImage\"",
+        "ln -sfn \"$appimage_path\" \"$stable_appimage\"",
         "Icon=misrc",
         "StartupWMClass=misrc_gui",
+        "X-GNOME-WMClass=misrc_gui",
         "StartupNotify=true",
     ]
     for snippet in required_snippets:
         if snippet not in apprun:
             return fail(f"AppRun shortcut contract is missing snippet: {snippet}")
-    if "Exec=\"${escaped_appimage_path}\" %U" not in apprun and "Exec=\\\"${escaped_appimage_path}\\\" %U" not in apprun:
+    if "Exec=\\\"${escaped_launcher_exec_path}\\\" %U" not in apprun and "Exec=\\\\\\\"${escaped_launcher_exec_path}\\\\\\\" %U" not in apprun:
         return fail("AppRun shortcut contract is missing expected Exec launcher format")
     return 0
 
@@ -267,6 +271,7 @@ def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
         launcher_path = home / ".local/share/applications/misrc_gui.desktop"
         desktop_shortcut_path = home / "Desktop/MISRC GUI.desktop"
         icon_install_path = home / ".local/share/icons/hicolor/512x512/apps/misrc.png"
+        stable_exec_path = home / ".local/bin/misrc_gui.AppImage"
 
         if not launcher_path.exists():
             return fail("AppRun --create-shortcut did not create launcher file")
@@ -274,12 +279,16 @@ def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
             return fail("AppRun --create-shortcut did not create Desktop shortcut")
         if not icon_install_path.exists():
             return fail("AppRun --create-shortcut did not install icon")
+        if not stable_exec_path.exists():
+            return fail("AppRun --create-shortcut did not create stable AppImage launcher path")
+        if not os.path.samefile(stable_exec_path, appimage_path):
+            return fail("Stable AppImage launcher path does not resolve to current AppImage")
 
         launcher = read_text(launcher_path)
-        expected_exec = f'Exec="{appimage_path}" %U'
+        expected_exec = f'Exec=\"{stable_exec_path}\" %U'
         if expected_exec not in launcher:
             return fail(f"Launcher Exec entry mismatch. Expected: {expected_exec}")
-        for required in ("Icon=misrc", "Terminal=false", "StartupWMClass=misrc_gui", "StartupNotify=true"):
+        for required in ("Icon=misrc", "Terminal=false", "StartupWMClass=misrc_gui", "X-GNOME-WMClass=misrc_gui", "StartupNotify=true"):
             if required not in launcher:
                 return fail(f"Launcher is missing required key: {required}")
 

@@ -213,11 +213,18 @@ jobs:
             local apps_dir="$data_home/applications"
             local icons_dir="$data_home/icons/hicolor/512x512/apps"
             local launcher="$apps_dir/misrc_gui.desktop"
-            local escaped_appimage_path="$appimage_path"
-            escaped_appimage_path="${escaped_appimage_path//\\/\\\\}"
-            escaped_appimage_path="${escaped_appimage_path//\"/\\\"}"
+            local local_bin_dir="$HOME/.local/bin"
+            local stable_appimage="$local_bin_dir/misrc_gui.AppImage"
+            local launcher_exec_path="$appimage_path"
 
-            mkdir -p "$apps_dir" "$icons_dir"
+            mkdir -p "$apps_dir" "$icons_dir" "$local_bin_dir"
+            if ln -sfn "$appimage_path" "$stable_appimage"; then
+              launcher_exec_path="$stable_appimage"
+              chmod +x "$stable_appimage" || true
+            fi
+            local escaped_launcher_exec_path="$launcher_exec_path"
+            escaped_launcher_exec_path="${escaped_launcher_exec_path//\\/\\\\}"
+            escaped_launcher_exec_path="${escaped_launcher_exec_path//\"/\\\"}"
             if [[ -f "$HERE/misrc.png" ]]; then
               cp -f "$HERE/misrc.png" "$icons_dir/misrc.png" || true
             fi
@@ -226,10 +233,11 @@ jobs:
                 "[Desktop Entry]" \
                 "Type=Application" \
                 "Name=MISRC GUI" \
-                "Exec=\"${escaped_appimage_path}\" %U" \
+                "Exec=\"${escaped_launcher_exec_path}\" %U" \
                 "Icon=misrc" \
                 "Categories=Utility;" \
                 "StartupWMClass=misrc_gui" \
+                "X-GNOME-WMClass=misrc_gui" \
                 "Terminal=false" \
                 "StartupNotify=true"
             } > "$launcher"
@@ -282,7 +290,9 @@ jobs:
           Icon=misrc
           Categories=Utility;
           StartupWMClass=misrc_gui
+          X-GNOME-WMClass=misrc_gui
           Terminal=false
+          StartupNotify=true
           EOF
           ICON_SRC="assets/Icons/MISRC_Icon.png"
           test -f "$ICON_SRC"
