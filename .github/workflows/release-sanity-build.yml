@@ -225,6 +225,17 @@ jobs:
             local escaped_launcher_exec_path="$launcher_exec_path"
             escaped_launcher_exec_path="${escaped_launcher_exec_path//\\/\\\\}"
             escaped_launcher_exec_path="${escaped_launcher_exec_path//\"/\\\"}"
+            local gui_version=""
+            local startup_wm_class="misrc_gui"
+            if [[ -x "$HERE/usr/bin/misrc_gui" ]]; then
+              gui_version="$("$HERE/usr/bin/misrc_gui" --version 2>/dev/null | head -n1 | tr -d '\r')"
+              if [[ -n "$gui_version" ]]; then
+                startup_wm_class="MISRC Capture $gui_version"
+              fi
+            fi
+            local escaped_startup_wm_class="$startup_wm_class"
+            escaped_startup_wm_class="${escaped_startup_wm_class//\\/\\\\}"
+            escaped_startup_wm_class="${escaped_startup_wm_class//\"/\\\"}"
             if [[ -f "$HERE/misrc.png" ]]; then
               cp -f "$HERE/misrc.png" "$icons_dir/misrc.png" || true
             fi
@@ -236,8 +247,8 @@ jobs:
                 "Exec=\"${escaped_launcher_exec_path}\" %U" \
                 "Icon=misrc" \
                 "Categories=Utility;" \
-                "StartupWMClass=misrc_gui" \
-                "X-GNOME-WMClass=misrc_gui" \
+                "StartupWMClass=${escaped_startup_wm_class}" \
+                "X-GNOME-WMClass=${escaped_startup_wm_class}" \
                 "Terminal=false" \
                 "StartupNotify=true"
             } > "$launcher"
@@ -282,15 +293,15 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
 
-          cat > AppDir/misrc.desktop <<'EOF'
+          cat > AppDir/misrc.desktop <<EOF
           [Desktop Entry]
           Type=Application
           Name=MISRC GUI
           Exec=misrc_gui
           Icon=misrc
           Categories=Utility;
-          StartupWMClass=misrc_gui
-          X-GNOME-WMClass=misrc_gui
+          StartupWMClass=MISRC Capture ${BUILD_VERSION}
+          X-GNOME-WMClass=MISRC Capture ${BUILD_VERSION}
           Terminal=false
           StartupNotify=true
           EOF

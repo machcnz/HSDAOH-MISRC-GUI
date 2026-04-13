@@ -127,11 +127,11 @@ def check_macos_brew_install_policy(workflow_path: Path) -> int:
 def check_linux_desktop_metadata(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     required_desktop_fields = [
-        "cat > AppDir/misrc.desktop <<'EOF'",
+        "cat > AppDir/misrc.desktop <<EOF",
         "Exec=misrc_gui",
         "Icon=misrc",
-        "StartupWMClass=misrc_gui",
-        "X-GNOME-WMClass=misrc_gui",
+        "StartupWMClass=MISRC Capture ${BUILD_VERSION}",
+        "X-GNOME-WMClass=MISRC Capture ${BUILD_VERSION}",
         "Terminal=false",
         "StartupNotify=true",
         "ln -sf misrc.png AppDir/.DirIcon",
@@ -211,9 +211,12 @@ def check_apprun_static_contract(workflow_path: Path) -> int:
         "--create-shortcut",
         "local stable_appimage=\"$local_bin_dir/misrc_gui.AppImage\"",
         "ln -sfn \"$appimage_path\" \"$stable_appimage\"",
+        "local startup_wm_class=\"misrc_gui\"",
+        "\"$HERE/usr/bin/misrc_gui\" --version",
+        "startup_wm_class=\"MISRC Capture $gui_version\"",
         "Icon=misrc",
-        "StartupWMClass=misrc_gui",
-        "X-GNOME-WMClass=misrc_gui",
+        "StartupWMClass=${escaped_startup_wm_class}",
+        "X-GNOME-WMClass=${escaped_startup_wm_class}",
         "StartupNotify=true",
     ]
     for snippet in required_snippets:
@@ -245,7 +248,18 @@ def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
 
         for exe in ("misrc_gui", "misrc_capture", "misrc_extract"):
             exe_path = appdir / "usr/bin" / exe
-            exe_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            if exe == "misrc_gui":
+                exe_path.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "if [[ \"${1:-}\" == \"--version\" ]]; then\n"
+                    "  echo \"test-version\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+            else:
+                exe_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             exe_path.chmod(exe_path.stat().st_mode | stat.S_IXUSR)
 
         if icon_path.exists():
@@ -288,7 +302,8 @@ def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
         expected_exec = f'Exec=\"{stable_exec_path}\" %U'
         if expected_exec not in launcher:
             return fail(f"Launcher Exec entry mismatch. Expected: {expected_exec}")
-        for required in ("Icon=misrc", "Terminal=false", "StartupWMClass=misrc_gui", "X-GNOME-WMClass=misrc_gui", "StartupNotify=true"):
+        expected_wm_class = "MISRC Capture test-version"
+        for required in ("Icon=misrc", "Terminal=false", f"StartupWMClass={expected_wm_class}", f"X-GNOME-WMClass={expected_wm_class}", "StartupNotify=true"):
             if required not in launcher:
                 return fail(f"Launcher is missing required key: {required}")
 
