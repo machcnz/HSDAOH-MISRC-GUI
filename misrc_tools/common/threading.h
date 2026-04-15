@@ -207,7 +207,7 @@
 
   /* Set process priority with realtime->nice fallback (best-effort). */
   static inline void proc_set_priority(int priority) {
-#if defined(SCHED_FIFO)
+#if defined(__linux__) && defined(SCHED_FIFO)
     if (priority >= PROC_PRIORITY_CRITICAL) {
       int max_prio = sched_get_priority_max(SCHED_FIFO);
       if (max_prio > 0) {
