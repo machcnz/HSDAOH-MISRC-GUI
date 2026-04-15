@@ -194,6 +194,7 @@ static conv_16to32_t conv_16to32 = NULL;
 static conv_16to32_t conv_16to8to32 = NULL;
 static conv_16to32_t conv_16to12to32 = NULL;
 static conv_16to8_t conv_16to8 = NULL;
+static atomic_bool s_capture_callback_priority_set = ATOMIC_VAR_INIT(false);
 
 static struct option getopt_long_options[] =
 {
@@ -419,9 +420,16 @@ static void cli_audio_sync_cb(void *user_ctx, bool synced)
 
 static void hsdaoh_callback(hsdaoh_data_info_t *data_info)
 {
+	if (!data_info)
+		return;
 	cli_capture_ctx_t *ctx = data_info->ctx;
 	if (do_exit || !ctx)
 		return;
+
+	if (!atomic_exchange(&s_capture_callback_priority_set, true)) {
+		/* Callback thread is the capture-ingest hot path. */
+		thrd_set_priority(THRD_PRIORITY_CRITICAL);
+	}
 
 	capture_handler_ctx_t *handler = &ctx->handler;
 
@@ -517,6 +525,7 @@ int audio_file_writer(void *ctx)
 	bool convert_2ch = false;
 	uint8_t* buffer_1ch[4];
 	uint8_t* buffer_2ch[2];
+	thrd_set_priority(THRD_PRIORITY_CRITICAL);
 	memset(&h,0,sizeof(wave_header_t));
 	audio_ctx->total_bytes = 0;
 	if (audio_ctx->f_4ch != NULL && audio_ctx->f_4ch != stdout) fwrite(&h, 1, sizeof(wave_header_t), audio_ctx->f_4ch);
@@ -596,6 +605,7 @@ int raw_file_writer(void *ctx)
 	filewriter_ctx_t *file_ctx = ctx;
 	size_t len = BUFFER_READ_SIZE;
 	void *buf;
+	thrd_set_priority(THRD_PRIORITY_CRITICAL);
 #if LIBSOXR_ENABLED == 1
 	/* setup resampling */
 	uint8_t *resample_buffer;
@@ -683,6 +693,7 @@ int flac_file_writer(void *ctx)
 	void *buf;
 	uint32_t srate = 40000;
 	int result;
+	thrd_set_priority(THRD_PRIORITY_CRITICAL);
 #if LIBSOXR_ENABLED == 1
 	uint8_t *resample_buffer = NULL;
 	uint8_t *resample_buffer_b = NULL;
@@ -1234,6 +1245,7 @@ int main(int argc, char **argv)
 
 	rb_init(&cap_ctx.rb,"capture_ringbuffer",BUFFER_TOTAL_SIZE);
 	cap_ctx.handler.rb_rf = &cap_ctx.rb;
+	atomic_store(&s_capture_callback_priority_set, false);
 
 	if (sc_dev_name) {
 		r = sc_start_capture(sc_dev_name, 1920, 1080, SC_CODEC_YUYV, 60, 1, (sc_frame_callback_t)hsdaoh_callback, &cap_ctx, &sc_dev);
@@ -1272,6 +1284,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Reading samples...\n");
 		r = hsdaoh_start_stream(hs_dev, hsdaoh_callback, &cap_ctx);
 	}
+	/* Main conversion loop is latency-sensitive but not ingest-critical. */
+	thrd_set_priority(THRD_PRIORITY_HIGH);
 
 
 	while (!do_exit) {

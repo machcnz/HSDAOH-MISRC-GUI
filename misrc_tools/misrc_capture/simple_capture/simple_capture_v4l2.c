@@ -31,6 +31,7 @@
 #include <pthread.h>
 
 #include "simple_capture.h"
+#include "../../common/threading.h"
 
 typedef struct {
     void* start;
@@ -142,6 +143,7 @@ size_t sc_get_formats(char* device_id, sc_formatlist_t **fmt_list) {
 
 static void* v4l2_thread(void* p) {
 	sc_handle_t* hc = (sc_handle_t*)p;
+	thrd_set_priority(THRD_PRIORITY_CRITICAL);
 	while (!hc->stop) {
 		fd_set fds;
 		FD_ZERO(&fds);

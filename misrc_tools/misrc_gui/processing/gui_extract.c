@@ -90,6 +90,7 @@ static int extraction_thread(void *ctx) {
     size_t clip[2] = {0, 0};
     uint16_t peak[2] = {0, 0};
     uint32_t frame_count = 0;
+    thrd_set_priority(THRD_PRIORITY_HIGH);
 
     fprintf(stderr, "[EXTRACT] Continuous extraction thread started\n");
 

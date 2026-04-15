@@ -153,6 +153,7 @@ static int audio_thread_main(void *ctx)
     audio_ctx_t *a = (audio_ctx_t *)ctx;
     size_t len = BUFFER_AUDIO_READ_SIZE;
     void *buf;
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
     
     fprintf(stderr, "[AUDIO] Audio thread started\n");
 

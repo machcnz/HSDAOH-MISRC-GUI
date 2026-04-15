@@ -248,7 +248,7 @@ static int flac_writer_thread(void *ctx) {
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
 
     // Boost thread priority to avoid backpressure when window is minimized
-    thrd_set_priority(THRD_PRIORITY_ABOVE);
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
     // Scratch buffers
     int16_t *tmp_i16 = NULL;
@@ -402,7 +402,7 @@ static int raw_writer_thread(void *ctx) {
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
 
     // Boost thread priority to avoid backpressure when window is minimized
-    thrd_set_priority(THRD_PRIORITY_ABOVE);
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
 #if LIBSOXR_ENABLED
     int16_t *tmp_i16 = (int16_t *)aligned_alloc(32, BUFFER_READ_SIZE * sizeof(int16_t));

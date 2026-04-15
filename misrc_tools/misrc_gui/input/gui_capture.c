@@ -228,6 +228,7 @@ static uint32_t s_capture_last_drop_count = 0;
 static uint32_t s_capture_missed_streak = 0;
 static uint32_t s_capture_error_streak = 0;
 static uint64_t s_capture_prev_callback_time_ms = 0;
+static atomic_bool s_capture_callback_priority_set = ATOMIC_VAR_INIT(false);
 // Only treat substantial callback stalls as parser-desync events.
 // Short scheduler jitter should not force a parser reset.
 static const uint64_t s_capture_gap_resync_threshold_ms = 1000;
@@ -268,6 +269,14 @@ static inline void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_
     if (!app || !app->settings.stop_on_dropout) return;
     atomic_store(&app->dropout_stop_reason, (uint32_t)reason);
     atomic_store(&app->dropout_stop_requested, true);
+}
+
+static inline void gui_capture_promote_callback_priority_once(void)
+{
+    if (!atomic_exchange(&s_capture_callback_priority_set, true)) {
+        /* Callback thread is the capture-ingest hot path. */
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
+    }
 }
 
 void gui_capture_set_audio_capture(bool enabled)
@@ -343,8 +352,11 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
 
 // Main capture callback - writes raw data to ringbuffer (like reference implementation)
 void gui_capture_callback(void *data_info_ptr) {
+    if (!data_info_ptr) return;
     hsdaoh_data_info_t *data_info = (hsdaoh_data_info_t *)data_info_ptr;
+    if (!data_info->ctx) return;
     gui_app_t *app = (gui_app_t *)data_info->ctx;
+    gui_capture_promote_callback_priority_once();
 
     s_callback_count++;
 
@@ -825,6 +837,7 @@ void gui_app_enumerate_devices(gui_app_t *app) {
 static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
 {
     if (!data_info || !data_info->ctx) return;
+    gui_capture_promote_callback_priority_once();
 
     gui_app_t *app = (gui_app_t *)data_info->ctx;
     if (!app || !data_info->buf || data_info->len == 0) return;
@@ -998,6 +1011,7 @@ int gui_app_start_capture(gui_app_t *app) {
     s_capture_missed_streak = 0;
     s_capture_error_streak = 0;
     s_capture_prev_callback_time_ms = 0;
+    atomic_store(&s_capture_callback_priority_set, false);
 
     // Reset display buffers (per-channel)
     app->display_samples_available_a = 0;

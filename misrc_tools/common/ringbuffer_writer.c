@@ -85,6 +85,7 @@ size_t rb_writer_run(rb_writer_config_t *config)
 int rb_writer_thread(void *ctx)
 {
     rb_writer_config_t *config = (rb_writer_config_t *)ctx;
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
     rb_writer_run(config);
     return 0;
 }

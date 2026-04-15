@@ -33,6 +33,7 @@ static int display_thread_func(void *ctx) {
     display_thread_t *dt = (display_thread_t *)ctx;
     gui_app_t *app = dt->app;
     buffer_manager_t *bufmgr = dt->bufmgr;
+    thrd_set_priority(THRD_PRIORITY_ABOVE);
 
     fprintf(stderr, "[DISPLAY] Display thread started\n");
 
