@@ -71,6 +71,12 @@ def check_cross_platform_workflow_coverage(workflow_path: Path) -> int:
     return 0
 
 
+def check_no_legacy_release_sanity_workflow(legacy_workflow_path: Path) -> int:
+    if legacy_workflow_path.exists():
+        return fail(f"Legacy workflow should be removed after replacement: {legacy_workflow_path}")
+    return 0
+
+
 def check_cross_platform_smoke_tests(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     required_smokes = [
@@ -334,7 +340,7 @@ def check_windows_packaging_assertions(workflow_path: Path) -> int:
 def check_release_artifact_naming_contract(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     required_snippets = [
-        "workflow_call:",
+        "workflow_dispatch:",
         "artifact_suffix: x86",
         "artifact_suffix: arm64",
         "APPIMAGE_NAME=\"linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.AppImage\"",
@@ -384,13 +390,21 @@ def check_build_workflow_entrypoint_contract(build_workflow_path: Path) -> int:
         "release_tag:",
         "push:",
         "- 'v*'",
-        "uses: ./.github/workflows/release-sanity-build.yml",
-        "create_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' }}",
-        "release_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || '' }}",
+        "preflight-guard-tests:",
+        "linux-appimage:",
+        "windows-exe:",
+        "macos-app-universal:",
+        "release:",
     ]
     for snippet in required_snippets:
         if snippet not in workflow_text:
             return fail(f"Build workflow entrypoint is missing required snippet: {snippet}")
+    forbidden_snippets = [
+        "uses: ./.github/workflows/release-sanity-build.yml",
+    ]
+    for snippet in forbidden_snippets:
+        if snippet in workflow_text:
+            return fail(f"Build workflow entrypoint still contains legacy reusable wrapper snippet: {snippet}")
     return 0
 
 
@@ -424,8 +438,8 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
-    workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
-    build_workflow_path = repo_root / ".github/workflows/build.yml"
+    workflow_path = repo_root / ".github/workflows/build.yml"
+    legacy_workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
     meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
@@ -443,7 +457,8 @@ def main() -> int:
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
         ("release artifact naming contract", lambda: check_release_artifact_naming_contract(workflow_path)),
-        ("build workflow entrypoint contract", lambda: check_build_workflow_entrypoint_contract(build_workflow_path)),
+        ("build workflow entrypoint contract", lambda: check_build_workflow_entrypoint_contract(workflow_path)),
+        ("legacy release-sanity workflow removed", lambda: check_no_legacy_release_sanity_workflow(legacy_workflow_path)),
         ("no capture-stability Actions clutter", lambda: check_no_capture_stability_clutter(workflow_path)),
     ]
     if not args.static_only:
