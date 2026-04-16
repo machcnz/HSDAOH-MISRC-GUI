@@ -1,17 +1,6 @@
 name: Release sanity build
 
 on:
-  workflow_dispatch:
-    inputs:
-      create_release:
-        description: "Create a GitHub release and upload built assets"
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: "Tag to release when manually dispatched (example: v0.6.0)"
-        required: false
-        type: string
   workflow_call:
     inputs:
       create_release:
@@ -22,9 +11,6 @@ on:
         required: false
         type: string
         default: ""
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: read
@@ -167,6 +153,8 @@ jobs:
           cmake --install .deps/raylib/build
 
       - name: Build MISRC tools (Meson)
+        env:
+          MISRC_TOOLS_VERSION_OVERRIDE: ${{ steps.version.outputs.version }}
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
@@ -402,6 +390,8 @@ jobs:
 
       - name: Build and package EXE
         shell: msys2 {0}
+        env:
+          MISRC_TOOLS_VERSION_OVERRIDE: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           DEPS_PREFIX="$PWD/.deps/install"
@@ -574,6 +564,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
           MACOS_ARCH: ${{ matrix.arch }}
+          MISRC_TOOLS_VERSION_OVERRIDE: ${{ steps.version.outputs.version }}
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
