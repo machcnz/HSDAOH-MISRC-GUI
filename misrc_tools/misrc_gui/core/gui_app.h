@@ -325,6 +325,7 @@ typedef struct gui_app {
 
     // Recording state
     double recording_start_time;
+    double last_recording_duration_s;
 
     // Capture session timing
     double capture_start_time;

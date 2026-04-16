@@ -24,8 +24,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 
@@ -58,6 +60,20 @@ static void format_file_size_u64(uint64_t size, char *buf, size_t buf_size) {
     }
 }
 
+// Format data sizes for capture logs using clear MB/GB units
+static void format_log_data_size_u64(uint64_t size, char *buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return;
+
+    double mb = (double)size / 1048576.0;
+    double gb = (double)size / 1073741824.0;
+
+    if (gb >= 1.0) {
+        snprintf(buf, buf_size, "%.3f GB (%" PRIu64 " bytes)", gb, size);
+    } else {
+        snprintf(buf, buf_size, "%.2f MB (%" PRIu64 " bytes)", mb, size);
+    }
+}
+
 static void gui_record_build_system_timestamp(char *dst, size_t dst_len) {
     if (!dst || dst_len == 0) return;
     dst[0] = '\0';
@@ -78,6 +94,26 @@ static void gui_record_build_system_timestamp(char *dst, size_t dst_len) {
              tmv.tm_sec);
 }
 
+static void gui_record_build_log_timestamp(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    time_t t = time(NULL);
+    if (t == (time_t)-1) return;
+    struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+    if (localtime_s(&tmv, &t) != 0) return;
+#else
+    if (!localtime_r(&t, &tmv)) return;
+#endif
+    snprintf(dst, dst_len, "%04d-%02d-%02d %02d:%02d:%02d",
+             (tmv.tm_year + 1900),
+             tmv.tm_mon + 1,
+             tmv.tm_mday,
+             tmv.tm_hour,
+             tmv.tm_min,
+             tmv.tm_sec);
+}
+
 // do_exit is declared in gui_capture.h (defined in misrc_gui.c)
 
 // Writer threads
@@ -86,6 +122,63 @@ static thrd_t s_writer_thread_b;
 static bool s_writer_threads_running = false;
 static FILE *s_file_a = NULL;
 static FILE *s_file_b = NULL;
+static FILE *s_capture_log_file = NULL;
+static char s_capture_log_path[512];
+static atomic_flag s_capture_log_lock = ATOMIC_FLAG_INIT;
+
+static void gui_record_log_lock(void) {
+    while (atomic_flag_test_and_set(&s_capture_log_lock)) {
+        thrd_sleep_ms(1);
+    }
+}
+
+static void gui_record_log_unlock(void) {
+    atomic_flag_clear(&s_capture_log_lock);
+}
+
+static void gui_record_close_session_log(void) {
+    gui_record_log_lock();
+    if (s_capture_log_file) {
+        fclose(s_capture_log_file);
+        s_capture_log_file = NULL;
+    }
+    s_capture_log_path[0] = '\0';
+    gui_record_log_unlock();
+}
+
+static void gui_record_trim_trailing_newline(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
+        s[--len] = '\0';
+    }
+}
+
+static void gui_record_log_write_line_locked(const char *level, const char *message) {
+    if (!s_capture_log_file || !message || !message[0]) return;
+    char ts[32];
+    gui_record_build_log_timestamp(ts, sizeof(ts));
+    fprintf(s_capture_log_file, "[%s] [%s] %s\n", ts, (level && level[0]) ? level : "INFO", message);
+    fflush(s_capture_log_file);
+}
+
+static void gui_record_log_write_line(const char *level, const char *message) {
+    gui_record_log_lock();
+    gui_record_log_write_line_locked(level, message);
+    gui_record_log_unlock();
+}
+
+static void gui_record_log_writef(const char *level, const char *format, ...) {
+    if (!format || !format[0]) return;
+    char message[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    gui_record_trim_trailing_newline(message);
+    if (!message[0]) return;
+    gui_record_log_write_line(level, message);
+}
 
 // Global app pointer for threads
 static gui_app_t *s_recording_app = NULL;
@@ -203,6 +296,7 @@ static void gui_flac_error_callback(void *user_data, flac_writer_error_t error, 
     writer_ctx_t *wctx = (writer_ctx_t *)user_data;
     if (wctx && wctx->app) {
         gui_app_set_status(wctx->app, message);
+        gui_record_log_capture_event(wctx->app, "ERROR", message);
     }
     fprintf(stderr, "FLAC ERROR: %s\n", message);
 }
@@ -521,7 +615,7 @@ void gui_record_init(void) {
 
 // Cleanup recording subsystem
 void gui_record_cleanup(void) {
-    // Nothing to cleanup here anymore - ringbuffers are in gui_extract
+    gui_record_close_session_log();
 }
 
 // Check if recording is active
@@ -532,6 +626,21 @@ bool gui_record_is_active(void) {
 // Check if waiting for popup confirmation
 bool gui_record_is_pending(void) {
     return s_overwrite_pending;
+}
+
+void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message) {
+    if (!app || app != s_recording_app || !message || !message[0]) {
+        return;
+    }
+
+    char clean[1024];
+    snprintf(clean, sizeof(clean), "%s", message);
+    gui_record_trim_trailing_newline(clean);
+    if (!clean[0]) {
+        return;
+    }
+
+    gui_record_log_write_line(level, clean);
 }
 
 // Forward declaration of actual recording start (after confirmation)
@@ -581,6 +690,86 @@ static void sanitize_tag(char *dst, size_t dst_len, const char *src) {
     while (j > 0 && dst[j - 1] == '-') {
         dst[--j] = '\0';
     }
+}
+
+static void gui_record_open_session_log(gui_app_t *app, const char *path_a, const char *path_b) {
+    if (!app) return;
+
+    gui_record_close_session_log();
+
+    const char *base_src = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
+    char base_name[128];
+    sanitize_tag(base_name, sizeof(base_name), base_src);
+    if (!base_name[0]) {
+        snprintf(base_name, sizeof(base_name), "%s", "capture");
+    }
+
+    char date_tag[32];
+    if (app->capture_timestamp[0]) {
+        snprintf(date_tag, sizeof(date_tag), "%s", app->capture_timestamp);
+    } else {
+        gui_record_build_system_timestamp(date_tag, sizeof(date_tag));
+    }
+    if (!date_tag[0]) {
+        snprintf(date_tag, sizeof(date_tag), "%s", "session");
+    }
+
+    snprintf(s_capture_log_path, sizeof(s_capture_log_path), "%s/%s_%s_misrc_capture.log",
+             app->settings.output_path, base_name, date_tag);
+
+    gui_record_log_lock();
+    s_capture_log_file = fopen(s_capture_log_path, "w");
+    if (!s_capture_log_file) {
+        s_capture_log_path[0] = '\0';
+        gui_record_log_unlock();
+        return;
+    }
+
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "MISRC capture log started (%s)", app->settings.use_flac ? "FLAC" : "RAW");
+    gui_record_log_write_line_locked("INFO", msg);
+
+    const char *device_name = "unknown";
+    if (app->selected_device >= 0 && app->selected_device < app->device_count) {
+        device_name = app->devices[app->selected_device].name;
+    }
+    snprintf(msg, sizeof(msg), "Device=%s", device_name);
+    gui_record_log_write_line_locked("INFO", msg);
+
+    snprintf(msg, sizeof(msg), "Capture channels: A=%s B=%s", app->settings.capture_a ? "on" : "off", app->settings.capture_b ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
+
+    uint8_t bits_a = app->settings.use_flac ? clamp_rf_bits_flac(app->settings.rf_bits_a) : rf_bits_for_raw(app->settings.rf_bits_a);
+    uint8_t bits_b = app->settings.use_flac ? clamp_rf_bits_flac(app->settings.rf_bits_b) : rf_bits_for_raw(app->settings.rf_bits_b);
+    snprintf(msg, sizeof(msg), "RF settings: bitsA=%u bitsB=%u resampleA=%s(%.1f kHz) resampleB=%s(%.1f kHz)",
+             (unsigned)bits_a, (unsigned)bits_b,
+             app->settings.enable_resample_a ? "on" : "off", app->settings.resample_rate_a,
+             app->settings.enable_resample_b ? "on" : "off", app->settings.resample_rate_b);
+    gui_record_log_write_line_locked("INFO", msg);
+
+    if (app->settings.use_flac) {
+        snprintf(msg, sizeof(msg), "FLAC settings: level=%d verify=%s threads=%d",
+                 app->settings.flac_level,
+                 app->settings.flac_verification ? "on" : "off",
+                 app->settings.flac_threads);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+
+    if (app->settings.capture_a && path_a && path_a[0]) {
+        snprintf(msg, sizeof(msg), "Output A: %s", path_a);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+    if (app->settings.capture_b && path_b && path_b[0]) {
+        snprintf(msg, sizeof(msg), "Output B: %s", path_b);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+    snprintf(msg, sizeof(msg), "Audio outputs: 4ch=%s 2ch12=%s 2ch34=%s",
+             app->settings.enable_audio_4ch ? "on" : "off",
+             app->settings.enable_audio_2ch_12 ? "on" : "off",
+             app->settings.enable_audio_2ch_34 ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
+
+    gui_record_log_unlock();
 }
 
 static void gui_record_apply_auto_names(gui_app_t *app) {
@@ -829,6 +1018,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
     atomic_store(&app->recording_raw_b, 0);
     atomic_store(&app->recording_compressed_a, 0);
     atomic_store(&app->recording_compressed_b, 0);
+    app->last_recording_duration_s = 0.0;
 
     // Reset record buffers before starting
     gui_extract_reset_record_rbs(app);
@@ -1025,6 +1215,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
 
         // Start audio output/monitoring (if enabled)
         gui_audio_start(app, &app->buffers);
+        gui_record_open_session_log(app, path_a, path_b);
 
         gui_app_set_status(app, "Recording (FLAC)...");
     } else
@@ -1129,6 +1320,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
 
         // Start audio output/monitoring (if enabled)
         gui_audio_start(app, &app->buffers);
+        gui_record_open_session_log(app, path_a, path_b);
 
         gui_app_set_status(app, "Recording (RAW)...");
     }
@@ -1199,8 +1391,14 @@ void gui_record_stop(gui_app_t *app) {
 
     // Print recording summary with backpressure stats
     double duration = GetTime() - app->recording_start_time;
+    app->last_recording_duration_s = duration;
     uint64_t raw_a = atomic_load(&app->recording_raw_a);
     uint64_t raw_b = atomic_load(&app->recording_raw_b);
+    uint64_t comp_a = atomic_load(&app->recording_compressed_a);
+    uint64_t comp_b = atomic_load(&app->recording_compressed_b);
+    uint64_t raw_total = raw_a + raw_b;
+    uint64_t comp_total = comp_a + comp_b;
+    double ratio_total = (comp_total > 0) ? ((double)raw_total / (double)comp_total) : 0.0;
     uint32_t end_rec_a_waits = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_waits);
     uint32_t end_rec_a_drops = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
     uint32_t end_rec_b_waits = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
@@ -1212,9 +1410,13 @@ void gui_record_stop(gui_app_t *app) {
     uint32_t rec_waits = rec_a_waits + rec_b_waits;
     uint32_t rec_drops = rec_a_drops + rec_b_drops;
 
-    char size_a[32], size_b[32];
-    format_file_size_u64(raw_a, size_a, sizeof(size_a));
-    format_file_size_u64(raw_b, size_b, sizeof(size_b));
+    char size_a[64], size_b[64], size_comp_a[64], size_comp_b[64], size_raw_total[64], size_comp_total[64];
+    format_log_data_size_u64(raw_a, size_a, sizeof(size_a));
+    format_log_data_size_u64(raw_b, size_b, sizeof(size_b));
+    format_log_data_size_u64(comp_a, size_comp_a, sizeof(size_comp_a));
+    format_log_data_size_u64(comp_b, size_comp_b, sizeof(size_comp_b));
+    format_log_data_size_u64(raw_total, size_raw_total, sizeof(size_raw_total));
+    format_log_data_size_u64(comp_total, size_comp_total, sizeof(size_comp_total));
 
     fprintf(stderr, "[REC] Recording stopped: %.1fs, A=%s, B=%s, waits=%u, drops=%u\n",
             duration, size_a, size_b, rec_waits, rec_drops);
@@ -1224,6 +1426,22 @@ void gui_record_stop(gui_app_t *app) {
     if (rec_drops > 0) {
         fprintf(stderr, "[REC] WARNING: %u frames were dropped during recording due to backpressure!\n", rec_drops);
     }
+
+    gui_record_log_writef("INFO", "Recording stopped: duration=%.2fs rawA=%s rawB=%s waits=%u drops=%u",
+                          duration, size_a, size_b, rec_waits, rec_drops);
+    gui_record_log_writef("INFO", "Output data: compressedA=%s compressedB=%s",
+                          size_comp_a, size_comp_b);
+    if (comp_total > 0) {
+        gui_record_log_writef("INFO", "Compression ratio: total_raw=%s total_compressed=%s ratio=%.3fx",
+                              size_raw_total, size_comp_total, ratio_total);
+    } else {
+        gui_record_log_writef("INFO", "Compression ratio: N/A (non-compressed recording mode)");
+    }
+    if (rec_drops > 0) {
+        gui_record_log_writef("WARN", "Backpressure drops detected: %u frame blocks dropped", rec_drops);
+    }
+    gui_record_log_writef("INFO", "Session complete");
+    gui_record_close_session_log();
 
     s_recording_app = NULL;
     gui_app_set_status(app, "Recording stopped");

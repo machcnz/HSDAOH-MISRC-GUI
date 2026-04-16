@@ -173,6 +173,10 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         }
         return;
     }
+
+    if (level == HSDAOH_WARNING || level == HSDAOH_ERROR || level == HSDAOH_CRITICAL) {
+        gui_record_log_capture_event(app, level_str, buffer);
+    }
     
 #ifdef HSDAOH_UPSTREAM
     /*
@@ -397,6 +401,7 @@ void gui_capture_callback(void *data_info_ptr) {
     if (data_info->device_error) {
         atomic_store(&app->stream_synced, false);
         s_capture_handler.frame_state.sync.stream_synced = false;
+        gui_record_log_capture_event(app, "ERROR", "Capture callback reported device_error");
         gui_capture_request_dropout_stop(app, GUI_DROPOUT_DEVICE_ERROR);
         return;
     }
@@ -435,6 +440,9 @@ void gui_capture_callback(void *data_info_ptr) {
 
     // Handle errors
     if (result.error_count > 0 && result.report_errors) {
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg), "Frame parser error burst: %d errors in callback frame", result.error_count);
+        gui_record_log_capture_event(app, "ERROR", err_msg);
         if (misrc_debug_enabled()) {
             fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
         }
@@ -483,6 +491,7 @@ void gui_capture_callback(void *data_info_ptr) {
             if (misrc_debug_enabled()) {
                 fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
             }
+            gui_record_log_capture_event(app, "WARN", "Dropped RF frame due to ringbuffer backpressure");
         }
         return;
     }
@@ -1006,6 +1015,12 @@ int gui_app_start_capture(gui_app_t *app) {
     atomic_store(&app->last_callback_time_ms, get_time_ms());
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    atomic_store(&app->recording_bytes, 0);
+    atomic_store(&app->recording_raw_a, 0);
+    atomic_store(&app->recording_raw_b, 0);
+    atomic_store(&app->recording_compressed_a, 0);
+    atomic_store(&app->recording_compressed_b, 0);
+    app->last_recording_duration_s = 0.0;
     s_capture_last_wait_count = 0;
     s_capture_last_drop_count = 0;
     s_capture_missed_streak = 0;

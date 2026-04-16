@@ -85,6 +85,7 @@ static char stat_b_errors[16];
 static char stat_rec_raw[2][32];
 static char stat_rec_flac[2][32];
 static char stat_rec_ratio[2][24];
+static char stat_rec_duration[2][24];
 
 // Playback file display buffers
 static char playback_file_a_display[64];
@@ -858,7 +859,7 @@ static void render_channel_stats(gui_app_t *app, int channel) {
     uint32_t clip_pos, clip_neg, errors;
     float peak_pos, peak_neg;
     char *buf_peak_pos, *buf_peak_neg, *buf_clip_pos, *buf_clip_neg, *buf_errors;
-    char *buf_rec_raw, *buf_rec_flac, *buf_rec_ratio;
+    char *buf_rec_raw, *buf_rec_flac, *buf_rec_ratio, *buf_rec_duration;
     Color channel_value_color = (channel == 0) ? COLOR_CHANNEL_A : COLOR_CHANNEL_B;
 
     if (channel == 0) {
@@ -875,6 +876,7 @@ static void render_channel_stats(gui_app_t *app, int channel) {
         buf_rec_raw = stat_rec_raw[0];
         buf_rec_flac = stat_rec_flac[0];
         buf_rec_ratio = stat_rec_ratio[0];
+        buf_rec_duration = stat_rec_duration[0];
     } else {
         clip_pos = atomic_load(&app->clip_count_b_pos);
         clip_neg = atomic_load(&app->clip_count_b_neg);
@@ -889,6 +891,7 @@ static void render_channel_stats(gui_app_t *app, int channel) {
         buf_rec_raw = stat_rec_raw[1];
         buf_rec_flac = stat_rec_flac[1];
         buf_rec_ratio = stat_rec_ratio[1];
+        buf_rec_duration = stat_rec_duration[1];
     }
 
     // Format stats (peak/clip/errors)
@@ -962,38 +965,52 @@ static void render_channel_stats(gui_app_t *app, int channel) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
         }
 
-        if (app->is_recording) {
-
+        {
             uint64_t raw_bytes = (channel == 0)
                                     ? atomic_load(&app->recording_raw_a)
                                     : atomic_load(&app->recording_raw_b);
             uint64_t comp_bytes = (channel == 0)
                                     ? atomic_load(&app->recording_compressed_a)
                                     : atomic_load(&app->recording_compressed_b);
-            double raw_mb = (double)raw_bytes / (1024.0 * 1024.0);
-            snprintf(buf_rec_raw, 32, "RAW: %.1f MB", raw_mb);
-            if (app->settings.use_flac) {
-                double comp_mb = (double)comp_bytes / (1024.0 * 1024.0);
-                double ratio = (comp_bytes > 0) ? ((double)raw_bytes / (double)comp_bytes) : 0.0;
-                snprintf(buf_rec_flac, 32, "FLAC: %.1f MB", comp_mb);
-                snprintf(buf_rec_ratio, 24, "Ratio: %.1fx", ratio);
-            } else {
-                buf_rec_flac[0] = '\0';
-                buf_rec_ratio[0] = '\0';
-            }
+            bool show_record_stats = app->is_capturing && (app->is_recording || raw_bytes > 0 || comp_bytes > 0 || app->last_recording_duration_s > 0.0);
+            if (show_record_stats) {
+                double raw_mb = (double)raw_bytes / (1024.0 * 1024.0);
+                double shown_duration = app->is_recording ? (GetTime() - app->recording_start_time) : app->last_recording_duration_s;
+                int d_hours = (int)(shown_duration / 3600.0);
+                int d_mins = ((int)(shown_duration / 60.0)) % 60;
+                int d_secs = ((int)(shown_duration)) % 60;
 
-            CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
-                CLAY_TEXT(make_string(buf_rec_raw),
-                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
-            }
-            if (app->settings.use_flac) {
-                CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
-                    CLAY_TEXT(make_string(buf_rec_flac),
+                snprintf(buf_rec_duration, 24, "Dur: %02d:%02d:%02d", d_hours, d_mins, d_secs);
+                snprintf(buf_rec_raw, 32, "RAW: %.1f MB", raw_mb);
+                if (comp_bytes > 0 || app->settings.use_flac) {
+                    double comp_mb = (double)comp_bytes / (1024.0 * 1024.0);
+                    double ratio = (comp_bytes > 0) ? ((double)raw_bytes / (double)comp_bytes) : 0.0;
+                    snprintf(buf_rec_flac, 32, "FLAC: %.1f MB", comp_mb);
+                    snprintf(buf_rec_ratio, 24, "Ratio: %.1fx", ratio);
+                } else {
+                    buf_rec_flac[0] = '\0';
+                    buf_rec_ratio[0] = '\0';
+                }
+
+                CLAY(CLAY_IDI("RecDurationRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                    CLAY_TEXT(make_string(buf_rec_duration),
                         CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
                 }
-                CLAY(CLAY_IDI("RecRatioRow", channel), { .layout = STAT_ROW_LAYOUT }) {
-                    CLAY_TEXT(make_string(buf_rec_ratio),
+                CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                    CLAY_TEXT(make_string(buf_rec_raw),
                         CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+                }
+                if (buf_rec_flac[0]) {
+                    CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY_TEXT(make_string(buf_rec_flac),
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+                    }
+                }
+                if (buf_rec_ratio[0]) {
+                    CLAY(CLAY_IDI("RecRatioRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY_TEXT(make_string(buf_rec_ratio),
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(channel_value_color) }));
+                    }
                 }
             }
         }

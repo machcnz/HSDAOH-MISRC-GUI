@@ -43,4 +43,7 @@ void gui_record_stop(gui_app_t *app);
 // Check if recording is active
 bool gui_record_is_active(void);
 
+// Append a timestamped capture/record event to the active session log (if any)
+void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message);
+
 #endif // GUI_RECORD_H

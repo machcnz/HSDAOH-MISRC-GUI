@@ -13,3 +13,12 @@ Recent capture regressions showed that small callback-gating changes can silentl
   - RF: waveform/scope feed present and stable.
   - Audio monitor: `Audio Mon` audible and `BUF_CAPTURE_AUDIO` no longer pinned at 0%.
 - Prefer minimal, isolated fixes in `frame_parser`, `gui_capture`, `gui_extract`, and `gui_audio`; avoid unrelated UI/settings churn during capture debugging.
+
+## 2026-04-16 capture/runtime snapshot
+
+- Timestamp (UTC): `2026-04-16T03:38:18Z`
+- OS: `Linux Mint 21.3`
+- System: `Linux 5.15.0-173-generic x86_64 GNU/Linux`
+- Branch: `heads/misrc_gui_dev`
+- Commit: `48054ea`
+- Stability note: current version is running stable for 8+ hours.
