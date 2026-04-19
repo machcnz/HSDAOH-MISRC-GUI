@@ -125,6 +125,16 @@ The packages contain two command-line applications, `misrc_capture` and `misrc_e
 
 If you want to build the tools yourself, see the instructions in the [misrc_tools readme](/misrc_tools/README.md).
 
+### Local AppImage test build (Ubuntu 22.04 baseline)
+For a reproducible local AppImage build that targets a `glibc 2.35` baseline, run:
+
+    ./scripts/build-appimage-local.sh
+
+The script uses `docker` or `podman` (prefers docker if both are installed), installs build dependencies in an `ubuntu:22.04` container, and writes the output AppImage to `.ci-artifacts/linux-appimage/`.
+If you want to run directly on your host (with all dependencies already installed), use:
+
+    ./scripts/build-appimage-local.sh --native
+
 <details closed>
 <summary>Install Windows</summary>
 <br>
