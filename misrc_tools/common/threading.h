@@ -106,6 +106,9 @@
   /* POSIX implementation */
   #include <pthread.h>
   #include <sched.h>
+  #include <errno.h>
+  #include <stdio.h>
+  #include <stdlib.h>
   #include <sys/resource.h>
   #include <sys/types.h>
   #include <time.h>
@@ -115,6 +118,7 @@
   #include <pthread/qos.h>
 #endif
 #if defined(__linux__)
+  #include <dirent.h>
   #include <sys/syscall.h>
 #endif
 
@@ -156,13 +160,34 @@
     return setpriority(PRIO_PROCESS, 0, nice_target);
   }
 
+  static inline int thrd_priority_to_nice_target(int priority) {
+    if (priority == THRD_PRIORITY_ABOVE) return -5;
+    if (priority == THRD_PRIORITY_HIGH) return -10;
+    if (priority >= THRD_PRIORITY_CRITICAL) return -15;
+    return 0;
+  }
+
+  static inline void thrd_log_priority_failure_once(const char *scope,
+                                                    int priority,
+                                                    int rt_err,
+                                                    int nice_err) {
+    static int warned_once = 0;
+    if (warned_once) return;
+    warned_once = 1;
+    fprintf(stderr,
+            "[THREAD] %s priority request %d could not be elevated (rt_err=%d, nice_err=%d)\n",
+            scope, priority, rt_err, nice_err);
+  }
+
   /* Try realtime scheduler for this thread (best-effort, usually requires elevated privileges). */
   static inline int thrd_try_realtime(int priority) {
 #if defined(SCHED_FIFO) && defined(SCHED_RR)
     int policy = (priority >= THRD_PRIORITY_CRITICAL) ? SCHED_FIFO : SCHED_RR;
     int min_prio = sched_get_priority_min(policy);
     int max_prio = sched_get_priority_max(policy);
-    if (min_prio < 0 || max_prio < min_prio) return -1;
+    if (min_prio < 0 || max_prio < min_prio) {
+      return ENOTSUP;
+    }
 
     struct sched_param param;
     if (priority >= THRD_PRIORITY_CRITICAL) {
@@ -170,12 +195,62 @@
     } else {
       param.sched_priority = min_prio + ((max_prio - min_prio) * 3) / 4;
     }
-    return pthread_setschedparam(pthread_self(), policy, &param);
+
+    int rc = pthread_setschedparam(pthread_self(), policy, &param);
+    if (rc == 0) {
+      return 0;
+    }
+
+#if defined(__linux__)
+    pid_t tid = 0;
+#if defined(SYS_gettid)
+    tid = (pid_t)syscall(SYS_gettid);
+#elif defined(__NR_gettid)
+    tid = (pid_t)syscall(__NR_gettid);
+#endif
+    if (tid > 0 && sched_setscheduler(tid, policy, &param) == 0) {
+      return 0;
+    }
+    if (errno != 0) {
+      return errno;
+    }
+#endif
+
+    return (rc > 0) ? rc : EINVAL;
 #else
     (void)priority;
-    return -1;
+    return ENOTSUP;
 #endif
   }
+
+#if defined(__linux__)
+  static inline int proc_set_nice_all_threads(int nice_target) {
+    DIR *task_dir = opendir("/proc/self/task");
+    if (!task_dir) {
+      return setpriority(PRIO_PROCESS, 0, nice_target);
+    }
+
+    int first_err = 0;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(task_dir)) != NULL) {
+      char *end = NULL;
+      long tid = strtol(entry->d_name, &end, 10);
+      if (end == entry->d_name || (end && *end != '\0') || tid <= 0) {
+        continue;
+      }
+      if (setpriority(PRIO_PROCESS, (id_t)tid, nice_target) != 0 && first_err == 0) {
+        first_err = (errno != 0) ? errno : EINVAL;
+      }
+    }
+    closedir(task_dir);
+
+    if (first_err != 0) {
+      errno = first_err;
+      return -1;
+    }
+    return 0;
+  }
+#endif
 
   /* Set thread priority for current thread with realtime->nice fallback (best-effort). */
   static inline void thrd_set_priority(int priority) {
@@ -187,16 +262,22 @@
     (void)pthread_set_qos_class_self_np(qos, 0);
     return;
 #endif
-    int nice_target = 0;
-    if (priority == THRD_PRIORITY_ABOVE) nice_target = -5;
-    else if (priority == THRD_PRIORITY_HIGH) nice_target = -10;
-    else if (priority >= THRD_PRIORITY_CRITICAL) nice_target = -15;
+    int rt_err = 0;
+    int nice_err = 0;
 
     if (priority >= THRD_PRIORITY_HIGH) {
-      if (thrd_try_realtime(priority) == 0) return;
+      rt_err = thrd_try_realtime(priority);
+      if (rt_err == 0) return;
     }
 
-    (void)thrd_set_nice_target(nice_target);
+    if (thrd_set_nice_target(thrd_priority_to_nice_target(priority)) == 0) {
+      return;
+    }
+
+    nice_err = (errno != 0) ? errno : EINVAL;
+    if (priority >= THRD_PRIORITY_ABOVE) {
+      thrd_log_priority_failure_once("Thread", priority, rt_err, nice_err);
+    }
   }
 
   /* Process priority constants */
@@ -207,13 +288,23 @@
 
   /* Set process priority with realtime->nice fallback (best-effort). */
   static inline void proc_set_priority(int priority) {
-#if defined(__linux__) && defined(SCHED_FIFO)
-    if (priority >= PROC_PRIORITY_CRITICAL) {
-      int max_prio = sched_get_priority_max(SCHED_FIFO);
-      if (max_prio > 0) {
+    int rt_err = 0;
+    int nice_err = 0;
+
+#if defined(__linux__) && defined(SCHED_FIFO) && defined(SCHED_RR)
+    if (priority >= PROC_PRIORITY_HIGH) {
+      int policy = (priority >= PROC_PRIORITY_CRITICAL) ? SCHED_FIFO : SCHED_RR;
+      int min_prio = sched_get_priority_min(policy);
+      int max_prio = sched_get_priority_max(policy);
+      if (min_prio >= 0 && max_prio >= min_prio) {
         struct sched_param param;
-        param.sched_priority = max_prio;
-        if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) return;
+        param.sched_priority = (priority >= PROC_PRIORITY_CRITICAL)
+                               ? max_prio
+                               : (min_prio + ((max_prio - min_prio) * 3) / 4);
+        if (sched_setscheduler(0, policy, &param) == 0) return;
+        rt_err = (errno != 0) ? errno : EINVAL;
+      } else {
+        rt_err = ENOTSUP;
       }
     }
 #endif
@@ -222,7 +313,16 @@
     if (priority == PROC_PRIORITY_ABOVE) nice_target = -5;
     else if (priority == PROC_PRIORITY_HIGH) nice_target = -10;
     else if (priority >= PROC_PRIORITY_CRITICAL) nice_target = -15;
-    (void)setpriority(PRIO_PROCESS, 0, nice_target);
+
+#if defined(__linux__)
+    if (proc_set_nice_all_threads(nice_target) == 0) return;
+#else
+    if (setpriority(PRIO_PROCESS, 0, nice_target) == 0) return;
+#endif
+    nice_err = (errno != 0) ? errno : EINVAL;
+    if (priority >= PROC_PRIORITY_ABOVE) {
+      thrd_log_priority_failure_once("Process", priority, rt_err, nice_err);
+    }
   }
 
   /* Get current time in milliseconds (for timeouts, elapsed time tracking) */

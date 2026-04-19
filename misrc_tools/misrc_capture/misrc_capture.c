@@ -115,9 +115,9 @@ static const char* const _FLAC_StreamEncoderSetNumThreadsStatusString[] = {
 #endif
 
 // Ringbuffer capacities (platform-agnostic byte sizing)
-#define BUFFER_AUDIO_TOTAL_SIZE ((size_t)512 * 1024 * 1024)
+#define BUFFER_AUDIO_TOTAL_SIZE ((size_t)256 * 1024 * 1024)
 #define BUFFER_AUDIO_READ_SIZE 65536*3
-#define BUFFER_TOTAL_SIZE ((size_t)512 * 1024 * 1024)
+#define BUFFER_TOTAL_SIZE ((size_t)256 * 1024 * 1024)
 #define BUFFER_READ_SIZE 65536*32
 #define CALLBACK_WAIT_SLEEP_MS 1
 #define CALLBACK_WAIT_MAX_RETRIES 8

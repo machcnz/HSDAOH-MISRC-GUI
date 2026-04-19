@@ -116,6 +116,13 @@ build_native() {
   rm -rf "$REPO_ROOT/$BUILD_DIR" "$DEPS_PREFIX" "$WORK_TMP_DIR"
   mkdir -p "$OUT_DIR" "$DEPS_SRC_DIR" "$DEPS_PREFIX" "$TOOLS_DIR" "$WORK_TMP_DIR"
 
+  # Use an isolated git config so safe.directory tweaks do not touch host user config.
+  export GIT_CONFIG_GLOBAL="$WORK_TMP_DIR/gitconfig"
+  touch "$GIT_CONFIG_GLOBAL"
+  git config --global --add safe.directory "$REPO_ROOT" || true
+  git config --global --add safe.directory "$DEPS_SRC_DIR/hsdaoh" || true
+  git config --global --add safe.directory "$DEPS_SRC_DIR/raylib" || true
+
   if [[ ! -d "$DEPS_SRC_DIR/hsdaoh/.git" ]]; then
     git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git "$DEPS_SRC_DIR/hsdaoh"
   fi

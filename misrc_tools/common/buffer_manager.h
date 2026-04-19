@@ -36,10 +36,11 @@ typedef enum {
 /*
  * Buffer sizes (must be page-aligned)
  */
-#define BUFMGR_SIZE_CAPTURE_RF    (65536 * 1024)   /* 64MB */
-#define BUFMGR_SIZE_CAPTURE_AUDIO (65536 * 4096)   /* 256MB (audio is always-on during capture) */
-#define BUFMGR_SIZE_RECORD        (65536 * 2048)   /* 128MB per channel */
-#define BUFMGR_SIZE_DISPLAY       (4 * 1024 * 1024) /* 4MB (lossy OK) */
+#define BUFMGR_SIZE_UNIFORM       ((size_t)256 * 1024 * 1024) /* 256MB hard-upgrade for every buffer */
+#define BUFMGR_SIZE_CAPTURE_RF    BUFMGR_SIZE_UNIFORM
+#define BUFMGR_SIZE_CAPTURE_AUDIO BUFMGR_SIZE_UNIFORM
+#define BUFMGR_SIZE_RECORD        BUFMGR_SIZE_UNIFORM
+#define BUFMGR_SIZE_DISPLAY       BUFMGR_SIZE_UNIFORM
 
 /*
  * Per-buffer configuration
