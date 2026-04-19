@@ -22,3 +22,15 @@ Recent capture regressions showed that small callback-gating changes can silentl
 - Branch: `heads/misrc_gui_dev`
 - Commit: `48054ea`
 - Stability note: current version is running stable for 8+ hours.
+
+## 2026-04-19 local AppImage build note
+
+- Local AppImage builds are now reproducible and passing smoke tests using:
+  - `./scripts/build-appimage-local.sh`
+- Default mode runs in an `ubuntu:22.04` container (`docker`/`podman`) to keep a portable glibc baseline.
+- Script output location:
+  - `.ci-artifacts/linux-appimage/`
+- Verified locally:
+  - AppImage artifact builds successfully.
+  - `APPIMAGE_EXTRACT_AND_RUN=1 <AppImage> --smoke-test` passes.
+  - Direct run `<AppImage> --smoke-test` passes on host.
