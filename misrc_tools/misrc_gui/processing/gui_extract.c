@@ -28,7 +28,7 @@ extern atomic_int do_exit;
 
 // Buffer sizes
 #define BUFFER_READ_SIZE 65536
-#define BUFFER_RECORD_SIZE (65536 * 1024)  // 64MB per channel
+#define BUFFER_RECORD_SIZE ((size_t)512 * 1024 * 1024)  // 512MB per channel
 
 // Extraction buffers (page-aligned for SSE/AVX)
 static int16_t *s_buf_a = NULL;

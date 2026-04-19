@@ -76,9 +76,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// Buffer sizes - match reference implementation
+// Buffer sizes (platform-agnostic byte sizing)
 #define BUFFER_READ_SIZE 65536
-#define BUFFER_TOTAL_SIZE (65536 * 1024)  // Same as reference: 64MB
+#define BUFFER_TOTAL_SIZE ((size_t)512 * 1024 * 1024)  // 512MB capture ringbuffer
 #define BUFFER_AUDIO_TOTAL_SIZE (65536 * 256)
 
 // Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
