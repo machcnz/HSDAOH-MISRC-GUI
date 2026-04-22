@@ -1063,7 +1063,6 @@ int main(int argc, char **argv)
 		usage();
 	}
 	else {
-		proc_set_priority(PROC_PRIORITY_ABOVE);
 		atomic_store(&cap_ctx.handler.capture_rf, true);
 	}
 
