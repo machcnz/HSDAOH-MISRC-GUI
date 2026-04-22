@@ -254,27 +254,18 @@
   }
 #endif
 #if defined(__APPLE__)
-  static inline void proc_set_precedence_all_threads(integer_t importance) {
-    thread_act_array_t threads = NULL;
-    mach_msg_type_number_t thread_count = 0;
-    kern_return_t kr = task_threads(mach_task_self(), &threads, &thread_count);
-    if (kr != KERN_SUCCESS || !threads) {
+  static inline void thrd_set_precedence_current_thread(integer_t importance) {
+    thread_t thread = mach_thread_self();
+    if (thread == MACH_PORT_NULL) {
       return;
     }
     thread_precedence_policy_data_t precedence;
     precedence.importance = importance;
-
-    for (mach_msg_type_number_t i = 0; i < thread_count; i++) {
-      (void)thread_policy_set(threads[i],
-                              THREAD_PRECEDENCE_POLICY,
-                              (thread_policy_t)&precedence,
-                              THREAD_PRECEDENCE_POLICY_COUNT);
-      (void)mach_port_deallocate(mach_task_self(), threads[i]);
-    }
-
-    (void)vm_deallocate(mach_task_self(),
-                        (vm_address_t)threads,
-                        (vm_size_t)(thread_count * sizeof(thread_act_t)));
+    (void)thread_policy_set(thread,
+                            THREAD_PRECEDENCE_POLICY,
+                            (thread_policy_t)&precedence,
+                            THREAD_PRECEDENCE_POLICY_COUNT);
+    (void)mach_port_deallocate(mach_task_self(), thread);
   }
 #endif
 
@@ -284,22 +275,41 @@
     /* macOS: use per-thread QoS classes as the primary priority control. */
     qos_class_t qos = QOS_CLASS_DEFAULT;
     int relpri = 0;
+    integer_t precedence = 0;
 #if defined(__arm64__) || defined(__aarch64__)
     /* Apple Silicon: bias critical ingest/encode work toward P-cores. */
     if (priority >= THRD_PRIORITY_ABOVE) {
       qos = QOS_CLASS_USER_INTERACTIVE;
-      if (priority >= THRD_PRIORITY_CRITICAL) relpri = 15;
-      else if (priority >= THRD_PRIORITY_HIGH) relpri = 8;
-      else relpri = 4;
+      if (priority >= THRD_PRIORITY_CRITICAL) {
+        relpri = 15;
+        precedence = 63;
+      } else if (priority >= THRD_PRIORITY_HIGH) {
+        relpri = 8;
+        precedence = 47;
+      } else {
+        relpri = 4;
+        precedence = 31;
+      }
     }
 #else
     if (priority == THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
     else if (priority >= THRD_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
-    if (priority >= THRD_PRIORITY_CRITICAL) relpri = 15;
-    else if (priority >= THRD_PRIORITY_HIGH) relpri = 8;
-    else if (priority >= THRD_PRIORITY_ABOVE) relpri = 4;
+    if (priority >= THRD_PRIORITY_CRITICAL) {
+      relpri = 15;
+      precedence = 63;
+    } else if (priority >= THRD_PRIORITY_HIGH) {
+      relpri = 8;
+      precedence = 47;
+    } else if (priority >= THRD_PRIORITY_ABOVE) {
+      relpri = 4;
+      precedence = 31;
+    }
 #endif
-    if (pthread_set_qos_class_self_np(qos, relpri) == 0) return;
+    if (pthread_set_qos_class_self_np(qos, relpri) == 0) {
+      thrd_set_precedence_current_thread(precedence);
+      return;
+    }
+    thrd_set_precedence_current_thread(precedence);
 #endif
     int rt_err = 0;
     int nice_err = 0;
@@ -332,19 +342,19 @@
 #if defined(__APPLE__)
     qos_class_t qos = QOS_CLASS_DEFAULT;
     int relpri = 0;
-    integer_t precedence = 0;
+    integer_t caller_precedence = 0;
 #if defined(__arm64__) || defined(__aarch64__)
     if (priority >= PROC_PRIORITY_ABOVE) {
       qos = QOS_CLASS_USER_INTERACTIVE;
       if (priority >= PROC_PRIORITY_CRITICAL) {
         relpri = 15;
-        precedence = 63;
+        caller_precedence = 63;
       } else if (priority >= PROC_PRIORITY_HIGH) {
         relpri = 8;
-        precedence = 47;
+        caller_precedence = 47;
       } else {
         relpri = 4;
-        precedence = 31;
+        caller_precedence = 31;
       }
     }
 #else
@@ -352,17 +362,17 @@
     else if (priority >= PROC_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
     if (priority >= PROC_PRIORITY_CRITICAL) {
       relpri = 15;
-      precedence = 63;
+      caller_precedence = 63;
     } else if (priority >= PROC_PRIORITY_HIGH) {
       relpri = 8;
-      precedence = 47;
+      caller_precedence = 47;
     } else if (priority >= PROC_PRIORITY_ABOVE) {
       relpri = 4;
-      precedence = 31;
+      caller_precedence = 31;
     }
 #endif
     (void)pthread_set_qos_class_self_np(qos, relpri);
-    proc_set_precedence_all_threads(precedence);
+    thrd_set_precedence_current_thread(caller_precedence);
 #endif
 
 #if defined(__linux__) && defined(SCHED_FIFO) && defined(SCHED_RR)

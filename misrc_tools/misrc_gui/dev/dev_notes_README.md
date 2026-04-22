@@ -64,7 +64,7 @@ Recent capture regressions showed that small callback-gating changes can silentl
   - `misrc_tools/common/threading.h`
     - restored clean separation between `thrd_set_priority(...)` and `proc_set_priority(...)` QoS logic.
     - strengthened macOS QoS calls by adding non-zero relative priority for `ABOVE/HIGH/CRITICAL` levels.
-    - added Mach thread precedence propagation (`THREAD_PRECEDENCE_POLICY`) across existing process threads during `proc_set_priority(...)`, so capture intent is not limited to the caller thread.
+    - added Mach thread precedence (`THREAD_PRECEDENCE_POLICY`) alongside QoS for capture-critical caller threads, avoiding blanket process-wide escalation of unrelated threads.
   - `misrc_tools/misrc_gui/input/gui_capture.c`
     - move `proc_set_priority(PROC_PRIORITY_ABOVE)` earlier in HSDAOH startup (before `hsdaoh_open`/`hsdaoh_alloc`/`hsdaoh_open2`) so early transport/open threads inherit elevated scheduling.
     - rollback to `PROC_PRIORITY_NORMAL` on all HSDAOH open/alloc failure exits.
