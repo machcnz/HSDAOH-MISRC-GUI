@@ -1036,6 +1036,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_file_a = s_file_b = NULL;
             return RECORD_ERROR;
         }
+        // Boost process priority before creating FLAC encoders/worker threads.
+        proc_set_priority(PROC_PRIORITY_ABOVE);
 
         // Determine per-channel RF bit depth
         uint8_t bits_a = clamp_rf_bits_flac(app->settings.rf_bits_a);
@@ -1125,6 +1127,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_a = flac_writer_create_stream(s_file_a, &config_a);
             if (!s_flac_writer_a) {
                 gui_app_set_status(app, "Failed to create FLAC encoder A");
+                proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
                 s_file_a = s_file_b = NULL;
@@ -1145,6 +1148,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_b = flac_writer_create_stream(s_file_b, &config_b);
             if (!s_flac_writer_b) {
                 gui_app_set_status(app, "Failed to create FLAC encoder B");
+                proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
@@ -1164,9 +1168,6 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         s_start_rec_a_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_A].write_drops);
         s_start_rec_b_wait_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_waits);
         s_start_rec_b_drop_count = atomic_load(&app->buffers.stats[BUF_RECORD_B].write_drops);
-
-        // Boost process priority during recording - affects all threads including FLAC encoder threads
-        proc_set_priority(PROC_PRIORITY_ABOVE);
 
         // Mark as recording
         app->is_recording = true;

@@ -1062,12 +1062,14 @@ int gui_app_start_capture(gui_app_t *app) {
         return -1;
 #else
         fprintf(stderr, "[GUI] Opening %s device %s...\n", sc_get_impl_name(), dev->serial);
+        proc_set_priority(PROC_PRIORITY_ABOVE);
         r = sc_start_capture(dev->serial, 1920, 1080, SC_CODEC_YUYV, 60, 1,
                              gui_simple_capture_callback, app, &app->sc_dev);
         if (r < 0 || !app->sc_dev) {
             fprintf(stderr, "[GUI] sc_start_capture failed: %d\n", r);
             gui_app_set_status(app, "Failed to open simple-capture device");
             app->sc_dev = NULL;
+            proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
         }
 #endif
@@ -1118,6 +1120,7 @@ int gui_app_start_capture(gui_app_t *app) {
 #endif
 
         fprintf(stderr, "[GUI] Starting stream...\n");
+        proc_set_priority(PROC_PRIORITY_ABOVE);
 
 #ifdef HSDAOH_UPSTREAM
         r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
@@ -1130,6 +1133,7 @@ int gui_app_start_capture(gui_app_t *app) {
             gui_app_set_status(app, "Failed to start stream");
             hsdaoh_close(app->hs_dev);
             app->hs_dev = NULL;
+            proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
         }
     }
@@ -1175,6 +1179,7 @@ int gui_app_start_capture(gui_app_t *app) {
             app->sc_dev = NULL;
         }
         app->is_capturing = false;
+        proc_set_priority(PROC_PRIORITY_NORMAL);
         return -1;
     }
 
@@ -1198,6 +1203,9 @@ void gui_app_stop_capture(gui_app_t *app) {
     if (!app->is_capturing) {
         return;
     }
+
+    // Return process scheduling to default once capture mode ends.
+    proc_set_priority(PROC_PRIORITY_NORMAL);
 
     if (app->is_recording) {
         gui_app_stop_recording(app);
