@@ -232,7 +232,11 @@ static uint32_t s_capture_last_drop_count = 0;
 static uint32_t s_capture_missed_streak = 0;
 static uint32_t s_capture_error_streak = 0;
 static uint64_t s_capture_prev_callback_time_ms = 0;
-static atomic_bool s_capture_callback_priority_set = ATOMIC_VAR_INIT(false);
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MISRC_THREAD_LOCAL __declspec(thread)
+#else
+#define MISRC_THREAD_LOCAL _Thread_local
+#endif
 // Only treat substantial callback stalls as parser-desync events.
 // Short scheduler jitter should not force a parser reset.
 static const uint64_t s_capture_gap_resync_threshold_ms = 1000;
@@ -277,9 +281,11 @@ static inline void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_
 
 static inline void gui_capture_promote_callback_priority_once(void)
 {
-    if (!atomic_exchange(&s_capture_callback_priority_set, true)) {
+    static MISRC_THREAD_LOCAL bool s_capture_callback_thread_priority_set = false;
+    if (!s_capture_callback_thread_priority_set) {
         /* Callback thread is the capture-ingest hot path. */
         thrd_set_priority(THRD_PRIORITY_CRITICAL);
+        s_capture_callback_thread_priority_set = true;
     }
 }
 
@@ -1026,7 +1032,6 @@ int gui_app_start_capture(gui_app_t *app) {
     s_capture_missed_streak = 0;
     s_capture_error_streak = 0;
     s_capture_prev_callback_time_ms = 0;
-    atomic_store(&s_capture_callback_priority_set, false);
 
     // Reset display buffers (per-channel)
     app->display_samples_available_a = 0;

@@ -71,3 +71,17 @@ Recent capture regressions showed that small callback-gating changes can silentl
   - `misrc_tools/misrc_capture/misrc_capture.c`
     - mirror earlier process-priority elevation for CLI HSDAOH path before `hsdaoh_alloc/open2`, with rollback on failure exits.
     - removed accidental early option-parse priority side effect so elevation only happens at real capture startup intent.
+
+## 2026-04-22 macOS callback-thread scheduling follow-up
+
+- Issue: callback-priority promotion was previously guarded by a single process-wide one-shot flag, so only the first callback thread was guaranteed to be elevated.
+- Corrective changes:
+  - `misrc_tools/misrc_gui/input/gui_capture.c`
+    - changed callback promotion to thread-local one-shot (`MISRC_THREAD_LOCAL`) so each callback worker thread self-promotes once to `THRD_PRIORITY_CRITICAL`.
+  - `misrc_tools/misrc_capture/misrc_capture.c`
+    - mirrored the same thread-local callback-promotion behavior in CLI capture callback path.
+  - `misrc_tools/common/threading.h`
+    - in macOS `proc_set_priority(...)`, return early when `pthread_set_qos_class_self_np(...)` succeeds (after setting caller-thread precedence), avoiding unnecessary fallthrough into process `nice` fallback that can fail with EPERM on non-root runs.
+- Runtime check (privileged CLI path):
+  - successful `hsdaoh` capture runs with `waits=0`, `rf_drops=0`, `audio_drops=0`.
+  - sampled `powermetrics --samplers cpu_power` during capture showed sustained higher P-cluster activity than E-cluster activity.

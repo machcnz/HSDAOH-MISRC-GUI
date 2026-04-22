@@ -195,7 +195,12 @@ static conv_16to32_t conv_16to32 = NULL;
 static conv_16to32_t conv_16to8to32 = NULL;
 static conv_16to32_t conv_16to12to32 = NULL;
 static conv_16to8_t conv_16to8 = NULL;
-static atomic_bool s_capture_callback_priority_set = ATOMIC_VAR_INIT(false);
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MISRC_THREAD_LOCAL __declspec(thread)
+#else
+#define MISRC_THREAD_LOCAL _Thread_local
+#endif
+static MISRC_THREAD_LOCAL bool s_capture_callback_priority_set = false;
 
 static struct option getopt_long_options[] =
 {
@@ -427,9 +432,10 @@ static void hsdaoh_callback(hsdaoh_data_info_t *data_info)
 	if (do_exit || !ctx)
 		return;
 
-	if (!atomic_exchange(&s_capture_callback_priority_set, true)) {
+	if (!s_capture_callback_priority_set) {
 		/* Callback thread is the capture-ingest hot path. */
 		thrd_set_priority(THRD_PRIORITY_CRITICAL);
+		s_capture_callback_priority_set = true;
 	}
 
 	capture_handler_ctx_t *handler = &ctx->handler;
@@ -1246,7 +1252,6 @@ int main(int argc, char **argv)
 
 	rb_init(&cap_ctx.rb,"capture_ringbuffer",BUFFER_TOTAL_SIZE);
 	cap_ctx.handler.rb_rf = &cap_ctx.rb;
-	atomic_store(&s_capture_callback_priority_set, false);
 
 	if (sc_dev_name) {
 		proc_set_priority(PROC_PRIORITY_ABOVE);

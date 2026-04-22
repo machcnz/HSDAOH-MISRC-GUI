@@ -371,8 +371,9 @@
       caller_precedence = 31;
     }
 #endif
-    (void)pthread_set_qos_class_self_np(qos, relpri);
+    int qos_rc = pthread_set_qos_class_self_np(qos, relpri);
     thrd_set_precedence_current_thread(caller_precedence);
+    if (qos_rc == 0) return;
 #endif
 
 #if defined(__linux__) && defined(SCHED_FIFO) && defined(SCHED_RR)
