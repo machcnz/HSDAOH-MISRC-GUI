@@ -257,13 +257,27 @@
 #if defined(__APPLE__) && defined(QOS_CLASS_USER_INTERACTIVE)
     /* macOS: use per-thread QoS classes as the primary priority control. */
     qos_class_t qos = QOS_CLASS_DEFAULT;
+#if defined(__arm64__) || defined(__aarch64__)
+    /* Apple Silicon: USER_INITIATED can still land heavy work on efficiency cores. */
+    if (priority >= THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INTERACTIVE;
+#else
     if (priority == THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
     else if (priority >= THRD_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
-    (void)pthread_set_qos_class_self_np(qos, 0);
-    return;
+#endif
+    if (pthread_set_qos_class_self_np(qos, 0) == 0) return;
 #endif
     int rt_err = 0;
     int nice_err = 0;
+#if defined(__APPLE__) && defined(QOS_CLASS_USER_INTERACTIVE)
+    qos_class_t qos = QOS_CLASS_DEFAULT;
+#if defined(__arm64__) || defined(__aarch64__)
+    if (priority >= PROC_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INTERACTIVE;
+#else
+    if (priority == PROC_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
+    else if (priority >= PROC_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
+#endif
+    (void)pthread_set_qos_class_self_np(qos, 0);
+#endif
 
     if (priority >= THRD_PRIORITY_HIGH) {
       rt_err = thrd_try_realtime(priority);

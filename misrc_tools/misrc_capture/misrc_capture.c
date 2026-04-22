@@ -1249,9 +1249,11 @@ int main(int argc, char **argv)
 	atomic_store(&s_capture_callback_priority_set, false);
 
 	if (sc_dev_name) {
+		proc_set_priority(PROC_PRIORITY_ABOVE);
 		r = sc_start_capture(sc_dev_name, 1920, 1080, SC_CODEC_YUYV, 60, 1, (sc_frame_callback_t)hsdaoh_callback, &cap_ctx, &sc_dev);
 		if (r < 0) {
 			fprintf(stderr, "Failed to open %s device %s.\n", sc_get_impl_name(), sc_dev_name);
+			proc_set_priority(PROC_PRIORITY_NORMAL);
 			exit(1);
 		}
 		fprintf(stderr, "Opened %s device %s.\n", sc_get_impl_name(), sc_dev_name);
@@ -1283,7 +1285,15 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Opened device #%d: %s %s, serial: %s\n", dev_index, dev_manufact, dev_product, dev_serial);
 
 		fprintf(stderr, "Reading samples...\n");
+		proc_set_priority(PROC_PRIORITY_ABOVE);
 		r = hsdaoh_start_stream(hs_dev, hsdaoh_callback, &cap_ctx);
+		if (r < 0) {
+			fprintf(stderr, "Failed to start hsdaoh stream on device #%d.\\n", dev_index);
+			proc_set_priority(PROC_PRIORITY_NORMAL);
+			hsdaoh_close(hs_dev);
+			hs_dev = NULL;
+			exit(1);
+		}
 	}
 	/* Main conversion loop is latency-sensitive but not ingest-critical. */
 	thrd_set_priority(THRD_PRIORITY_HIGH);
@@ -1380,6 +1390,7 @@ int main(int argc, char **argv)
 	        (unsigned)atomic_load(&cap_ctx.rb_wait_count),
 	        (unsigned)atomic_load(&cap_ctx.rb_drop_count),
 	        (unsigned)atomic_load(&cap_ctx.rb_audio_drop_count));
+	proc_set_priority(PROC_PRIORITY_NORMAL);
 
 	return 0;
 }
