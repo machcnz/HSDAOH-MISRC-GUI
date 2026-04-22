@@ -1063,6 +1063,7 @@ int main(int argc, char **argv)
 		usage();
 	}
 	else {
+		proc_set_priority(PROC_PRIORITY_ABOVE);
 		atomic_store(&cap_ctx.handler.capture_rf, true);
 	}
 
@@ -1259,10 +1260,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Opened %s device %s.\n", sc_get_impl_name(), sc_dev_name);
 	}
 	else {
+		proc_set_priority(PROC_PRIORITY_ABOVE);
 
 		r = hsdaoh_alloc(&hs_dev);
 		if (r < 0) {
 			fprintf(stderr, "Failed to allocate hsdaoh device.\n");
+			proc_set_priority(PROC_PRIORITY_NORMAL);
 			exit(1);
 		}
 
@@ -1272,6 +1275,7 @@ int main(int argc, char **argv)
 		r = hsdaoh_open2(hs_dev, (uint32_t)dev_index);
 		if (r < 0) {
 			fprintf(stderr, "Failed to open hsdaoh device #%d.\n", dev_index);
+			proc_set_priority(PROC_PRIORITY_NORMAL);
 			exit(1);
 		}
 
@@ -1285,7 +1289,6 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Opened device #%d: %s %s, serial: %s\n", dev_index, dev_manufact, dev_product, dev_serial);
 
 		fprintf(stderr, "Reading samples...\n");
-		proc_set_priority(PROC_PRIORITY_ABOVE);
 		r = hsdaoh_start_stream(hs_dev, hsdaoh_callback, &cap_ctx);
 		if (r < 0) {
 			fprintf(stderr, "Failed to start hsdaoh stream on device #%d.\\n", dev_index);

@@ -56,3 +56,16 @@ Recent capture regressions showed that small callback-gating changes can silentl
     - `waits=0`, `drops=0`
     - record buffers: A waits/drops `0/0`, B waits/drops `0/0`
     - no capture/dropout instability lines during soak window.
+
+## 2026-04-22 macOS scheduling regression repair (post-rebase)
+
+- Issue: after rebasing to `main`, a conflict-resolution mistake in `misrc_tools/common/threading.h` weakened macOS QoS escalation for capture-critical threads and reduced the effectiveness of Apple Silicon core placement.
+- Corrective changes:
+  - `misrc_tools/common/threading.h`
+    - restored clean separation between `thrd_set_priority(...)` and `proc_set_priority(...)` QoS logic.
+    - strengthened macOS QoS calls by adding non-zero relative priority for `ABOVE/HIGH/CRITICAL` levels.
+  - `misrc_tools/misrc_gui/input/gui_capture.c`
+    - move `proc_set_priority(PROC_PRIORITY_ABOVE)` earlier in HSDAOH startup (before `hsdaoh_open`/`hsdaoh_alloc`/`hsdaoh_open2`) so early transport/open threads inherit elevated scheduling.
+    - rollback to `PROC_PRIORITY_NORMAL` on all HSDAOH open/alloc failure exits.
+  - `misrc_tools/misrc_capture/misrc_capture.c`
+    - mirror earlier process-priority elevation for CLI HSDAOH path before `hsdaoh_alloc/open2`, with rollback on failure exits.

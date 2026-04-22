@@ -257,14 +257,23 @@
 #if defined(__APPLE__)
     /* macOS: use per-thread QoS classes as the primary priority control. */
     qos_class_t qos = QOS_CLASS_DEFAULT;
+    int relpri = 0;
 #if defined(__arm64__) || defined(__aarch64__)
-    /* Apple Silicon: USER_INITIATED can still land heavy work on efficiency cores. */
-    if (priority >= THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INTERACTIVE;
+    /* Apple Silicon: bias critical ingest/encode work toward P-cores. */
+    if (priority >= THRD_PRIORITY_ABOVE) {
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      if (priority >= THRD_PRIORITY_CRITICAL) relpri = 15;
+      else if (priority >= THRD_PRIORITY_HIGH) relpri = 8;
+      else relpri = 4;
+    }
 #else
     if (priority == THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
     else if (priority >= THRD_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
+    if (priority >= THRD_PRIORITY_CRITICAL) relpri = 15;
+    else if (priority >= THRD_PRIORITY_HIGH) relpri = 8;
+    else if (priority >= THRD_PRIORITY_ABOVE) relpri = 4;
 #endif
-    if (pthread_set_qos_class_self_np(qos, 0) == 0) return;
+    if (pthread_set_qos_class_self_np(qos, relpri) == 0) return;
 #endif
     int rt_err = 0;
     int nice_err = 0;
@@ -296,13 +305,22 @@
     int nice_err = 0;
 #if defined(__APPLE__)
     qos_class_t qos = QOS_CLASS_DEFAULT;
+    int relpri = 0;
 #if defined(__arm64__) || defined(__aarch64__)
-    if (priority >= PROC_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INTERACTIVE;
+    if (priority >= PROC_PRIORITY_ABOVE) {
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      if (priority >= PROC_PRIORITY_CRITICAL) relpri = 15;
+      else if (priority >= PROC_PRIORITY_HIGH) relpri = 8;
+      else relpri = 4;
+    }
 #else
     if (priority == PROC_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
     else if (priority >= PROC_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
+    if (priority >= PROC_PRIORITY_CRITICAL) relpri = 15;
+    else if (priority >= PROC_PRIORITY_HIGH) relpri = 8;
+    else if (priority >= PROC_PRIORITY_ABOVE) relpri = 4;
 #endif
-    (void)pthread_set_qos_class_self_np(qos, 0);
+    (void)pthread_set_qos_class_self_np(qos, relpri);
 #endif
 
 #if defined(__linux__) && defined(SCHED_FIFO) && defined(SCHED_RR)
