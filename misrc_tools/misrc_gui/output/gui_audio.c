@@ -518,7 +518,10 @@ int gui_audio_start(gui_app_t *app, buffer_manager_t *bufmgr)
 
     atomic_store(&s_audio_stop, false);
 
-    if (thrd_create(&s_audio_thread, audio_thread_main, &s_audio_ctx) != thrd_success) {
+    if (thrd_create_with_priority(&s_audio_thread,
+                                  audio_thread_main,
+                                  &s_audio_ctx,
+                                  THRD_PRIORITY_CRITICAL) != thrd_success) {
         gui_app_set_status(app, "Failed to start audio thread");
         return -1;
     }

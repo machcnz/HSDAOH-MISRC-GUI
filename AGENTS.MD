@@ -1,0 +1,21 @@
+# AGENTS Rules
+- Always commit local code immediately after the user explicitly confirms it is working, to prevent roundtrip wastage.
+- Automatically commit all local code edits to preserve development history like a real development workflow.
+- Consider all 3 platforms (Windows 10+, macOS 15+, and Linux Ubuntu 22.04 / Linux Mint 21 or newer) when making edits that can affect functionality.
+- On macOS, explicitly account for efficiency and performance cores when making functionality-impacting scheduling or performance changes.
+- Treat macOS x86 on macOS 15 as a fixed target, but treat macOS ARM as non-fixed and validate architecture-specific behavior.
+- Consider admin permissions mandatory for macOS build and capture interactions to function for user operation.
+- In MISRC frame mode, preserve tolerated-frame behavior: only drop frames when `result.error_count > 0 && result.report_errors`.
+- Keep capture heartbeat updates early in callback flow (after buffer/null checks), before width/height early returns.
+- After any `capture_handler_init(&s_capture_handler)` on GUI capture start, explicitly restore `capture_audio` to `true`.
+- After capture-path edits, validate RF and audio monitor paths separately end-to-end.
+- During capture debugging, prefer isolated fixes in `frame_parser`, `gui_capture`, `gui_extract`, and `gui_audio`; avoid unrelated UI/settings churn.
+- On macOS capture startup paths, apply `proc_set_priority(PROC_PRIORITY_ABOVE)` before stream/open startup points and roll back to `PROC_PRIORITY_NORMAL` on failure/stop paths.
+- For recording startup on macOS, elevate scheduling before encoder/worker-thread creation and restore normal priority on init failure and stop.
+- Avoid blanket process-wide precedence escalation on macOS; prioritize capture-critical caller threads.
+- Callback-priority promotion must be thread-local once per callback worker thread, not a single global one-shot.
+- In macOS `proc_set_priority(...)`, if `pthread_set_qos_class_self_np(...)` succeeds, return early after caller-thread precedence is applied.
+- On macOS Apple Silicon, there is no supported API to hard-pin work to performance cores; use thread QoS correctly as the core-type hint mechanism.
+- For `pthread_set_qos_class_self_np(...)`, relative priority must be `0` or negative (down to `QOS_MIN_RELATIVE_PRIORITY`); positive values are invalid and cause QoS elevation to fail.
+- On macOS, avoid QoS fallthrough to legacy `setpriority`/`pthread_setschedparam`/manual thread-policy tuning in normal capture paths; prefer QoS-first behavior and validate with real `powermetrics` data.
+- HARD DEV NOTE (Apple Silicon P-core takeover): keep `macos_promote_all_task_threads()` re-entrant and call it continuously during active capture (throttled maintenance sweep) plus immediately after recording writer startup; removing either path allows late-spawned external threads (libusb/dispatch/Metal) to fall back to E-cores and reintroduce recording dropouts.

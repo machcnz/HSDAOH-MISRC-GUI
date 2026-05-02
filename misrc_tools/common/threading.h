@@ -59,6 +59,15 @@
   #define THRD_PRIORITY_ABOVE     1
   #define THRD_PRIORITY_HIGH      2
   #define THRD_PRIORITY_CRITICAL  3
+  static inline int thrd_create_with_priority(thrd_t *thread,
+                                              int (*func)(void *),
+                                              void *arg,
+                                              int priority) {
+    (void)priority;
+    return (((*thread = (thrd_t)_beginthreadex(NULL, 0, (thrd_start_t)func, arg, 0, NULL)) == 0)
+            ? -1
+            : thrd_success);
+  }
 
   /* Set thread priority for current thread */
   static inline void thrd_set_priority(int priority) {
@@ -116,8 +125,11 @@
   #include <unistd.h>
 #if defined(__APPLE__)
   #include <pthread/qos.h>
+  #include <signal.h>
   #include <mach/mach.h>
+  #include <mach/mach_time.h>
   #include <mach/thread_policy.h>
+  #include <mach/task_policy.h>
 #endif
 #if defined(__linux__)
   #include <dirent.h>
@@ -145,6 +157,53 @@
   #define THRD_PRIORITY_ABOVE     1
   #define THRD_PRIORITY_HIGH      2
   #define THRD_PRIORITY_CRITICAL  3
+  static inline int thrd_create_with_priority(thrd_t *thread,
+                                              int (*func)(void *),
+                                              void *arg,
+                                              int priority) {
+#if defined(__APPLE__)
+    pthread_attr_t attr;
+    int rc = pthread_attr_init(&attr);
+    if (rc != 0) {
+      return rc;
+    }
+
+    qos_class_t qos = QOS_CLASS_DEFAULT;
+    int relpri = 0;
+    int set_qos = 0;
+#if defined(__arm64__) || defined(__aarch64__)
+    if (priority >= THRD_PRIORITY_ABOVE) {
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = 0;
+      set_qos = 1;
+    }
+#else
+    if (priority >= THRD_PRIORITY_CRITICAL) {
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = 0;
+      set_qos = 1;
+    } else if (priority >= THRD_PRIORITY_HIGH) {
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = -4;
+      set_qos = 1;
+    } else if (priority >= THRD_PRIORITY_ABOVE) {
+      qos = QOS_CLASS_USER_INITIATED;
+      relpri = 0;
+      set_qos = 1;
+    }
+#endif
+    if (set_qos) {
+      (void)pthread_attr_set_qos_class_np(&attr, qos, relpri);
+    }
+
+    rc = pthread_create(thread, &attr, (void* (*)(void *))func, arg);
+    (void)pthread_attr_destroy(&attr);
+    return rc;
+#else
+    (void)priority;
+    return thrd_create(thread, func, arg);
+#endif
+  }
 
   /* Set absolute nice value for current thread on Linux, otherwise process-wide fallback. */
   static inline int thrd_set_nice_target(int nice_target) {
@@ -267,6 +326,223 @@
                             THREAD_PRECEDENCE_POLICY_COUNT);
     (void)mach_port_deallocate(mach_task_self(), thread);
   }
+
+  /* Make the current thread non-timeshare (fixed priority). On Apple Silicon
+   * this strongly biases the scheduler toward P-cluster placement, because
+   * timeshare threads are the class that the CLPC scheduler happily migrates
+   * onto E-cores when utilisation looks "low". */
+  static inline void thrd_set_non_timeshare_current_thread(void) {
+    thread_t thread = mach_thread_self();
+    if (thread == MACH_PORT_NULL) {
+      return;
+    }
+    thread_extended_policy_data_t ep;
+    ep.timeshare = 0;
+    (void)thread_policy_set(thread,
+                            THREAD_EXTENDED_POLICY,
+                            (thread_policy_t)&ep,
+                            THREAD_EXTENDED_POLICY_COUNT);
+    (void)mach_port_deallocate(mach_task_self(), thread);
+  }
+
+  /* Mark the current task as a foreground application. Without this the
+   * kernel may classify the process (for example, children of osascript
+   * "do shell script ... with administrator privileges") as background and
+   * bias every thread to the efficiency cluster regardless of QoS. */
+  static inline void task_set_foreground_role(void) {
+    struct task_category_policy policy;
+    policy.role = TASK_FOREGROUND_APPLICATION;
+    (void)task_policy_set(mach_task_self(),
+                          TASK_CATEGORY_POLICY,
+                          (task_policy_t)&policy,
+                          TASK_CATEGORY_POLICY_COUNT);
+  }
+
+  /* Explicitly clear any inherited Darwin background/throttled state that
+   * would otherwise pin every thread of this task to E-cores. */
+  static inline void task_clear_darwin_background(void) {
+    /* PRIO_DARWIN_PROCESS / PRIO_DARWIN_BG are the documented knobs for this. */
+#ifdef PRIO_DARWIN_PROCESS
+    (void)setpriority(PRIO_DARWIN_PROCESS, 0, 0);
+#endif
+#ifdef PRIO_DARWIN_THREAD
+    (void)setpriority(PRIO_DARWIN_THREAD, 0, 0);
+#endif
+  }
+
+  /* One-shot startup hook for macOS processes: raise process role to
+   * foreground, clear any inherited darwin-bg bit, and hint the caller
+   * thread toward P-cores. Safe to call from main() before any capture
+   * threads are created. */
+  static inline void macos_process_prefer_p_cores(void) {
+    task_set_foreground_role();
+    task_clear_darwin_background();
+    /* Caller thread (typically main) hint: user-interactive QoS biases
+     * launched children/workers toward the performance cluster on M-series. */
+    (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    thrd_set_precedence_current_thread(63);
+  }
+
+  /* Walk every thread currently in this task and force it off the timeshare
+   * class with a USER_INTERACTIVE QoS override. This is the hammer we use to
+   * catch threads that were spawned inside third-party libraries (libusb's
+   * USB event thread, libuvc's transfer worker, raylib/Metal render helpers,
+   * GCD workqueue threads, etc.) and that never route through our own
+   * thrd_create_with_priority() helper. Without this, those threads remain
+   * timeshare-class and the Apple Silicon CLPC scheduler migrates them onto
+   * the efficiency cluster, pegging the E-cores and starving the P-core
+   * capture pipeline.
+   *
+   * Safe to call repeatedly; new threads that appear after each call (for
+   * example when hsdaoh_start_stream() spawns its transport thread) are
+   * caught on the next call.
+   *
+   * QoS overrides are tracked per pthread and reused across sweeps so runtime
+   * maintenance calls do not accumulate duplicate override tokens. */
+  static inline void macos_promote_all_task_threads(void) {
+    /* Track QoS overrides by pthread identity so this function can be called
+     * repeatedly (runtime maintenance sweeps) without leaking a new override
+     * token on every pass. */
+    enum { MISRC_QOS_OVERRIDE_MAX = 1024 };
+    typedef struct {
+      pthread_t thread;
+      pthread_override_t override_token;
+    } misrc_qos_override_entry_t;
+    static misrc_qos_override_entry_t s_qos_overrides[MISRC_QOS_OVERRIDE_MAX];
+    static size_t s_qos_override_count = 0;
+    static int s_qos_override_capacity_warned = 0;
+
+    /* Reclaim entries for threads that no longer exist (pthread IDs may be reused). */
+    for (size_t i = 0; i < s_qos_override_count;) {
+      int alive_rc = pthread_kill(s_qos_overrides[i].thread, 0);
+      if (alive_rc == ESRCH) {
+        if (s_qos_overrides[i].override_token) {
+          (void)pthread_override_qos_class_end_np(s_qos_overrides[i].override_token);
+        }
+        s_qos_overrides[i] = s_qos_overrides[s_qos_override_count - 1];
+        s_qos_override_count--;
+        continue;
+      }
+      i++;
+    }
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) {
+      return;
+    }
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+      thread_act_t t = threads[i];
+
+      /* 1) Move thread out of timeshare class. On Apple Silicon this alone
+       *    stops the scheduler from migrating the thread to E-cores under
+       *    low-utilisation heuristics. */
+      thread_extended_policy_data_t ep;
+      ep.timeshare = 0;
+      (void)thread_policy_set(t,
+                              THREAD_EXTENDED_POLICY,
+                              (thread_policy_t)&ep,
+                              THREAD_EXTENDED_POLICY_COUNT);
+
+      /* 2) Raise precedence to match our promoted workers. */
+      thread_precedence_policy_data_t pp;
+      pp.importance = 63;
+      (void)thread_policy_set(t,
+                              THREAD_PRECEDENCE_POLICY,
+                              (thread_policy_t)&pp,
+                              THREAD_PRECEDENCE_POLICY_COUNT);
+
+      /* 3) Apply an asymmetric USER_INTERACTIVE QoS override to the thread
+       *    via the pthread port, if we can resolve one. This is the knob
+       *    that biases external-library threads onto the P-cluster. */
+      pthread_t pth = pthread_from_mach_thread_np(t);
+      if (pth != NULL) {
+        int already_overridden = 0;
+        for (size_t j = 0; j < s_qos_override_count; j++) {
+          if (pthread_equal(s_qos_overrides[j].thread, pth)) {
+            already_overridden = 1;
+            break;
+          }
+        }
+        if (!already_overridden) {
+          pthread_override_t override_token =
+              pthread_override_qos_class_start_np(pth,
+                                                  QOS_CLASS_USER_INTERACTIVE,
+                                                  0);
+          if (override_token) {
+            if (s_qos_override_count < MISRC_QOS_OVERRIDE_MAX) {
+              s_qos_overrides[s_qos_override_count].thread = pth;
+              s_qos_overrides[s_qos_override_count].override_token = override_token;
+              s_qos_override_count++;
+            } else {
+              /* Table full; avoid leaking this token. */
+              (void)pthread_override_qos_class_end_np(override_token);
+              if (!s_qos_override_capacity_warned) {
+                s_qos_override_capacity_warned = 1;
+                fprintf(stderr,
+                        "[THREAD] macOS QoS override table full; skipping additional overrides\n");
+              }
+            }
+          }
+        }
+      }
+
+      (void)mach_port_deallocate(mach_task_self(), t);
+    }
+    (void)vm_deallocate(mach_task_self(),
+                        (vm_address_t)threads,
+                        count * sizeof(thread_act_t));
+  }
+#if defined(__arm64__) || defined(__aarch64__)
+  static inline void thrd_set_time_constraint_current_thread(void) {
+    static int warned_once = 0;
+    thread_t thread = mach_thread_self();
+    if (thread == MACH_PORT_NULL) {
+      return;
+    }
+
+    mach_timebase_info_data_t timebase;
+    kern_return_t tb_rc = mach_timebase_info(&timebase);
+    if (tb_rc != KERN_SUCCESS || timebase.numer == 0) {
+      if (!warned_once) {
+        warned_once = 1;
+        fprintf(stderr,
+                "[THREAD] macOS time-constraint setup failed (timebase_rc=%d)\n",
+                (int)tb_rc);
+      }
+      (void)mach_port_deallocate(mach_task_self(), thread);
+      return;
+    }
+
+    const uint64_t period_ns = 1000000ULL;
+    const uint64_t computation_ns = 250000ULL;
+    const uint64_t constraint_ns = 900000ULL;
+
+    uint64_t period_abs = (period_ns * (uint64_t)timebase.denom) / (uint64_t)timebase.numer;
+    uint64_t computation_abs = (computation_ns * (uint64_t)timebase.denom) / (uint64_t)timebase.numer;
+    uint64_t constraint_abs = (constraint_ns * (uint64_t)timebase.denom) / (uint64_t)timebase.numer;
+    if (period_abs == 0) period_abs = 1;
+    if (computation_abs == 0) computation_abs = 1;
+    if (constraint_abs < computation_abs) constraint_abs = computation_abs;
+
+    thread_time_constraint_policy_data_t tc_policy;
+    tc_policy.period = (uint32_t)period_abs;
+    tc_policy.computation = (uint32_t)computation_abs;
+    tc_policy.constraint = (uint32_t)constraint_abs;
+    tc_policy.preemptible = 1;
+    kern_return_t tc_rc = thread_policy_set(thread,
+                                            THREAD_TIME_CONSTRAINT_POLICY,
+                                            (thread_policy_t)&tc_policy,
+                                            THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (tc_rc != KERN_SUCCESS && !warned_once) {
+      warned_once = 1;
+      fprintf(stderr,
+              "[THREAD] macOS time-constraint request failed (kr=%d)\n",
+              (int)tc_rc);
+    }
+
+    (void)mach_port_deallocate(mach_task_self(), thread);
+  }
+#endif
 #endif
 
   /* Set thread priority for current thread with realtime->nice fallback (best-effort). */
@@ -277,39 +553,52 @@
     int relpri = 0;
     integer_t precedence = 0;
 #if defined(__arm64__) || defined(__aarch64__)
-    /* Apple Silicon: bias critical ingest/encode work toward P-cores. */
     if (priority >= THRD_PRIORITY_ABOVE) {
       qos = QOS_CLASS_USER_INTERACTIVE;
       if (priority >= THRD_PRIORITY_CRITICAL) {
-        relpri = 15;
+        relpri = 0;
         precedence = 63;
       } else if (priority >= THRD_PRIORITY_HIGH) {
-        relpri = 8;
-        precedence = 47;
+        relpri = 0;
+        precedence = 63;
       } else {
-        relpri = 4;
-        precedence = 31;
+        relpri = 0;
+        precedence = 47;
       }
     }
 #else
-    if (priority == THRD_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
-    else if (priority >= THRD_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
     if (priority >= THRD_PRIORITY_CRITICAL) {
-      relpri = 15;
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = 0;
       precedence = 63;
     } else if (priority >= THRD_PRIORITY_HIGH) {
-      relpri = 8;
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = -4;
       precedence = 47;
     } else if (priority >= THRD_PRIORITY_ABOVE) {
-      relpri = 4;
+      qos = QOS_CLASS_USER_INITIATED;
+      relpri = 0;
       precedence = 31;
     }
 #endif
-    if (pthread_set_qos_class_self_np(qos, relpri) == 0) {
-      thrd_set_precedence_current_thread(precedence);
-      return;
-    }
+    int qos_rc = pthread_set_qos_class_self_np(qos, relpri);
     thrd_set_precedence_current_thread(precedence);
+#if defined(__arm64__) || defined(__aarch64__)
+    /* On Apple Silicon, move capture-critical threads out of the timeshare
+     * class so the CLPC scheduler stops migrating them onto the E-cluster
+     * when instantaneous utilisation looks low (USB callback threads spend
+     * most wall time blocked on the transport). Apply for ABOVE and up. */
+    if (priority >= THRD_PRIORITY_ABOVE) {
+      thrd_set_non_timeshare_current_thread();
+    }
+    if (priority >= THRD_PRIORITY_CRITICAL && qos_rc == 0) {
+      thrd_set_time_constraint_current_thread();
+    }
+#endif
+    if (qos_rc == 0) return;
+    if (priority >= THRD_PRIORITY_ABOVE) {
+      thrd_log_priority_failure_once("Thread QoS", priority, qos_rc, 0);
+    }
 #endif
     int rt_err = 0;
     int nice_err = 0;
@@ -347,33 +636,47 @@
     if (priority >= PROC_PRIORITY_ABOVE) {
       qos = QOS_CLASS_USER_INTERACTIVE;
       if (priority >= PROC_PRIORITY_CRITICAL) {
-        relpri = 15;
+        relpri = 0;
         caller_precedence = 63;
       } else if (priority >= PROC_PRIORITY_HIGH) {
-        relpri = 8;
-        caller_precedence = 47;
+        relpri = 0;
+        caller_precedence = 63;
       } else {
-        relpri = 4;
-        caller_precedence = 31;
+        relpri = 0;
+        caller_precedence = 63;
       }
     }
 #else
-    if (priority == PROC_PRIORITY_ABOVE) qos = QOS_CLASS_USER_INITIATED;
-    else if (priority >= PROC_PRIORITY_HIGH) qos = QOS_CLASS_USER_INTERACTIVE;
     if (priority >= PROC_PRIORITY_CRITICAL) {
-      relpri = 15;
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = 0;
       caller_precedence = 63;
     } else if (priority >= PROC_PRIORITY_HIGH) {
-      relpri = 8;
+      qos = QOS_CLASS_USER_INTERACTIVE;
+      relpri = -4;
       caller_precedence = 47;
     } else if (priority >= PROC_PRIORITY_ABOVE) {
-      relpri = 4;
+      qos = QOS_CLASS_USER_INITIATED;
+      relpri = 0;
       caller_precedence = 31;
     }
 #endif
     int qos_rc = pthread_set_qos_class_self_np(qos, relpri);
     thrd_set_precedence_current_thread(caller_precedence);
+#if defined(__arm64__) || defined(__aarch64__)
+    if (priority >= PROC_PRIORITY_ABOVE) {
+      /* Mark the caller thread non-timeshare before the time-constraint
+       * attempt; this alone is enough to bias onto the P-cluster on M-series. */
+      thrd_set_non_timeshare_current_thread();
+    }
+    if (priority >= PROC_PRIORITY_ABOVE && qos_rc == 0) {
+      thrd_set_time_constraint_current_thread();
+    }
+#endif
     if (qos_rc == 0) return;
+    if (priority >= PROC_PRIORITY_ABOVE) {
+      thrd_log_priority_failure_once("Process QoS", priority, qos_rc, 0);
+    }
 #endif
 
 #if defined(__linux__) && defined(SCHED_FIFO) && defined(SCHED_RR)

@@ -355,7 +355,9 @@ int sc_start_capture(const char* device_id, uint32_t width, uint32_t height, sc_
 		del.handle = hc;
 		hc->delegate = del;
 
-		dispatch_queue_t q = dispatch_queue_create("simple_capture.avf.queue", DISPATCH_QUEUE_SERIAL);
+		dispatch_queue_attr_t q_attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+				QOS_CLASS_USER_INTERACTIVE, 0);
+		dispatch_queue_t q = dispatch_queue_create("simple_capture.avf.queue", q_attr);
 		hc->queue = q;
 		[output setSampleBufferDelegate:del queue:q];
 

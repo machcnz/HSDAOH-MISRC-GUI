@@ -979,15 +979,20 @@ int gui_app_start_capture(gui_app_t *app) {
 #ifdef ENABLE_FX3
     // Handle FX3 device
     if (dev->type == DEVICE_TYPE_FX3) {
+        proc_set_priority(PROC_PRIORITY_ABOVE);
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
         // Open FX3 device first
         int r = gui_fx3_open(app, dev->index);
         if (r < 0) {
             gui_app_set_status(app, "Failed to open FX3 device");
+            proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
         }
         int fx3_rc = gui_fx3_start(app);
         if (fx3_rc == 0) {
             gui_capture_hold_power_assertions();
+        } else {
+            proc_set_priority(PROC_PRIORITY_NORMAL);
         }
         return fx3_rc;
     }
@@ -1068,6 +1073,7 @@ int gui_app_start_capture(gui_app_t *app) {
 #else
         fprintf(stderr, "[GUI] Opening %s device %s...\n", sc_get_impl_name(), dev->serial);
         proc_set_priority(PROC_PRIORITY_ABOVE);
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
         r = sc_start_capture(dev->serial, 1920, 1080, SC_CODEC_YUYV, 60, 1,
                              gui_simple_capture_callback, app, &app->sc_dev);
         if (r < 0 || !app->sc_dev) {
@@ -1082,6 +1088,7 @@ int gui_app_start_capture(gui_app_t *app) {
 #ifdef HSDAOH_UPSTREAM
         fprintf(stderr, "[GUI] Opening device index %d (HSDAOH_UPSTREAM)...\n", dev->index);
         proc_set_priority(PROC_PRIORITY_ABOVE);
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
         r = hsdaoh_open(&app->hs_dev, dev->index);
         if (r < 0 || !app->hs_dev) {
@@ -1101,6 +1108,7 @@ int gui_app_start_capture(gui_app_t *app) {
 #else
         fprintf(stderr, "[GUI] Allocating device...\n");
         proc_set_priority(PROC_PRIORITY_ABOVE);
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
         r = hsdaoh_alloc(&app->hs_dev); // MISRC original path
         if (r < 0) {
@@ -1153,6 +1161,14 @@ int gui_app_start_capture(gui_app_t *app) {
         app->is_capturing = true;
         app->capture_start_time = GetTime();
 
+#if defined(__APPLE__)
+    /* hsdaoh_start_stream() / sc_start_capture() have now spawned their
+     * internal libusb/libuvc transport threads. Walk the task one more time
+     * and force every thread (ours + third-party) off the timeshare class so
+     * CLPC stops parking them on the E-cluster. */
+    macos_promote_all_task_threads();
+#endif
+
     // Capture-start timestamp (used for auto naming if enabled)
     {
         time_t t = time(NULL);
@@ -1203,6 +1219,12 @@ int gui_app_start_capture(gui_app_t *app) {
         }
     }
     gui_capture_hold_power_assertions();
+
+#if defined(__APPLE__)
+    /* Final sweep: catch any late-created dispatch/workqueue/Metal helper
+     * threads that spun up during extraction/display thread init. */
+    macos_promote_all_task_threads();
+#endif
 
     gui_app_set_status(app, "Capturing...");
 

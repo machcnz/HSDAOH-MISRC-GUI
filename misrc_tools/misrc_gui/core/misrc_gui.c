@@ -340,6 +340,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Administrator permissions are required for MS2130 hsdaoh/libusb capture.\n");
         return 1;
     }
+    /* On macOS (especially Apple Silicon), mark the process as a foreground
+     * application and clear any inherited darwin-background throttling bit.
+     * When misrc_gui is launched via osascript "do shell script ... with
+     * administrator privileges", the child process often inherits a task
+     * role that biases every thread to the efficiency cluster regardless of
+     * thread-level QoS. This call fixes that before any capture threads
+     * are created. */
+    macos_process_prefer_p_cores();
 #endif
 
 #if defined(_WIN32)
@@ -425,6 +433,14 @@ int main(int argc, char **argv) {
     // Set app for text rendering font access
     gui_text_set_app(&app);
 
+#if defined(__APPLE__)
+    /* raylib/Metal/dispatch workqueues have now created their internal
+     * helper threads. Walk the whole task and force every one of them off
+     * the timeshare class with a USER_INTERACTIVE QoS override so the
+     * Apple Silicon CLPC scheduler stops migrating them onto the E-cluster. */
+    macos_promote_all_task_threads();
+#endif
+
     // Enumerate available devices
     gui_app_enumerate_devices(&app);
     {
@@ -480,6 +496,10 @@ int main(int argc, char **argv) {
     int last_layout_width = -1;
     int last_layout_height = -1;
     bool recording_fps_throttle = false;
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+    double last_thread_promotion_time = 0.0;
+    const double thread_promotion_interval_s = 0.25;
+#endif
 
     // Main loop
     while (!WindowShouldClose() && !atomic_load(&do_exit)) {
@@ -494,6 +514,19 @@ int main(int argc, char **argv) {
             recording_fps_throttle = false;
         }
         float dt = GetFrameTime();
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+        if (app.is_capturing) {
+            double now = GetTime();
+            if ((now - last_thread_promotion_time) >= thread_promotion_interval_s) {
+                /* Catch late-spawned libusb/dispatch/Metal helper threads that
+                 * appear after capture has already started. */
+                macos_promote_all_task_threads();
+                last_thread_promotion_time = now;
+            }
+        } else {
+            last_thread_promotion_time = 0.0;
+        }
+#endif
         int current_layout_width = gui_layout_width();
         int current_layout_height = gui_layout_height();
         if (current_layout_width != last_layout_width || current_layout_height != last_layout_height) {

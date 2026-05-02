@@ -90,7 +90,7 @@ static int extraction_thread(void *ctx) {
     size_t clip[2] = {0, 0};
     uint16_t peak[2] = {0, 0};
     uint32_t frame_count = 0;
-    thrd_set_priority(THRD_PRIORITY_HIGH);
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
     fprintf(stderr, "[EXTRACT] Continuous extraction thread started\n");
 
@@ -358,7 +358,10 @@ int gui_extract_start(gui_app_t *app) {
     }
 
     // Start extraction thread
-    if (thrd_create(&s_extract_thread, extraction_thread, NULL) != thrd_success) {
+    if (thrd_create_with_priority(&s_extract_thread,
+                                  extraction_thread,
+                                  NULL,
+                                  THRD_PRIORITY_CRITICAL) != thrd_success) {
         fprintf(stderr, "[EXTRACT] Failed to create extraction thread\n");
         return -1;
     }

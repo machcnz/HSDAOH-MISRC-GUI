@@ -747,6 +747,7 @@ void gui_fx3_close(gui_app_t *app) {
 
 static int fx3_capture_thread(void *ctx) {
     gui_app_t *app = (gui_app_t *)ctx;
+    thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
     // Allocate transfer buffer
     uint8_t *transfer_buf = (uint8_t *)malloc(FX3_TRANSFER_SIZE);
@@ -935,7 +936,10 @@ int gui_fx3_start(gui_app_t *app) {
 
     // Start FX3 capture thread
     thrd_t thread;
-    if (thrd_create(&thread, fx3_capture_thread, app) != thrd_success) {
+    if (thrd_create_with_priority(&thread,
+                                  fx3_capture_thread,
+                                  app,
+                                  THRD_PRIORITY_CRITICAL) != thrd_success) {
         fprintf(stderr, "[FX3] Failed to create capture thread\n");
         gui_extract_stop();
         if (app->display_thread) {

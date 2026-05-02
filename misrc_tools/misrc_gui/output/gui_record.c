@@ -1176,7 +1176,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         // Start writer threads BEFORE enabling recording in extraction thread
         // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
-            if (thrd_create(&s_writer_thread_a, flac_writer_thread, &s_ctx_a) != thrd_success) {
+            if (thrd_create_with_priority(&s_writer_thread_a,
+                                          flac_writer_thread,
+                                          &s_ctx_a,
+                                          THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer A");
                 app->is_recording = false;
                 proc_set_priority(PROC_PRIORITY_NORMAL);
@@ -1191,7 +1194,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             started_a = true;
         }
         if (app->settings.capture_b) {
-            if (thrd_create(&s_writer_thread_b, flac_writer_thread, &s_ctx_b) != thrd_success) {
+            if (thrd_create_with_priority(&s_writer_thread_b,
+                                          flac_writer_thread,
+                                          &s_ctx_b,
+                                          THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer B");
                 app->is_recording = false;
                 if (started_a) thrd_join(s_writer_thread_a, NULL);
@@ -1207,6 +1213,11 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             started_b = true;
         }
         s_writer_threads_running = started_a || started_b;
+#if defined(__APPLE__)
+        /* Recording startup may create late helper threads in encoder/runtime
+         * paths; promote them immediately so capture load stays P-core-biased. */
+        macos_promote_all_task_threads();
+#endif
 
         // Small delay to let writer threads initialize and start waiting on buffers
         thrd_sleep_ms(10);
@@ -1285,7 +1296,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         // Start writer threads BEFORE enabling recording in extraction thread
         // This ensures consumers are ready before producer starts filling buffers
         if (app->settings.capture_a) {
-            if (thrd_create(&s_writer_thread_a, raw_writer_thread, &s_ctx_a) != thrd_success) {
+            if (thrd_create_with_priority(&s_writer_thread_a,
+                                          raw_writer_thread,
+                                          &s_ctx_a,
+                                          THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start RAW writer A");
                 app->is_recording = false;
                 proc_set_priority(PROC_PRIORITY_NORMAL);
@@ -1298,7 +1312,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             started_a = true;
         }
         if (app->settings.capture_b) {
-            if (thrd_create(&s_writer_thread_b, raw_writer_thread, &s_ctx_b) != thrd_success) {
+            if (thrd_create_with_priority(&s_writer_thread_b,
+                                          raw_writer_thread,
+                                          &s_ctx_b,
+                                          THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start RAW writer B");
                 app->is_recording = false;
                 if (started_a) thrd_join(s_writer_thread_a, NULL);
@@ -1312,6 +1329,11 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             started_b = true;
         }
         s_writer_threads_running = started_a || started_b;
+#if defined(__APPLE__)
+        /* Recording startup may create late helper threads in encoder/runtime
+         * paths; promote them immediately so capture load stays P-core-biased. */
+        macos_promote_all_task_threads();
+#endif
 
         // Small delay to let writer threads initialize and start waiting on buffers
         thrd_sleep_ms(10);
