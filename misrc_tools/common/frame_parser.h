@@ -141,6 +141,7 @@ typedef struct {
     frame_crc_state_t crc;
     frame_idle_state_t idle;
     unsigned int frames_since_error;
+    unsigned int line_validation_reprime_frames;
 } frame_parser_state_t;
 
 /* Initialize all frame parser state */

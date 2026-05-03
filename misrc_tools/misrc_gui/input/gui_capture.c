@@ -230,19 +230,19 @@ static int s_callback_count = 0;
 static uint32_t s_capture_last_wait_count = 0;
 static uint32_t s_capture_last_drop_count = 0;
 static uint32_t s_capture_missed_streak = 0;
-static uint32_t s_capture_error_streak = 0;
+static bool s_capture_missed_burst_reported = false;
 static uint64_t s_capture_prev_callback_time_ms = 0;
 #if defined(_MSC_VER) && !defined(__clang__)
 #define MISRC_THREAD_LOCAL __declspec(thread)
 #else
 #define MISRC_THREAD_LOCAL _Thread_local
 #endif
-// Only treat substantial callback stalls as parser-desync events.
-// Short scheduler jitter should not force a parser reset.
+// Callback-gap monitoring for optional dropout-stop behavior.
 static const uint64_t s_capture_gap_resync_threshold_ms = 1000;
-static const int s_capture_error_burst_resync_threshold = 64;
+static const uint32_t s_capture_missed_streak_report_threshold = 3;
 static const backpressure_policy_t s_capture_rf_write_policy = {
-    .max_wait_attempts = 8,
+    // Allow short transient extraction stalls without declaring capture drops.
+    .max_wait_attempts = 24,
     .wait_timeout_ms = 1,
     .log_first_wait = true,
     .log_drops = true,
@@ -322,6 +322,7 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
             }
             atomic_store(&app->stream_synced, false);
             s_capture_missed_streak = 0;
+            s_capture_missed_burst_reported = false;
             break;
         case FRAME_SYNC_MISSED:
             if (misrc_debug_enabled()) {
@@ -334,8 +335,10 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 }
             }
             s_capture_missed_streak++;
-            if (s_capture_missed_streak >= 2) {
+            if (s_capture_missed_streak >= s_capture_missed_streak_report_threshold &&
+                !s_capture_missed_burst_reported) {
                 atomic_fetch_add(&app->missed_frame_count, 1);
+                s_capture_missed_burst_reported = true;
                 gui_capture_request_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
             }
             break;
@@ -345,14 +348,46 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
             }
             atomic_store(&app->stream_synced, true);
             s_capture_missed_streak = 0;
+            s_capture_missed_burst_reported = false;
             break;
         case FRAME_SYNC_DUPLICATE:
             s_capture_missed_streak = 0;
+            s_capture_missed_burst_reported = false;
             break;
         case FRAME_SYNC_OK:
             s_capture_missed_streak = 0;
+            s_capture_missed_burst_reported = false;
             break;
     }
+}
+
+static void gui_capture_configure_handler(gui_app_t *app, bool reset_parser_state)
+{
+    /*
+     * Parser/reconnect ownership contract:
+     * - capture_handler_init() (parser/sync reset) is allowed only at capture
+     *   lifecycle boundaries, never from callback error paths.
+     * - Authorized reset sites:
+     *   1) gui_app_init() for initial baseline
+     *   2) gui_app_start_capture() only after stream startup succeeds
+     *   3) gui_app_stop_capture() when a session ends (including reconnect teardown)
+     *
+     * This keeps parser state transitions deterministic across auto-reconnect.
+     */
+    if (reset_parser_state) {
+        capture_handler_init(&s_capture_handler);
+    }
+
+    // Ringbuffers are managed by buffer manager in GUI path.
+    s_capture_handler.rb_rf = NULL;
+    s_capture_handler.rb_audio = NULL;
+
+    // Keep RF/audio capture enabled by default for monitoring/extraction continuity.
+    atomic_store(&s_capture_handler.capture_rf, true);
+    atomic_store(&s_capture_handler.capture_audio, true);
+
+    s_capture_handler.sync_event_cb = gui_sync_event_cb;
+    s_capture_handler.user_ctx = app;
 }
 
 
@@ -373,6 +408,7 @@ void gui_capture_callback(void *data_info_ptr) {
     if (atomic_load(&do_exit)) return;
     if (!app) return;
     if (!data_info->buf) return;
+    if (!app->is_capturing) return;
     // Any callback activity means the capture path is still alive.
     uint64_t now_ms = get_time_ms();
     atomic_store(&app->last_callback_time_ms, now_ms);
@@ -389,16 +425,9 @@ void gui_capture_callback(void *data_info_ptr) {
             }
             if (misrc_debug_enabled()) {
                 fprintf(stderr,
-                        "[CB] Callback gap %" PRIu64 "ms detected, forcing parser resync\n",
+                        "[CB] Callback gap %" PRIu64 "ms detected\n",
                         elapsed);
             }
-            frame_parser_init(&s_capture_handler.frame_state);
-            capture_handler_reset_audio_sync(&s_capture_handler);
-            atomic_store(&app->stream_synced, false);
-            s_capture_missed_streak = 0;
-            s_capture_error_streak = 0;
-            s_capture_prev_callback_time_ms = now_ms;
-            return;
         }
     }
     s_capture_prev_callback_time_ms = now_ms;
@@ -408,7 +437,9 @@ void gui_capture_callback(void *data_info_ptr) {
         // Do not force parser sync-state mutation here; parser resets belong to
         // capture lifecycle boundaries (start/stop), not callback error handling.
         atomic_store(&app->stream_synced, false);
-        s_capture_handler.frame_state.sync.stream_synced = false;
+        capture_handler_reset_audio_sync(&s_capture_handler);
+        s_capture_missed_streak = 0;
+        s_capture_missed_burst_reported = false;
         gui_record_log_capture_event(app, "ERROR", "Capture callback reported device_error");
         gui_capture_request_dropout_stop(app, GUI_DROPOUT_DEVICE_ERROR);
         return;
@@ -452,34 +483,15 @@ void gui_capture_callback(void *data_info_ptr) {
         snprintf(err_msg, sizeof(err_msg), "Frame parser error burst: %d errors in callback frame", result.error_count);
         gui_record_log_capture_event(app, "ERROR", err_msg);
         if (misrc_debug_enabled()) {
-            fprintf(stderr, "[CB] %d frame errors\n", result.error_count);
+            fprintf(stderr, "[CB] %d frame errors, %u frames since last error\n",
+                    result.error_count, s_capture_handler.frame_state.frames_since_error);
         }
-        if (result.error_count >= s_capture_error_burst_resync_threshold) {
-            if (app->settings.stop_on_dropout) {
-                gui_capture_request_dropout_stop(app, GUI_DROPOUT_ERROR_BURST);
-                return;
-            }
-            if (misrc_debug_enabled()) {
-                fprintf(stderr,
-                        "[CB] Error burst %d detected, forcing parser resync\n",
-                        result.error_count);
-            }
-            frame_parser_init(&s_capture_handler.frame_state);
-            capture_handler_reset_audio_sync(&s_capture_handler);
-            atomic_store(&app->stream_synced, false);
-            s_capture_missed_streak = 0;
-            s_capture_error_streak = 0;
-            atomic_fetch_add(&app->error_count, 1);
-            return;
-        }
-        s_capture_error_streak++;
-        if (s_capture_error_streak >= 2) {
-            atomic_fetch_add(&app->error_count, 1);
+        atomic_fetch_add(&app->error_count, (uint32_t)result.error_count);
+        if (app->settings.stop_on_dropout) {
             gui_capture_request_dropout_stop(app, GUI_DROPOUT_FRAME_ERROR);
         }
         return;  // Discard frame with errors
     }
-    s_capture_error_streak = 0;
 
     // Don't process if no payload
     if (!result.valid || result.stream0_bytes == 0) {
@@ -681,23 +693,7 @@ void gui_app_init(gui_app_t *app) {
 
     // Initialize parser/capture-handler baseline once at app init.
 #ifndef HSDAOH_UPSTREAM   // MISRC mode only
-    capture_handler_init(&s_capture_handler);
-
-    // RF/audio ringbuffers are now managed by buffer manager, not here
-    s_capture_handler.rb_rf = NULL;
-    s_capture_handler.rb_audio = NULL;
-
-    // Enable RF capture
-    s_capture_handler.capture_rf = true;
-
-    // Always enable audio capture for monitoring/meters
-    s_capture_handler.capture_audio = true;
-
-    // Sync event callback (MISRC frame parser)
-    s_capture_handler.sync_event_cb = gui_sync_event_cb;
-
-    // GUI context for callbacks
-    s_capture_handler.user_ctx = app;
+    gui_capture_configure_handler(app, true);
 #endif
 
 
@@ -1037,31 +1033,15 @@ int gui_app_start_capture(gui_app_t *app) {
     s_capture_last_wait_count = 0;
     s_capture_last_drop_count = 0;
     s_capture_missed_streak = 0;
-    s_capture_error_streak = 0;
+    s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
 
     // Reset display buffers (per-channel)
     app->display_samples_available_a = 0;
     app->display_samples_available_b = 0;
 
-    // Reset callback counter and capture handler state
-        s_callback_count = 0;
-        
-#ifndef HSDAOH_UPSTREAM // MISRC
-
-    capture_handler_init(&s_capture_handler);
-    // Note: All buffers now use buffer manager directly
-    s_capture_handler.rb_rf = NULL;
-    s_capture_handler.rb_audio = NULL;
-    atomic_store(&s_capture_handler.capture_rf, true);
-
-    // Audio is always-on during capture (for monitoring). Writing to files is controlled
-    // by recording state in gui_audio_start().
-    atomic_store(&s_capture_handler.capture_audio, true);
-
-    s_capture_handler.sync_event_cb = gui_sync_event_cb;
-    s_capture_handler.user_ctx = app;
-#endif
+    // Reset callback counter; parser state is reset only after stream starts successfully.
+    s_callback_count = 0;
  
 // Open device
     int r = -1;
@@ -1159,11 +1139,16 @@ int gui_app_start_capture(gui_app_t *app) {
         }
     }
 
+#ifndef HSDAOH_UPSTREAM
     // Capture lifecycle boundary: keep parser setup/reset work after stream
     // startup succeeds, not on pre-open or failed-start paths.
+    gui_capture_configure_handler(app, true);
+#endif
 
         app->is_capturing = true;
         app->capture_start_time = GetTime();
+        app->reconnect_pending = false;
+        app->reconnect_attempts = 0;
 
 #if defined(__APPLE__)
     /* hsdaoh_start_stream() / sc_start_capture() have now spawned their
@@ -1296,8 +1281,16 @@ void gui_app_stop_capture(gui_app_t *app) {
     }
 
     atomic_store(&app->stream_synced, false);
+    atomic_store(&app->dropout_stop_requested, false);
+    atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    s_capture_missed_streak = 0;
+    s_capture_missed_burst_reported = false;
+    s_capture_prev_callback_time_ms = 0;
+#ifndef HSDAOH_UPSTREAM
     // Capture lifecycle boundary: keep parser teardown/reset work in stop
     // cleanup so reconnects begin from a clean baseline.
+    gui_capture_configure_handler(app, true);
+#endif
 
     // Print capture summary with backpressure stats
     uint32_t frames = atomic_load(&app->frame_count);

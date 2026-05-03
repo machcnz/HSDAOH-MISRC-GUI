@@ -85,3 +85,9 @@ Recent capture regressions showed that small callback-gating changes can silentl
 - Runtime check (privileged CLI path):
   - successful `hsdaoh` capture runs with `waits=0`, `rf_drops=0`, `audio_drops=0`.
   - sampled `powermetrics --samplers cpu_power` during capture showed sustained higher P-cluster activity than E-cluster activity.
+## 2026-05-03 parser CRC mismatch root-cause note
+- Symptom: persistent parser error bursts with stable low counts (`13/14/15`) even when capture backpressure remained clean.
+- Debug evidence: per-frame parser diagnostics showed `idle=0` and `total==crc` for all observed bursts, confirming CRC-only mismatches.
+- Root cause: MISRC shared parser (`misrc_tools/common/frame_parser.c`) diverged from upstream hsdaoh CRC behavior by masking trailer/stream-id high nibbles before `crc16_ccitt(...)`.
+- Upstream reference (`.deps-gha-local/hsdaoh/src/libhsdaoh.c`) computes CRC over raw line bytes without this masking.
+- Corrective direction: compute CRC on raw line bytes in shared parser to align verifier input with upstream transport format, then revalidate mismatch rate with `MISRC_DEBUG=1` capture runs.
