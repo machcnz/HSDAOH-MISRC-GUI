@@ -405,6 +405,8 @@ void gui_capture_callback(void *data_info_ptr) {
     if (data_info->width == 0 || data_info->height == 0) return;
 
     if (data_info->device_error) {
+        // Do not force parser sync-state mutation here; parser resets belong to
+        // capture lifecycle boundaries (start/stop), not callback error handling.
         atomic_store(&app->stream_synced, false);
         s_capture_handler.frame_state.sync.stream_synced = false;
         gui_record_log_capture_event(app, "ERROR", "Capture callback reported device_error");
@@ -677,7 +679,7 @@ void gui_app_init(gui_app_t *app) {
     // Note: All buffers (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO, etc.) are initialized
     // by buffer manager automatically on first use
 
-// Initialize capture handler (includes frame parser state)
+    // Initialize parser/capture-handler baseline once at app init.
 #ifndef HSDAOH_UPSTREAM   // MISRC mode only
     capture_handler_init(&s_capture_handler);
 
@@ -1157,6 +1159,8 @@ int gui_app_start_capture(gui_app_t *app) {
         }
     }
 
+    // Capture lifecycle boundary: keep parser setup/reset work after stream
+    // startup succeeds, not on pre-open or failed-start paths.
 
         app->is_capturing = true;
         app->capture_start_time = GetTime();
@@ -1292,6 +1296,8 @@ void gui_app_stop_capture(gui_app_t *app) {
     }
 
     atomic_store(&app->stream_synced, false);
+    // Capture lifecycle boundary: keep parser teardown/reset work in stop
+    // cleanup so reconnects begin from a clean baseline.
 
     // Print capture summary with backpressure stats
     uint32_t frames = atomic_load(&app->frame_count);

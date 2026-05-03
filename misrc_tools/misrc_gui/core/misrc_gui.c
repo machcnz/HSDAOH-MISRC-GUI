@@ -600,7 +600,9 @@ int main(int argc, char **argv) {
         if (app.auto_reconnect_enabled) {
             double now = GetTime();
 
-            // Detect connection loss via callback timeout (no data for 2+ seconds)
+            // Detect connection loss via callback timeout (no data for 2+ seconds).
+            // Keep parser-state ownership scoped to capture lifecycle boundaries
+            // in gui_capture.c (stop/start paths), not timeout polling logic here.
             if (app.is_capturing && gui_capture_device_timeout(&app, 2000)) {
                 // Device was disconnected unexpectedly - clean up properly
                 fprintf(stderr, "[GUI] Device timeout detected, disconnecting...\n");
