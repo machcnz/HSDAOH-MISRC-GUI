@@ -136,6 +136,7 @@ static void gui_capture_release_power_assertions(void) {}
 
 // Message callback for hsdaoh
 // Enable with hsdaoh change to support callbacks
+#ifdef HSDAOH_UPSTREAM
 static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level, const char *msg)
 {
     // try-lock: never block the hsdaoh thread
@@ -150,6 +151,7 @@ static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level
 
     atomic_flag_clear(&app->hs_msg_lock);
 }
+#endif
 
 
 // #ifndef HSDAOH_UPSTREAM
@@ -166,9 +168,10 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
     if (level == HSDAOH_WARNING) level_str = "WARN";
     else if (level == HSDAOH_ERROR) level_str = "ERROR";
     else if (level == HSDAOH_CRITICAL) level_str = "CRITICAL";
+    bool level_is_error = (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL);
 
     if (!app->is_capturing) {
-        if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
+        if (level_is_error || misrc_debug_enabled()) {
             fprintf(stderr, "[%s] %s", level_str, buffer);
         }
         return;
@@ -192,11 +195,13 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         if (atomic_load(&app->stream_synced))
             atomic_fetch_add(&app->missed_frame_count, 1);
     } else if (strstr(buffer, "frame errors")) {
-        int n = 0;
-        if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
-            atomic_fetch_add(&app->error_count, (unsigned int)n);
-        else
-            atomic_fetch_add(&app->error_count, 1);
+        if (!level_is_error) {
+            int n = 0;
+            if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
+                atomic_fetch_add(&app->error_count, (unsigned int)n);
+            else
+                atomic_fetch_add(&app->error_count, 1);
+        }
     } else if (strstr(buffer, "Buffer dropped due to overrun")) {
         atomic_fetch_add(&app->rb_drop_count, 1);
     }
@@ -205,7 +210,7 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
    
     // Print to console only when debug enabled, except always show ERROR/CRITICAL
 
-    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()){
+    if (level_is_error || misrc_debug_enabled()){
         fprintf(stderr, "[%s] %s", level_str, buffer);
     }
 #else
@@ -213,13 +218,12 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
      * Frame mode (Stefan/MISRC): keep original behaviour.
      * Status is only pushed to GUI for ERROR/CRITICAL.
      */
-    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL) {
+    if (level_is_error) {
         gui_app_set_status(app, buffer);
-        atomic_fetch_add(&app->error_count, 1);
     }
 
 
-    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL || misrc_debug_enabled()) {
+    if (level_is_error || misrc_debug_enabled()) {
         fprintf(stderr, "[%s] %s", level_str, buffer);
     }
 #endif

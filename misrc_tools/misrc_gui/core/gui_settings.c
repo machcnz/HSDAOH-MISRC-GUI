@@ -322,6 +322,8 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->flac_level = 4;             // Balanced compression
     settings->flac_verification = false;  // Faster
     settings->flac_threads = 0;           // Auto
+    settings->flac_affinity_enabled = false;
+    settings->flac_affinity_cpu_list[0] = '\0';
     
     // Audio output defaults
     settings->enable_audio_4ch = false;
@@ -434,6 +436,8 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"flac_level\": %d,\n", settings->flac_level);
     fprintf(f, "  \"flac_verification\": %s,\n", settings->flac_verification ? "true" : "false");
     fprintf(f, "  \"flac_threads\": %d,\n", settings->flac_threads);
+    fprintf(f, "  \"flac_affinity_enabled\": %s,\n", settings->flac_affinity_enabled ? "true" : "false");
+    fprintf(f, "  \"flac_affinity_cpu_list\": \"%s\",\n", settings->flac_affinity_cpu_list);
     fprintf(f, "  \"enable_resample_a\": %s,\n", settings->enable_resample_a ? "true" : "false");
     fprintf(f, "  \"enable_resample_b\": %s,\n", settings->enable_resample_b ? "true" : "false");
     fprintf(f, "  \"resample_rate_a\": %.1f,\n", settings->resample_rate_a);
@@ -768,6 +772,13 @@ void gui_settings_load(gui_settings_t *settings) {
 
     if ((value = find_value(content, "flac_threads")) != NULL) {
         settings->flac_threads = atoi(value);
+    }
+    if ((value = find_value(content, "flac_affinity_enabled")) != NULL) {
+        settings->flac_affinity_enabled = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "flac_affinity_cpu_list")) != NULL) {
+        strncpy(settings->flac_affinity_cpu_list, value, sizeof(settings->flac_affinity_cpu_list) - 1);
+        settings->flac_affinity_cpu_list[sizeof(settings->flac_affinity_cpu_list) - 1] = '\0';
     }
 
     if ((value = find_value(content, "flac_level")) != NULL) {

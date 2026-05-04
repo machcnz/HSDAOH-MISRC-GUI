@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
+#include "version.h"
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <io.h>
@@ -37,11 +38,16 @@
 #define F_OK 0
 #endif
 
+#ifndef MIRSC_TOOLS_VERSION
+#define MIRSC_TOOLS_VERSION "dev"
+#endif
+
 #include <sys/types.h>
 #include <sys/stat.h>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
+#include <sys/utsname.h>
 #endif
 
 // Buffer sizes
@@ -92,6 +98,142 @@ static void gui_record_build_system_timestamp(char *dst, size_t dst_len) {
              tmv.tm_hour,
              tmv.tm_min,
              tmv.tm_sec);
+}
+
+static void gui_record_build_iso8601_timestamp(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    time_t t = time(NULL);
+    if (t == (time_t)-1) return;
+    struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+    if (localtime_s(&tmv, &t) != 0) return;
+#else
+    if (!localtime_r(&t, &tmv)) return;
+#endif
+    snprintf(dst, dst_len, "%04d-%02d-%02dT%02d:%02d:%02d",
+             (tmv.tm_year + 1900),
+             tmv.tm_mon + 1,
+             tmv.tm_mday,
+             tmv.tm_hour,
+             tmv.tm_min,
+             tmv.tm_sec);
+}
+
+static void gui_record_get_host_name(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+#if defined(_WIN32) || defined(_WIN64)
+    const char *host = getenv("COMPUTERNAME");
+    if (host && host[0]) {
+        snprintf(dst, dst_len, "%s", host);
+    }
+#else
+    if (gethostname(dst, dst_len - 1) == 0) {
+        dst[dst_len - 1] = '\0';
+    }
+#endif
+    if (!dst[0]) {
+        snprintf(dst, dst_len, "%s", "unknown");
+    }
+}
+
+static void gui_record_get_user_name(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+#if defined(_WIN32) || defined(_WIN64)
+    const char *user = getenv("USERNAME");
+#else
+    const char *user = getenv("USER");
+    if (!user || !user[0]) {
+        user = getenv("LOGNAME");
+    }
+#endif
+    snprintf(dst, dst_len, "%s", (user && user[0]) ? user : "unknown");
+}
+
+static void gui_record_get_os_string(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+#if defined(_WIN32) || defined(_WIN64)
+    snprintf(dst, dst_len, "%s", "Windows");
+#else
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(dst, dst_len, "%s %s (%s)", uts.sysname, uts.release, uts.machine);
+    } else {
+        snprintf(dst, dst_len, "%s", "unknown");
+    }
+#endif
+}
+
+static uint32_t gui_record_get_cpu_core_count(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    const char *cores_env = getenv("NUMBER_OF_PROCESSORS");
+    if (cores_env && cores_env[0]) {
+        int cores = atoi(cores_env);
+        if (cores > 0) return (uint32_t)cores;
+    }
+    return 0;
+#else
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    return (cores > 0) ? (uint32_t)cores : 0;
+#endif
+}
+
+static void gui_record_get_cpu_model(char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+#if defined(__linux__)
+    FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
+    if (!cpuinfo) {
+        snprintf(dst, dst_len, "%s", "unknown");
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), cpuinfo)) {
+        if (strncmp(line, "model name", 10) == 0) {
+            char *sep = strchr(line, ':');
+            if (sep) {
+                sep++;
+                while (*sep == ' ' || *sep == '\t') sep++;
+                size_t len = strlen(sep);
+                while (len > 0 && (sep[len - 1] == '\n' || sep[len - 1] == '\r')) {
+                    sep[--len] = '\0';
+                }
+                snprintf(dst, dst_len, "%s", sep);
+                break;
+            }
+        }
+    }
+    fclose(cpuinfo);
+#endif
+    if (!dst[0]) {
+        snprintf(dst, dst_len, "%s", "unknown");
+    }
+}
+
+static const char *gui_record_device_type_name(const gui_app_t *app) {
+    if (!app || app->selected_device < 0 || app->selected_device >= app->device_count) {
+        return "unknown";
+    }
+    device_type_t type = app->devices[app->selected_device].type;
+    switch (type) {
+        case DEVICE_TYPE_HSDAOH:
+            return "hsdaoh";
+        case DEVICE_TYPE_SIMPLE_CAPTURE:
+            return "simple_capture";
+        case DEVICE_TYPE_SIMULATED:
+            return "simulated";
+        case DEVICE_TYPE_PLAYBACK:
+            return "playback";
+#ifdef ENABLE_FX3
+        case DEVICE_TYPE_FX3:
+            return "fx3";
+#endif
+        default:
+            return "unknown";
+    }
 }
 
 static void gui_record_build_log_timestamp(char *dst, size_t dst_len) {
@@ -368,6 +510,15 @@ static int flac_writer_thread(void *ctx) {
 
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
+    if (wctx->writer) {
+        flac_writer_error_t aff_err = flac_writer_apply_thread_affinity(wctx->writer);
+        if (aff_err != FLAC_WRITER_OK) {
+            fprintf(stderr, "[FLAC] Writer thread %c affinity warning: %s\n",
+                    wctx->channel == 0 ? 'A' : 'B',
+                    flac_writer_get_error_string(wctx->writer));
+        }
+    }
+
     while (1) {
         // Read from buffer manager with timeout
         void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 10);
@@ -627,9 +778,13 @@ bool gui_record_is_active(void) {
 bool gui_record_is_pending(void) {
     return s_overwrite_pending;
 }
+static bool gui_record_level_is_error(const char *level) {
+    if (!level) return false;
+    return (strcmp(level, "ERROR") == 0 || strcmp(level, "CRITICAL") == 0);
+}
 
 void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message) {
-    if (!app || app != s_recording_app || !message || !message[0]) {
+    if (!app || !message || !message[0]) {
         return;
     }
 
@@ -640,7 +795,12 @@ void gui_record_log_capture_event(gui_app_t *app, const char *level, const char 
         return;
     }
 
-    gui_record_log_write_line(level, clean);
+    if (gui_record_level_is_error(level)) {
+        atomic_fetch_add(&app->error_count, 1);
+    }
+    if (app == s_recording_app) {
+        gui_record_log_write_line(level, clean);
+    }
 }
 
 // Forward declaration of actual recording start (after confirmation)
@@ -726,14 +886,50 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     }
 
     char msg[1024];
-    snprintf(msg, sizeof(msg), "MISRC capture log started (%s)", app->settings.use_flac ? "FLAC" : "RAW");
-    gui_record_log_write_line_locked("INFO", msg);
+    char iso_ts[32];
+    char host_name[128];
+    char user_name[128];
+    char os_name[256];
+    char cpu_model[256];
+    gui_record_build_iso8601_timestamp(iso_ts, sizeof(iso_ts));
+    gui_record_get_host_name(host_name, sizeof(host_name));
+    gui_record_get_user_name(user_name, sizeof(user_name));
+    gui_record_get_os_string(os_name, sizeof(os_name));
+    gui_record_get_cpu_model(cpu_model, sizeof(cpu_model));
+    uint32_t cpu_cores = gui_record_get_cpu_core_count();
 
     const char *device_name = "unknown";
     if (app->selected_device >= 0 && app->selected_device < app->device_count) {
         device_name = app->devices[app->selected_device].name;
     }
-    snprintf(msg, sizeof(msg), "Device=%s", device_name);
+
+    snprintf(msg, sizeof(msg), "MISRC capture log started (%s)", app->settings.use_flac ? "FLAC" : "RAW");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "computer_name: %s", host_name);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "computer_model_name: %s", cpu_model);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "computer_cores: %u", (unsigned)cpu_cores);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "user_name: %s", user_name);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "operating_system_VERSION: %s", os_name);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "misrc_tools_version: %s", MIRSC_TOOLS_VERSION);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "datetime_start: %s", iso_ts[0] ? iso_ts : "unknown");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "capture_log_path: %s", s_capture_log_path);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "capture_base_name: %s", base_src);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "output_path: %s", app->settings.output_path);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "capture_device_name: %s", device_name);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "capture_device_type: %s", gui_record_device_type_name(app));
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "capture_format: %s", app->settings.use_flac ? "FLAC" : "RAW");
     gui_record_log_write_line_locked("INFO", msg);
 
     snprintf(msg, sizeof(msg), "Capture channels: A=%s B=%s", app->settings.capture_a ? "on" : "off", app->settings.capture_b ? "on" : "off");
@@ -746,6 +942,18 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
              app->settings.enable_resample_a ? "on" : "off", app->settings.resample_rate_a,
              app->settings.enable_resample_b ? "on" : "off", app->settings.resample_rate_b);
     gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Capture limits: capture_limit_seconds=%u record_limit_seconds=%u",
+             (unsigned)app->settings.capture_limit_seconds,
+             (unsigned)app->settings.record_limit_seconds);
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Audio monitor: playback=%s monitor_ch34=%s misrc_mode=%s",
+             app->settings.audio_monitor_playback ? "on" : "off",
+             app->settings.audio_monitor_ch34 ? "on" : "off",
+             app->settings.misrc_mode ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Dropout handling: stop_on_dropout=%s",
+             app->settings.stop_on_dropout ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
 
     if (app->settings.use_flac) {
         snprintf(msg, sizeof(msg), "FLAC settings: level=%d verify=%s threads=%d",
@@ -753,21 +961,50 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
                  app->settings.flac_verification ? "on" : "off",
                  app->settings.flac_threads);
         gui_record_log_write_line_locked("INFO", msg);
+        snprintf(msg, sizeof(msg), "FLAC affinity: enabled=%s cpu_list=%s support=%s",
+                 app->settings.flac_affinity_enabled ? "on" : "off",
+                 app->settings.flac_affinity_cpu_list[0] ? app->settings.flac_affinity_cpu_list : "(none)",
+                 flac_writer_affinity_supported() ? "linux" : "unsupported");
+        gui_record_log_write_line_locked("INFO", msg);
     }
 
     if (app->settings.capture_a && path_a && path_a[0]) {
-        snprintf(msg, sizeof(msg), "Output A: %s", path_a);
+        snprintf(msg, sizeof(msg), "FILE_PATH_A: %s", path_a);
         gui_record_log_write_line_locked("INFO", msg);
     }
     if (app->settings.capture_b && path_b && path_b[0]) {
-        snprintf(msg, sizeof(msg), "Output B: %s", path_b);
+        snprintf(msg, sizeof(msg), "FILE_PATH_B: %s", path_b);
         gui_record_log_write_line_locked("INFO", msg);
     }
+
     snprintf(msg, sizeof(msg), "Audio outputs: 4ch=%s 2ch12=%s 2ch34=%s",
              app->settings.enable_audio_4ch ? "on" : "off",
              app->settings.enable_audio_2ch_12 ? "on" : "off",
              app->settings.enable_audio_2ch_34 ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);
+
+    if (app->settings.enable_audio_4ch && app->settings.audio_4ch_filename[0]) {
+        snprintf(msg, sizeof(msg), "AUDIO_4CH_FILE_PATH: %s/%s",
+                 app->settings.output_path, app->settings.audio_4ch_filename);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+    if (app->settings.enable_audio_2ch_12 && app->settings.audio_2ch_12_filename[0]) {
+        snprintf(msg, sizeof(msg), "AUDIO_2CH_12_FILE_PATH: %s/%s",
+                 app->settings.output_path, app->settings.audio_2ch_12_filename);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+    if (app->settings.enable_audio_2ch_34 && app->settings.audio_2ch_34_filename[0]) {
+        snprintf(msg, sizeof(msg), "AUDIO_2CH_34_FILE_PATH: %s/%s",
+                 app->settings.output_path, app->settings.audio_2ch_34_filename);
+        gui_record_log_write_line_locked("INFO", msg);
+    }
+    for (int i = 0; i < 4; i++) {
+        if (app->settings.enable_audio_1ch[i] && app->settings.audio_1ch_filenames[i][0]) {
+            snprintf(msg, sizeof(msg), "AUDIO_1CH_%d_FILE_PATH: %s/%s",
+                     i + 1, app->settings.output_path, app->settings.audio_1ch_filenames[i]);
+            gui_record_log_write_line_locked("INFO", msg);
+        }
+    }
 
     gui_record_log_unlock();
 }
@@ -1012,6 +1249,23 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         return RECORD_ERROR;
     }
 
+#if LIBFLAC_ENABLED == 1
+    if (app->settings.use_flac && app->settings.flac_affinity_enabled) {
+        if (!flac_writer_affinity_supported()) {
+            gui_app_set_status(app, "FLAC affinity is only supported on Linux");
+            return RECORD_ERROR;
+        }
+        char aff_err[256] = {0};
+        if (!flac_writer_validate_affinity_cpu_list(app->settings.flac_affinity_cpu_list, aff_err, sizeof(aff_err))) {
+            char status_msg[320];
+            snprintf(status_msg, sizeof(status_msg), "Invalid FLAC affinity CPU list: %s",
+                     aff_err[0] ? aff_err : "parse failure");
+            gui_app_set_status(app, status_msg);
+            return RECORD_ERROR;
+        }
+    }
+#endif
+
     s_recording_app = app;
     atomic_store(&app->recording_bytes, 0);
     atomic_store(&app->recording_raw_a, 0);
@@ -1114,6 +1368,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         config_b.verify = app->settings.flac_verification;
         config_a.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto
         config_b.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;
+        config_a.affinity_enabled = app->settings.flac_affinity_enabled;
+        config_b.affinity_enabled = app->settings.flac_affinity_enabled;
+        snprintf(config_a.affinity_cpu_list, sizeof(config_a.affinity_cpu_list), "%s", app->settings.flac_affinity_cpu_list);
+        snprintf(config_b.affinity_cpu_list, sizeof(config_b.affinity_cpu_list), "%s", app->settings.flac_affinity_cpu_list);
         config_a.enable_seektable = true;
         config_b.enable_seektable = true;
 
@@ -1462,6 +1720,11 @@ void gui_record_stop(gui_app_t *app) {
     }
     if (rec_drops > 0) {
         gui_record_log_writef("WARN", "Backpressure drops detected: %u frame blocks dropped", rec_drops);
+    }
+    {
+        char end_iso[32];
+        gui_record_build_iso8601_timestamp(end_iso, sizeof(end_iso));
+        gui_record_log_writef("INFO", "datetime_end: %s", end_iso[0] ? end_iso : "unknown");
     }
     gui_record_log_writef("INFO", "Session complete");
     gui_record_close_session_log();

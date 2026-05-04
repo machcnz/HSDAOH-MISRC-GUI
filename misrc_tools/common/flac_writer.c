@@ -3,10 +3,203 @@
  *
  * Shared FLAC encoding library for CLI and GUI tools.
  */
+#if defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#endif
 
 #include "flac_writer.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+
+#if defined(__linux__)
+#include <unistd.h>
+#include <sched.h>
+#include <pthread.h>
+#endif
+
+static void flac_writer_set_affinity_error(
+    char *error_message,
+    size_t error_message_size,
+    const char *message
+) {
+    if (!error_message || error_message_size == 0) return;
+    snprintf(error_message, error_message_size, "%s", message ? message : "");
+    error_message[error_message_size - 1] = '\0';
+}
+
+#if defined(__linux__)
+static int flac_writer_cpu_count_set(const cpu_set_t *set) {
+    if (!set) return 0;
+    int count = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+        if (CPU_ISSET(cpu, set)) count++;
+    }
+    return count;
+}
+
+static bool flac_writer_parse_affinity_cpu_list_linux(
+    const char *cpu_list,
+    cpu_set_t *target_set,
+    char *error_message,
+    size_t error_message_size
+) {
+    if (!cpu_list || !cpu_list[0]) {
+        flac_writer_set_affinity_error(error_message, error_message_size, "FLAC affinity CPU list is empty");
+        return false;
+    }
+    if (!target_set) {
+        flac_writer_set_affinity_error(error_message, error_message_size, "Internal error: CPU target set is NULL");
+        return false;
+    }
+
+    long cpu_conf = sysconf(_SC_NPROCESSORS_CONF);
+    long max_cpu_index = (cpu_conf > 0) ? (cpu_conf - 1) : (CPU_SETSIZE - 1);
+
+    CPU_ZERO(target_set);
+    const char *p = cpu_list;
+    bool parsed_any = false;
+
+    while (1) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+
+        if (!isdigit((unsigned char)*p)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Invalid FLAC affinity CPU list near '%c'", *p);
+            flac_writer_set_affinity_error(error_message, error_message_size, msg);
+            return false;
+        }
+
+        errno = 0;
+        char *endptr = NULL;
+        long start_cpu = strtol(p, &endptr, 10);
+        if (errno != 0 || endptr == p || start_cpu < 0 || start_cpu > INT_MAX) {
+            flac_writer_set_affinity_error(error_message, error_message_size, "Invalid FLAC affinity CPU index");
+            return false;
+        }
+        p = endptr;
+
+        while (*p && isspace((unsigned char)*p)) p++;
+
+        long end_cpu = start_cpu;
+        if (*p == '-') {
+            p++;
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!isdigit((unsigned char)*p)) {
+                flac_writer_set_affinity_error(error_message, error_message_size, "Invalid FLAC affinity range end");
+                return false;
+            }
+            errno = 0;
+            end_cpu = strtol(p, &endptr, 10);
+            if (errno != 0 || endptr == p || end_cpu < 0 || end_cpu > INT_MAX) {
+                flac_writer_set_affinity_error(error_message, error_message_size, "Invalid FLAC affinity range end");
+                return false;
+            }
+            p = endptr;
+            if (end_cpu < start_cpu) {
+                flac_writer_set_affinity_error(error_message, error_message_size, "FLAC affinity range end is smaller than start");
+                return false;
+            }
+        }
+
+        if (start_cpu > max_cpu_index || end_cpu > max_cpu_index) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "FLAC affinity CPU index out of range (max available index: %ld)",
+                     max_cpu_index);
+            flac_writer_set_affinity_error(error_message, error_message_size, msg);
+            return false;
+        }
+        if (end_cpu >= CPU_SETSIZE) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "FLAC affinity CPU index exceeds CPU_SETSIZE (%d)",
+                     CPU_SETSIZE - 1);
+            flac_writer_set_affinity_error(error_message, error_message_size, msg);
+            return false;
+        }
+
+        for (long cpu = start_cpu; cpu <= end_cpu; cpu++) {
+            CPU_SET((int)cpu, target_set);
+        }
+        parsed_any = true;
+
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+        if (*p != ',') {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Invalid FLAC affinity separator near '%c'", *p);
+            flac_writer_set_affinity_error(error_message, error_message_size, msg);
+            return false;
+        }
+        p++; // consume comma
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') {
+            flac_writer_set_affinity_error(error_message, error_message_size, "FLAC affinity list cannot end with ','");
+            return false;
+        }
+    }
+
+    if (!parsed_any || flac_writer_cpu_count_set(target_set) == 0) {
+        flac_writer_set_affinity_error(error_message, error_message_size, "FLAC affinity list produced no CPU targets");
+        return false;
+    }
+
+    cpu_set_t allowed_set;
+    if (sched_getaffinity(0, sizeof(allowed_set), &allowed_set) == 0) {
+        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+            if (CPU_ISSET(cpu, target_set) && !CPU_ISSET(cpu, &allowed_set)) {
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "FLAC affinity CPU %d is not available in current process affinity mask",
+                         cpu);
+                flac_writer_set_affinity_error(error_message, error_message_size, msg);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+#endif
+
+bool flac_writer_affinity_supported(void) {
+#if defined(__linux__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool flac_writer_validate_affinity_cpu_list(
+    const char *cpu_list,
+    char *error_message,
+    size_t error_message_size
+) {
+#if defined(__linux__)
+    cpu_set_t parsed_set;
+    return flac_writer_parse_affinity_cpu_list_linux(
+        cpu_list,
+        &parsed_set,
+        error_message,
+        error_message_size
+    );
+#else
+    (void)cpu_list;
+    flac_writer_set_affinity_error(
+        error_message,
+        error_message_size,
+        "FLAC affinity is only supported on Linux"
+    );
+    return false;
+#endif
+}
 
 #if LIBFLAC_ENABLED == 1
 
@@ -41,7 +234,8 @@ struct flac_writer {
 /* ============================================================================
  * Thread count status strings (for FLAC API v14+)
  * ============================================================================ */
-#if defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT >= 14
+#if defined(HAVE_FLAC_THREADING) && HAVE_FLAC_THREADING && \
+    defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT >= 14
 static const char* flac_thread_status_string(uint32_t status) {
     switch (status) {
         case FLAC__STREAM_ENCODER_SET_NUM_THREADS_OK:
@@ -146,6 +340,8 @@ flac_writer_config_t flac_writer_default_config(void) {
         .compression_level = 1,
         .verify = false,
         .num_threads = 0,  // Auto-detect
+        .affinity_enabled = false,
+        .affinity_cpu_list = "",
         .enable_seektable = true,
         .seektable_spacing = 1 << 18,  // ~6.5 seconds at 40kHz
         .error_cb = NULL,
@@ -212,6 +408,42 @@ static flac_writer_error_t configure_encoder(flac_writer_t *writer) {
     }
 
     return FLAC_WRITER_OK;
+}
+
+flac_writer_error_t flac_writer_apply_thread_affinity(flac_writer_t *writer) {
+    if (!writer) return FLAC_WRITER_ERR_ALLOC;
+
+    if (!writer->config.affinity_enabled) {
+        return FLAC_WRITER_OK;
+    }
+
+#if defined(__linux__)
+    cpu_set_t target_set;
+    char parse_err[256];
+    if (!flac_writer_parse_affinity_cpu_list_linux(
+            writer->config.affinity_cpu_list,
+            &target_set,
+            parse_err,
+            sizeof(parse_err))) {
+        report_error(writer, FLAC_WRITER_ERR_AFFINITY, parse_err);
+        return FLAC_WRITER_ERR_AFFINITY;
+    }
+
+    int rc = pthread_setaffinity_np(pthread_self(), sizeof(target_set), &target_set);
+    if (rc != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Failed to apply FLAC thread affinity \"%s\": %s",
+                 writer->config.affinity_cpu_list[0] ? writer->config.affinity_cpu_list : "(empty)",
+                 strerror(rc));
+        report_error(writer, FLAC_WRITER_ERR_AFFINITY, msg);
+        return FLAC_WRITER_ERR_AFFINITY;
+    }
+
+    return FLAC_WRITER_OK;
+#else
+    report_error(writer, FLAC_WRITER_ERR_AFFINITY, "FLAC affinity is only supported on Linux");
+    return FLAC_WRITER_ERR_AFFINITY;
+#endif
 }
 
 /* ============================================================================
@@ -488,5 +720,9 @@ uint64_t flac_writer_get_bytes_written(flac_writer_t *w) { (void)w; return 0; }
 bool flac_writer_available(void) { return false; }
 const char *flac_writer_get_flac_version(void) { return "N/A"; }
 bool flac_writer_multithreading_available(void) { return false; }
+flac_writer_error_t flac_writer_apply_thread_affinity(flac_writer_t *w) {
+    (void)w;
+    return FLAC_WRITER_ERR_DISABLED;
+}
 
 #endif // LIBFLAC_ENABLED

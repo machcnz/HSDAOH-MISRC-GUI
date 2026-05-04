@@ -33,8 +33,10 @@ static bool s_ui_consumed_click = false;
 // Simple in-place text editing state (settings panel)
 static bool s_edit_output_base_name = false;
 static bool s_edit_output_path = false; // 080226 - added to make editable
+static bool s_edit_flac_affinity_cpu_list = false;
 static double s_base_name_backspace_repeat_at = 0.0;
 static double s_output_path_backspace_repeat_at = 0.0; // 080226 - added to make editable
+static double s_flac_affinity_backspace_repeat_at = 0.0;
 
 // Audio label in-place editing state (settings panel)
 static int s_edit_audio_label_idx = -1; // 0..3, or -1
@@ -106,6 +108,7 @@ static char settings_audio_tag_12_display[64];
 static char settings_audio_tag_34_display[64];
 static char settings_flac_level_display[64];
 static char settings_flac_threads_display[64];
+static char settings_flac_affinity_display[96];
 static char settings_resample_a_display[32];
 static char settings_resample_b_display[32];
 static char status_sample_rate_display[32];
@@ -162,6 +165,18 @@ static float cycle_resample_khz(float current_khz) {
     }
     if (idx < 0) return presets_khz[0];
     return presets_khz[(idx + 1) % n];
+}
+
+static bool gui_ui_flac_affinity_supported(void) {
+#if defined(__linux__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool gui_ui_flac_affinity_char_allowed(int ch) {
+    return ((ch >= '0' && ch <= '9') || ch == ',' || ch == '-' || ch == ' ' || ch == '\t');
 }
 
 // Static storage for custom element data (persists during render)
@@ -467,6 +482,44 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         snprintf(settings_flac_threads_display, sizeof(settings_flac_threads_display), "FLAC threads: %d", app->settings.flac_threads);
                         CLAY(CLAY_ID("FlacThreadsValue"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color((Color){25,25,30,255}), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(make_string(settings_flac_threads_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
                         CLAY(CLAY_ID("FlacThreadsPlus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
+                    }
+
+#if defined(__linux__)
+                    bool flac_affinity_supported = true;
+#else
+                    bool flac_affinity_supported = false;
+#endif
+                    bool flac_affinity_editable = app->settings.use_flac && app->settings.flac_affinity_enabled && flac_affinity_supported;
+                    Color affinity_toggle_bg = (app->settings.use_flac && flac_affinity_supported)
+                        ? (app->settings.flac_affinity_enabled ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON)
+                        : ui_disabled_color(COLOR_BUTTON);
+                    Color affinity_toggle_fg = (app->settings.use_flac && flac_affinity_supported)
+                        ? COLOR_TEXT
+                        : ui_disabled_color(COLOR_TEXT);
+                    Color affinity_list_bg = flac_affinity_editable
+                        ? (Color){25,25,30,255}
+                        : ui_disabled_color((Color){25,25,30,255});
+                    Color affinity_list_fg = flac_affinity_editable ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+
+                    CLAY(CLAY_ID("FlacAffinityToggleRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                        CLAY(CLAY_ID("ToggleFlacAffinity"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(affinity_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT((app->settings.flac_affinity_enabled && flac_affinity_supported) ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
+                        }
+                        CLAY_TEXT(CLAY_STRING("FLAC core pinning (Linux)"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
+                    }
+
+                    CLAY(CLAY_ID("FlacAffinityListRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                        CLAY_TEXT(CLAY_STRING("CPU list:"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_list_fg) }));
+                        CLAY(CLAY_ID("FlacAffinityListField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(affinity_list_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            const char *cpu_list = app->settings.flac_affinity_cpu_list[0] ? app->settings.flac_affinity_cpu_list : "10-17";
+                            if (s_edit_flac_affinity_cpu_list && flac_affinity_editable) {
+                                snprintf(settings_flac_affinity_display, sizeof(settings_flac_affinity_display), "%s_", cpu_list);
+                                CLAY_TEXT(make_string(settings_flac_affinity_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
+                            } else {
+                                CLAY_TEXT(make_string(cpu_list), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
+                            }
+                        }
+                        CLAY_TEXT(flac_affinity_supported ? CLAY_STRING("e.g. 10-17,20") : CLAY_STRING("Linux only"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                     }
 
                     // Resample section
@@ -1605,6 +1658,7 @@ void gui_handle_interactions(gui_app_t *app) {
     if (app->settings_panel_open && s_edit_output_base_name) {
         // If base name editing is active, don't allow audio label edit at same time.
         s_edit_output_path = false;   // cancel Output-path edit while editing base name
+        s_edit_flac_affinity_cpu_list = false;
         s_edit_audio_label_idx = -1;
         s_edit_audio_output_tag_idx = -1;
         s_edit_rf_tag_idx = -1;
@@ -1653,6 +1707,7 @@ void gui_handle_interactions(gui_app_t *app) {
         if (app->settings_panel_open && s_edit_output_path) {
             // Cancel other edits while editing output path
             s_edit_output_base_name = false;
+            s_edit_flac_affinity_cpu_list = false;
             s_edit_audio_label_idx = -1;
             s_edit_audio_output_tag_idx = -1;
             s_edit_rf_tag_idx = -1;
@@ -1697,11 +1752,63 @@ void gui_handle_interactions(gui_app_t *app) {
         gui_settings_save(&app->settings);
     }
 }
+    if (app->settings_panel_open && s_edit_flac_affinity_cpu_list) {
+        bool flac_affinity_editable = app->settings.use_flac &&
+                                      app->settings.flac_affinity_enabled &&
+                                      gui_ui_flac_affinity_supported();
+        s_edit_output_base_name = false;
+        s_edit_output_path = false;
+        s_edit_audio_label_idx = -1;
+        s_edit_audio_output_tag_idx = -1;
+        s_edit_rf_tag_idx = -1;
+
+        if (!flac_affinity_editable) {
+            s_edit_flac_affinity_cpu_list = false;
+        } else {
+            int ch = GetCharPressed();
+            while (ch > 0) {
+                if (gui_ui_flac_affinity_char_allowed(ch)) {
+                    size_t len = strlen(app->settings.flac_affinity_cpu_list);
+                    if (len + 1 < sizeof(app->settings.flac_affinity_cpu_list)) {
+                        app->settings.flac_affinity_cpu_list[len] = (char)ch;
+                        app->settings.flac_affinity_cpu_list[len + 1] = '\0';
+                        gui_settings_save(&app->settings);
+                    }
+                }
+                ch = GetCharPressed();
+            }
+
+            if (IsKeyPressed(KEY_BACKSPACE)) {
+                s_flac_affinity_backspace_repeat_at = GetTime() + 0.25;
+                size_t len = strlen(app->settings.flac_affinity_cpu_list);
+                if (len > 0) {
+                    app->settings.flac_affinity_cpu_list[len - 1] = '\0';
+                    gui_settings_save(&app->settings);
+                }
+            } else if (IsKeyDown(KEY_BACKSPACE)) {
+                double now = GetTime();
+                if (now >= s_flac_affinity_backspace_repeat_at) {
+                    s_flac_affinity_backspace_repeat_at = now + 0.05;
+                    size_t len = strlen(app->settings.flac_affinity_cpu_list);
+                    if (len > 0) {
+                        app->settings.flac_affinity_cpu_list[len - 1] = '\0';
+                        gui_settings_save(&app->settings);
+                    }
+                }
+            }
+
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+                s_edit_flac_affinity_cpu_list = false;
+                gui_settings_save(&app->settings);
+            }
+        }
+    }
     // Handle text input when editing RF tag
     if (app->settings_panel_open && s_edit_rf_tag_idx >= 0 && s_edit_rf_tag_idx < 2 && app->settings.auto_names_enabled) {
         // Cancel other edits
         s_edit_output_base_name = false;
         s_edit_output_path = false;
+        s_edit_flac_affinity_cpu_list = false;
         s_edit_audio_label_idx = -1;
         s_edit_audio_output_tag_idx = -1;
 
@@ -1752,6 +1859,7 @@ void gui_handle_interactions(gui_app_t *app) {
         // Cancel other edits
         s_edit_output_base_name = false;
         s_edit_output_path = false;
+        s_edit_flac_affinity_cpu_list = false;
         s_edit_audio_label_idx = -1;
         s_edit_rf_tag_idx = -1;
 
@@ -1802,6 +1910,7 @@ void gui_handle_interactions(gui_app_t *app) {
         // Cancel base name edit
         s_edit_output_base_name = false;
         s_edit_output_path = false;
+        s_edit_flac_affinity_cpu_list = false;
         s_edit_audio_output_tag_idx = -1;
         s_edit_rf_tag_idx = -1;
 
@@ -1909,6 +2018,7 @@ void gui_handle_interactions(gui_app_t *app) {
             app->settings_panel_open = !app->settings_panel_open;
             s_edit_output_base_name = false;
             s_edit_output_path = false;
+            s_edit_flac_affinity_cpu_list = false;
             s_edit_audio_label_idx = -1;
             s_edit_audio_output_tag_idx = -1;
             s_edit_rf_tag_idx = -1;
@@ -1932,6 +2042,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 app->settings_panel_open = false;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_audio_output_tag_idx = -1;
                 s_edit_rf_tag_idx = -1;
@@ -1949,6 +2060,9 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (Clay_PointerOver(CLAY_ID("ToggleUseFlac"))) {
                 app->settings.use_flac = !app->settings.use_flac;
+                if (!app->settings.use_flac) {
+                    s_edit_flac_affinity_cpu_list = false;
+                }
                 gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ToggleOverwrite"))) {
@@ -1974,6 +2088,34 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("FlacThreadsPlus"))) {
                 if (app->settings.flac_threads < 64) app->settings.flac_threads++;
                 gui_settings_save(&app->settings);
+            }
+            if (Clay_PointerOver(CLAY_ID("ToggleFlacAffinity"))) {
+                if (gui_ui_flac_affinity_supported() && app->settings.use_flac) {
+                    app->settings.flac_affinity_enabled = !app->settings.flac_affinity_enabled;
+                    if (!app->settings.flac_affinity_enabled) {
+                        s_edit_flac_affinity_cpu_list = false;
+                    }
+                    gui_settings_save(&app->settings);
+                } else if (!gui_ui_flac_affinity_supported()) {
+                    gui_app_set_status(app, "FLAC affinity is Linux-only");
+                }
+            }
+            if (app->settings_panel_open &&
+                Clay_PointerOver(CLAY_ID("FlacAffinityListField")) &&
+                !gui_ui_click_consumed()) {
+                bool can_edit_affinity = app->settings.use_flac &&
+                                         app->settings.flac_affinity_enabled &&
+                                         gui_ui_flac_affinity_supported();
+                if (can_edit_affinity) {
+                    s_edit_flac_affinity_cpu_list = true;
+                    s_flac_affinity_backspace_repeat_at = 0.0;
+                    s_edit_output_base_name = false;
+                    s_edit_output_path = false;
+                    s_edit_audio_label_idx = -1;
+                    s_edit_audio_output_tag_idx = -1;
+                    s_edit_rf_tag_idx = -1;
+                    gui_ui_set_click_consumed();
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
                 app->settings.enable_resample_a = !app->settings.enable_resample_a;
@@ -2001,6 +2143,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 if (!app->settings.auto_names_enabled) {
                     s_edit_output_base_name = false;
                     s_edit_output_path = false;
+                    s_edit_flac_affinity_cpu_list = false;
                     s_edit_audio_label_idx = -1;
                     s_edit_audio_output_tag_idx = -1;
                     s_edit_rf_tag_idx = -1;
@@ -2021,6 +2164,7 @@ void gui_handle_interactions(gui_app_t *app) {
             {
                 s_edit_output_base_name = true;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_audio_output_tag_idx = -1;
                 s_edit_rf_tag_idx = -1;
@@ -2050,6 +2194,7 @@ void gui_handle_interactions(gui_app_t *app) {
             {
                 s_edit_output_path = true;
                 s_edit_output_base_name = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_audio_output_tag_idx = -1;
                 s_edit_rf_tag_idx = -1;
@@ -2092,6 +2237,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_edit_rf_tag_idx = 0;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_audio_output_tag_idx = -1;
                 s_rf_tag_backspace_repeat_at = 0.0;
@@ -2102,6 +2248,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_edit_audio_output_tag_idx = 0;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_rf_tag_idx = -1;
                 s_audio_output_tag_backspace_repeat_at = 0.0;
@@ -2111,6 +2258,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_edit_audio_output_tag_idx = 1;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_rf_tag_idx = -1;
                 s_audio_output_tag_backspace_repeat_at = 0.0;
@@ -2120,6 +2268,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_edit_audio_output_tag_idx = 2;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_rf_tag_idx = -1;
                 s_audio_output_tag_backspace_repeat_at = 0.0;
@@ -2129,6 +2278,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_edit_rf_tag_idx = 1;
                 s_edit_output_base_name = false;
                 s_edit_output_path = false;
+                s_edit_flac_affinity_cpu_list = false;
                 s_edit_audio_label_idx = -1;
                 s_edit_audio_output_tag_idx = -1;
                 s_rf_tag_backspace_repeat_at = 0.0;
@@ -2157,6 +2307,7 @@ void gui_handle_interactions(gui_app_t *app) {
                     s_edit_audio_label_idx = i;
                     s_edit_output_base_name = false;
                     s_edit_output_path = false; //130226 - Added
+                    s_edit_flac_affinity_cpu_list = false;
                     s_edit_audio_output_tag_idx = -1;
                     s_edit_rf_tag_idx = -1;
                     s_audio_label_backspace_repeat_at = 0.0;
