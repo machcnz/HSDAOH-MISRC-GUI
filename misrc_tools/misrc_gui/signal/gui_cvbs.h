@@ -38,16 +38,21 @@ typedef enum {
 } cvbs_format_t;
 
 // Frame dimensions
-#define CVBS_FRAME_WIDTH      720   // Standard horizontal resolution
-#define CVBS_PAL_HEIGHT       576   // PAL (D1) active lines
-#define CVBS_NTSC_HEIGHT      486   // NTSC (D1) active lines
-#define CVBS_MAX_HEIGHT       576   // Maximum (PAL/SECAM)
+#define CVBS_FRAME_WIDTH      720   // Active-area horizontal resolution
+#define CVBS_PAL_HEIGHT       576   // 625-line PAL/SECAM active lines
+#define CVBS_NTSC_HEIGHT      486   // 525-line NTSC active lines
+#define CVBS_PAL_FULL_WIDTH_4FSC   1135  // Full PAL line width at 4fsc
+#define CVBS_NTSC_FULL_WIDTH_4FSC   910  // Full NTSC line width at 4fsc
+#define CVBS_PAL_FULL_HEIGHT        625  // Full PAL frame lines
+#define CVBS_NTSC_FULL_HEIGHT       525  // Full NTSC frame lines
+#define CVBS_MAX_WIDTH         CVBS_PAL_FULL_WIDTH_4FSC
+#define CVBS_MAX_HEIGHT        CVBS_PAL_FULL_HEIGHT
 
 // Line counts (used for 625-line / 525-line mode naming)
 #define CVBS_PAL_TOTAL_LINES  625   // 625-line PAL/SECAM
 #define CVBS_NTSC_TOTAL_LINES 525   // 525-line NTSC
 #define CVBS_PAL_ACTIVE_LINES 576
-#define CVBS_NTSC_ACTIVE_LINES 480
+#define CVBS_NTSC_ACTIVE_LINES 486
 
 // Timing at 40 MSPS (from gui_trigger.h constants)
 #define CVBS_SAMPLES_PER_LINE_PAL   CVBS_PAL_LINE_SAMPLES    // 2560
@@ -61,7 +66,7 @@ typedef enum {
 typedef struct {
     cvbs_format_t format;          // Detected video format
     int total_lines;               // Total lines per frame (525/625)
-    int active_lines;              // Active video lines (480/576)
+    int active_lines;              // Active video lines (486/576)
     int current_line;              // Current line being decoded (0-based)
     int current_field;             // Current field (0=odd/first, 1=even/second)
     bool in_vsync;                 // Currently in vertical sync region
@@ -84,6 +89,12 @@ typedef enum {
     CVBS_OSD_MINIMAL = 1,  // deinterlacer + timing
     CVBS_OSD_STATS   = 2,  // detailed statistics
 } cvbs_osd_mode_t;
+
+// Frame view mode controls active-area vs full-frame geometry.
+typedef enum {
+    CVBS_FRAME_VIEW_ACTIVE = 0,  // Active video only (720x576 / 720x486)
+    CVBS_FRAME_VIEW_FULL   = 1,  // Full line/frame geometry (4fsc width, 625/525 lines)
+} cvbs_frame_view_t;
 
 // Software PLL state for H-sync tracking
 typedef struct {
@@ -144,6 +155,7 @@ typedef struct cvbs_decoder {
     // Decoder configuration
     cvbs_decoder_mode_t decoder_mode;   // BASIC vs MONO
     cvbs_osd_mode_t osd_mode;           // Off / Minimal / Stats
+    cvbs_frame_view_t frame_view_mode;  // Active-only vs full-frame view
 
     // Field buffers (grayscale, 720 x field_height each)
     // Each field buffer stores half the vertical resolution
@@ -152,8 +164,8 @@ typedef struct cvbs_decoder {
 
     // Deinterlaced frame buffer (720 x full_height)
     uint8_t *frame_buffer;         // Deinterlaced output frame
-    int frame_width;               // Always CVBS_FRAME_WIDTH (720)
-    int frame_height;              // Full frame height (576 PAL, 486 NTSC)
+    int frame_width;               // Active: 720, Full: 910/1135 (NTSC/PAL 4fsc)
+    int frame_height;              // Active: 486/576, Full: 525/625
 
     // Double buffering for thread-safe display
     // Display thread writes to back buffer, render thread reads from front
@@ -208,9 +220,10 @@ typedef struct cvbs_decoder {
 
     // UI overlay state (for panel-top controls)
     struct {
-        // Buttons (right-aligned): [Decoder][OSD][System]
+        // Buttons (right-aligned): [Decoder][OSD][Frame][System]
         Rectangle decoder_btn_rect;    // Hit box for decoder mode button
         Rectangle osd_btn_rect;        // Hit box for OSD mode button
+        Rectangle frame_btn_rect;      // Hit box for frame mode button
         Rectangle system_btn_rect;     // Hit box for system selector button
 
         // Dropdown options for system selector (0=625-line PAL/SECAM, 1=525-line NTSC)
