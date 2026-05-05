@@ -40,18 +40,18 @@ static double g_field_decode_avg_ms = 0.0;  // Last completed field's decode tim
 //-----------------------------------------------------------------------------
 
 // Luma lowpass filter to remove chroma subcarrier
-// At 40 MSPS: PAL color burst = 4.43 MHz (~9 samples/cycle)
-// 9-tap filter matches PAL chroma cycle, works well for NTSC too
-#define LUMA_LPF_TAPS  9
-#define LUMA_LPF_HALF  4   // Half the taps (for centering)
+// 17-tap stronger Gaussian lowpass (sigma≈3.0) for true monochrome.
+// Kills PAL/NTSC chroma subcarrier at 40 MSPS.
+#define LUMA_LPF_TAPS  17
+#define LUMA_LPF_HALF  8   // Half the taps (for centering)
 
-// Pre-computed Gaussian kernel coefficients (sigma ~= 1.5)
-// Sum = 256 for fast division via right-shift by 8
+// Pre-computed Gaussian kernel coefficients (sigma ~= 3.0)
+// Sum = 261, division via right-shift by 8 (÷256) gives slight gain ~1.02
 static const int16_t luma_kernel[LUMA_LPF_TAPS] = {
-    2, 11, 30, 54, 70, 54, 30, 11, 2   // Adjusted to sum to 264, close enough
+    1, 2, 5, 9, 14, 21, 28, 33, 35, 33, 28, 21, 14, 9, 5, 2, 1
 };
-#define LUMA_KERNEL_SUM 256
-#define LUMA_KERNEL_SHIFT 8  // Divide by 256 = shift right 8
+#define LUMA_KERNEL_SUM 261
+#define LUMA_KERNEL_SHIFT 8  // Divide by 256 ≈ shift right 8
 
 // Pre-filtered line buffer (avoids per-pixel convolution)
 // Must cover full PAL line period at 40 MSPS when full-frame mode is enabled.
@@ -66,23 +66,19 @@ static void decode_line_to_pixels(const cvbs_decoder_t *decoder,
                                   uint8_t *pixels, int pixel_width) {
     if (!decoder || !samples || !levels || !pixels || pixel_width <= 0) return;
 
-    bool full_frame = (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL);
-    int line_start = full_frame ? 0 : BACK_PORCH_SAMPLES;
-    if (sample_count <= (size_t)(line_start + 8)) return;
+    (void)decoder; // kept for API consistency
 
-    // Active mode skips to active video; full mode keeps complete line including blanking/sync.
-    const int16_t *src = samples + line_start;
-    int n = (int)(sample_count - (size_t)line_start);
+    // Always decode the full line (sync + blanking + active).
+    // Active vs Full is decided at render time by cropping the src rectangle.
+    if (sample_count < 16) return;
 
-    if (full_frame) {
-        int full_line_samples = (decoder->state.format == CVBS_FORMAT_NTSC)
-                                ? CVBS_SAMPLES_PER_LINE_NTSC
-                                : CVBS_SAMPLES_PER_LINE_PAL;
-        if (n > full_line_samples) n = full_line_samples;
-    } else {
-        // Active-area only
-        if (n > CVBS_ACTIVE_SAMPLES) n = CVBS_ACTIVE_SAMPLES;
-    }
+    const int16_t *src = samples;
+    int n = (int)sample_count;
+
+    int full_line_samples = (decoder->state.format == CVBS_FORMAT_NTSC)
+                            ? CVBS_SAMPLES_PER_LINE_NTSC
+                            : CVBS_SAMPLES_PER_LINE_PAL;
+    if (n > full_line_samples) n = full_line_samples;
     if (n > FILTERED_LINE_MAX) n = FILTERED_LINE_MAX;
     if (n < 16) return;
 
@@ -107,12 +103,14 @@ static void decode_line_to_pixels(const cvbs_decoder_t *decoder,
         g_filtered_line[i] = (int16_t)(sum >> LUMA_KERNEL_SHIFT);
     }
 
-    // Main body - no bounds checking needed, fully unrolled for speed
+    // Main body - compiler will unroll the small fixed-size loop
     int end = n - LUMA_LPF_HALF;
     for (int i = LUMA_LPF_HALF; i < end; i++) {
         const int16_t *p = src + i - LUMA_LPF_HALF;
-        int32_t sum = p[0] * 2 + p[1] * 11 + p[2] * 30 + p[3] * 54 + p[4] * 70 +
-                      p[5] * 54 + p[6] * 30 + p[7] * 11 + p[8] * 2;
+        int32_t sum = 0;
+        for (int k = 0; k < LUMA_LPF_TAPS; k++) {
+            sum += p[k] * luma_kernel[k];
+        }
         g_filtered_line[i] = (int16_t)(sum >> LUMA_KERNEL_SHIFT);
     }
 
@@ -820,18 +818,14 @@ static void decode_current_line(cvbs_decoder_t *decoder) {
     cvbs_pll_state_t *pll = &decoder->pll;
     int line_num = pll->current_line;
     int frame_width = decoder->frame_width;
-    bool full_view = (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL);
 
-    // Active mode decodes active video region; full mode decodes full line set.
-    int active_start = full_view ? 0 :
-                       ((decoder->state.format == CVBS_FORMAT_NTSC) ? NTSC_ACTIVE_START : PAL_ACTIVE_START);
     int max_field_lines = decoder->field_height;
     if (frame_width < 1 || frame_width > CVBS_MAX_WIDTH) return;
     if (max_field_lines < 1) return;
 
-    // Only decode active video lines (skip VBI)
-    if (line_num >= active_start && line_num < active_start + max_field_lines) {
-        int field_line = line_num - active_start;
+    // Decode all lines into the field buffer (Full and Active share the same decode path).
+    if (line_num >= 0 && line_num < max_field_lines) {
+        int field_line = line_num;
 
         // Write to the appropriate field buffer (not directly to frame)
         int field_idx = decoder->state.current_field ? 1 : 0;
@@ -1135,7 +1129,17 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
     float draw_y = y + (height - draw_h) / 2;
 
     // Draw the video frame - raylib will scale from field resolution to display
-    Rectangle src = {0, 0, (float)frame_w, (float)field_h};
+    Rectangle src;
+    if (decoder->frame_view_mode == CVBS_FRAME_VIEW_ACTIVE) {
+        // Crop to the active video area with a small margin around all sides.
+        bool ntsc = (decoder->state.format == CVBS_FORMAT_NTSC);
+        src.x = ntsc ? 180.0f : 230.0f;
+        src.y = ntsc ? 35.0f : 40.0f;
+        src.width = 680.0f;
+        src.height = ntsc ? 460.0f : 550.0f;
+    } else {
+        src = (Rectangle){0, 0, (float)frame_w, (float)field_h};
+    }
     Rectangle dst = {draw_x, draw_y, draw_w, draw_h};
     DrawTexturePro(decoder->frame_texture, src, dst, (Vector2){0, 0}, 0, WHITE);
 
@@ -1170,15 +1174,11 @@ static void gui_cvbs_apply_geometry(cvbs_decoder_t *decoder) {
     decoder->state.active_lines = ntsc ? CVBS_NTSC_ACTIVE_LINES : CVBS_PAL_ACTIVE_LINES;
     decoder->pll.line_period = ntsc ? CVBS_NTSC_LINE_SAMPLES : CVBS_PAL_LINE_SAMPLES;
 
-    if (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL) {
-        decoder->frame_width = ntsc ? CVBS_NTSC_FULL_WIDTH_4FSC : CVBS_PAL_FULL_WIDTH_4FSC;
-        decoder->frame_height = ntsc ? CVBS_NTSC_FULL_HEIGHT : CVBS_PAL_FULL_HEIGHT;
-        decoder->field_height = ntsc ? NTSC_FIELD_LINES : PAL_FIELD_LINES;
-    } else {
-        decoder->frame_width = CVBS_FRAME_WIDTH;
-        decoder->frame_height = ntsc ? CVBS_NTSC_HEIGHT : CVBS_PAL_HEIGHT;
-        decoder->field_height = ntsc ? NTSC_FIELD_HEIGHT : PAL_FIELD_HEIGHT;
-    }
+    // Always allocate/decode at full-frame dimensions.
+    // Active vs Full is purely a render-time crop.
+    decoder->frame_width = ntsc ? CVBS_NTSC_FULL_WIDTH_4FSC : CVBS_PAL_FULL_WIDTH_4FSC;
+    decoder->frame_height = ntsc ? CVBS_NTSC_FULL_HEIGHT : CVBS_PAL_FULL_HEIGHT;
+    decoder->field_height = ntsc ? NTSC_FIELD_LINES : PAL_FIELD_LINES;
 
     if (decoder->frame_width > CVBS_MAX_WIDTH) decoder->frame_width = CVBS_MAX_WIDTH;
     if (decoder->frame_height > CVBS_MAX_HEIGHT) decoder->frame_height = CVBS_MAX_HEIGHT;
@@ -1266,9 +1266,7 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     float frame_btn_w = frame_text_w + 16.0f;
     if (frame_btn_w < 110.0f) frame_btn_w = 110.0f;
 
-    const char *dec_label = (decoder->decoder_mode == CVBS_DECODER_MONO)
-                            ? "Decoder: Mono"
-                            : "Decoder: Basic";
+    const char *dec_label = "Decoder: Mono";
     float dec_text_w = (float)gui_text_measure(dec_label, FONT_SIZE_DROPDOWN_OPT);
     float dec_btn_w = dec_text_w + 16.0f;
     if (dec_btn_w < 110.0f) dec_btn_w = 110.0f;
@@ -1288,7 +1286,7 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     decoder->overlay.frame_btn_rect   = (Rectangle){frame_btn_x, btn_y, frame_btn_w, btn_h};
     decoder->overlay.system_btn_rect  = (Rectangle){sys_btn_x, btn_y, sys_btn_w, btn_h};
 
-    // Decoder mode button (cycles BASIC/MONO)
+    // Decoder mode indicator (Mono only, no cycle)
     Color dec_bg = COLOR_BUTTON;
     DrawRectangleRounded(decoder->overlay.decoder_btn_rect, 0.15f, 4, dec_bg);
     float dec_text_x = dec_btn_x + (dec_btn_w - dec_text_w) / 2.0f;
@@ -1389,15 +1387,14 @@ static void *cvbs_vtable_create(void) {
         return NULL;
     }
 
-    // Default decoder/OSD modes
-    decoder->decoder_mode = CVBS_DECODER_BASIC;
+    // Default OSD mode
     decoder->osd_mode = CVBS_OSD_MINIMAL;
     decoder->frame_view_mode = CVBS_FRAME_VIEW_ACTIVE;
 
-    // Default to 525-line NTSC (matches original simulated test signal)
-    decoder->overlay.selected_system = 1;  // 0=625-line PAL/SECAM, 1=525-line NTSC
+    // Default to 625-line PAL/SECAM for real-hardware testing.
+    decoder->overlay.selected_system = 0;  // 0=625-line PAL/SECAM, 1=525-line NTSC
     decoder->overlay.system_dropdown_open = false;
-    gui_cvbs_set_format(decoder, 1);
+    gui_cvbs_set_format(decoder, 0);
 
     return decoder;
 }
@@ -1471,14 +1468,6 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
     if (!decoder) return false;
     if (!decoder->overlay.is_visible) return false;
-
-    // Decoder mode button: cycle BASIC <-> MONO
-    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.decoder_btn_rect)) {
-        decoder->decoder_mode = (decoder->decoder_mode == CVBS_DECODER_BASIC)
-                                ? CVBS_DECODER_MONO
-                                : CVBS_DECODER_BASIC;
-        return true;
-    }
 
     // OSD mode button: cycle OFF -> MINIMAL -> STATS -> OFF
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.osd_btn_rect)) {

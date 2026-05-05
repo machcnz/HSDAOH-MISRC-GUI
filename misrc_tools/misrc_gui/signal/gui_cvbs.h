@@ -74,15 +74,6 @@ typedef struct {
     int frames_decoded;            // Total frames decoded
 } cvbs_frame_state_t;
 
-// Decoder/OSD modes
-// Decoder mode controls how aggressively we remove the colour subcarrier.
-// BASIC  = current behaviour (light luma LPF)
-// MONO   = stronger luma filtering to suppress checkerboard/chroma patterns.
-typedef enum {
-    CVBS_DECODER_BASIC = 0,
-    CVBS_DECODER_MONO  = 1,
-} cvbs_decoder_mode_t;
-
 // OSD mode controls how much status text is overlaid on the video.
 typedef enum {
     CVBS_OSD_OFF     = 0,  // no overlay
@@ -153,7 +144,6 @@ typedef struct cvbs_decoder {
     cvbs_frame_state_t state;
 
     // Decoder configuration
-    cvbs_decoder_mode_t decoder_mode;   // BASIC vs MONO
     cvbs_osd_mode_t osd_mode;           // Off / Minimal / Stats
     cvbs_frame_view_t frame_view_mode;  // Active-only vs full-frame view
 
