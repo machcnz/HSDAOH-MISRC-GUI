@@ -64,6 +64,11 @@ if host_system == 'darwin'
   cflags += ['-D_DARWIN_C_SOURCE']
 endif
 
+if host_system != 'windows' and host_system != 'cygwin'
+  # Expose POSIX APIs like clock_gettime/nanosleep and types like ssize_t.
+  cflags += ['-D_POSIX_C_SOURCE=200809L', '-D_DEFAULT_SOURCE']
+endif
+
 if host_cpu_family == 'x86_64'
   nasm_flags = []
   if host_system == 'windows' or host_system == 'cygwin'
