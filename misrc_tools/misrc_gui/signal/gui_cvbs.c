@@ -1094,17 +1094,36 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
     if (frame_w > CVBS_MAX_WIDTH) frame_w = CVBS_MAX_WIDTH;
     if (frame_w < 1) return;
 
-    // Convert grayscale to RGBA for the image
-    // Use 32-bit writes instead of per-component Color struct assignment
-    // Read from front buffer (thread-safe, updated by gui_cvbs_swap_buffers)
+    // Active picture boundaries measured from the decoded full frame.
+    // The decoder resamples sync-to-sync across the full frame width, so the
+    // active picture is offset from theoretical 4fsc positions.
+    bool ntsc = (decoder->state.format == CVBS_FORMAT_NTSC);
+    int active_x = ntsc ? 100 : 130;
+    int active_y = ntsc ? 25  : 35;
+    int active_w = ntsc ? 720 : 890;
+    int active_h = ntsc ? 470 : 560;
+    if (active_x < 0) active_x = 0;
+    if (active_y < 0) active_y = 0;
+    if (active_x + active_w > frame_w) active_w = frame_w - active_x;
+    if (active_y + active_h > field_h) active_h = field_h - active_y;
+
+    // Convert grayscale to RGBA for the image.
+    // Write with the image row pitch (MAX_WIDTH) so NTSC (frame_w < MAX_WIDTH)
+    // does not shear.
     uint8_t *gray_src = decoder->display_front;
     uint32_t *rgba_dst = (uint32_t *)decoder->frame_image.data;
-    int total_pixels = field_h * frame_w;
+    int img_pitch = decoder->frame_image.width;  // CVBS_MAX_WIDTH (1135)
 
-    for (int i = 0; i < total_pixels; i++) {
-        uint8_t gray = gray_src[i];
-        // Pack as RGBA (little-endian: 0xAABBGGRR)
-        rgba_dst[i] = 0xFF000000 | ((uint32_t)gray << 16) | ((uint32_t)gray << 8) | gray;
+    for (int py = 0; py < field_h; py++) {
+        int src_row = py * frame_w;
+        int dst_row = py * img_pitch;
+        for (int px = 0; px < frame_w; px++) {
+            uint8_t gray = gray_src[src_row + px];
+            rgba_dst[dst_row + px] = 0xFF000000 |
+                                     ((uint32_t)gray << 16) |
+                                     ((uint32_t)gray << 8)  |
+                                     (uint32_t)gray;
+        }
     }
 
     // Upload to GPU
@@ -1128,17 +1147,14 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
     float draw_x = x + (width - draw_w) / 2;
     float draw_y = y + (height - draw_h) / 2;
 
-    // Draw the video frame - raylib will scale from field resolution to display
+    // Active mode crops to the picture area only.
+    // Full mode draws everything with the contrast offset baked in above.
     Rectangle src;
     if (decoder->frame_view_mode == CVBS_FRAME_VIEW_ACTIVE) {
-        // Crop to the active video area with a small margin around all sides.
-        bool ntsc = (decoder->state.format == CVBS_FORMAT_NTSC);
-        src.x = ntsc ? 180.0f : 230.0f;
-        src.y = ntsc ? 35.0f : 40.0f;
-        src.width = 680.0f;
-        src.height = ntsc ? 460.0f : 550.0f;
+        src = (Rectangle){(float)active_x, (float)active_y,
+                          (float)active_w, (float)active_h};
     } else {
-        src = (Rectangle){0, 0, (float)frame_w, (float)field_h};
+        src = (Rectangle){0.0f, 0.0f, (float)frame_w, (float)field_h};
     }
     Rectangle dst = {draw_x, draw_y, draw_w, draw_h};
     DrawTexturePro(decoder->frame_texture, src, dst, (Vector2){0, 0}, 0, WHITE);
