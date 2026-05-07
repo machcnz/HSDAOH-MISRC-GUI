@@ -30,27 +30,116 @@
 // Track if UI consumed the current frame's click (prevents click-through)
 static bool s_ui_consumed_click = false;
 
-// Simple in-place text editing state (settings panel)
-static bool s_edit_output_base_name = false;
-static bool s_edit_output_path = false; // 080226 - added to make editable
-static bool s_edit_flac_affinity_cpu_list = false;
-static double s_base_name_backspace_repeat_at = 0.0;
-static double s_output_path_backspace_repeat_at = 0.0; // 080226 - added to make editable
-static double s_flac_affinity_backspace_repeat_at = 0.0;
+typedef enum {
+    UI_TEXT_FIELD_NONE = 0,
+    UI_TEXT_FIELD_OUTPUT_BASE_NAME,
+    UI_TEXT_FIELD_OUTPUT_PATH,
+    UI_TEXT_FIELD_FLAC_AFFINITY,
+    UI_TEXT_FIELD_RF_TAG_A,
+    UI_TEXT_FIELD_RF_TAG_B,
+    UI_TEXT_FIELD_AUDIO_TAG_4CH,
+    UI_TEXT_FIELD_AUDIO_TAG_12,
+    UI_TEXT_FIELD_AUDIO_TAG_34,
+    UI_TEXT_FIELD_AUDIO_LABEL_1,
+    UI_TEXT_FIELD_AUDIO_LABEL_2,
+    UI_TEXT_FIELD_AUDIO_LABEL_3,
+    UI_TEXT_FIELD_AUDIO_LABEL_4
+} ui_text_field_t;
 
-// Audio label in-place editing state (settings panel)
-static int s_edit_audio_label_idx = -1; // 0..3, or -1
-static double s_audio_label_backspace_repeat_at = 0.0;
-// Non-mono audio output tag editing state (4ch, 2ch12, 2ch34)
-static int s_edit_audio_output_tag_idx = -1; // 0..2, or -1
-static double s_audio_output_tag_backspace_repeat_at = 0.0;
-// RF tag in-place editing state (settings panel)
-static int s_edit_rf_tag_idx = -1; // 0..1, or -1
-static double s_rf_tag_backspace_repeat_at = 0.0;
+// Unified cursor-based text editing state (settings panel)
+static ui_text_field_t s_active_text_field = UI_TEXT_FIELD_NONE;
+static int s_active_text_cursor = 0;
+static double s_active_text_backspace_repeat_at = 0.0;
+
+// Record-limit popup state (toolbar clock button)
+static bool s_record_limit_window_open = false;
+static bool s_record_limit_armed = false;
+static bool s_record_limit_timecode_edit = false;
+static double s_record_limit_backspace_repeat_at = 0.0;
+static char s_record_limit_timecode[16] = "00:00:00";
+static char s_record_limit_timecode_edit_buffer[16] = "00:00:00";
+static int s_record_limit_cursor_char = 0; // editable char index in HH:MM:SS => 0,1,3,4,6,7
+static uint32_t s_record_limit_seconds = 0;
+static bool s_record_limit_session_seen = false;
+static bool s_record_limit_deadline_active = false;
+static double s_record_limit_deadline_s = 0.0;
+#define RECORD_LIMIT_TIMECODE_SCALE 1.30f
+#define RECORD_LIMIT_TIMECODE_BORDER_X 5
+#define RECORD_LIMIT_TIMECODE_BORDER_Y 3
 
 
 bool gui_ui_click_consumed(void) {
     return s_ui_consumed_click;
+}
+static void format_record_limit_timecode(char *dst, size_t dst_len, uint32_t total_seconds);
+static bool parse_record_limit_timecode(const char *src, uint32_t *out_seconds);
+static bool record_limit_is_digit_char_index(int idx)
+{
+    return (idx == 0 || idx == 1 || idx == 3 || idx == 4 || idx == 6 || idx == 7);
+}
+
+static int record_limit_nearest_digit_cursor_char(int idx)
+{
+    if (idx <= 0) return 0;
+    if (idx <= 1) return idx;
+    if (idx <= 2) return 1;
+    if (idx <= 3) return 3;
+    if (idx <= 4) return 4;
+    if (idx <= 5) return 4;
+    if (idx <= 6) return 6;
+    return 7;
+}
+
+static int record_limit_move_cursor_char(int cursor, int dir)
+{
+    int next = record_limit_nearest_digit_cursor_char(cursor);
+    while (1) {
+        next += dir;
+        if (next < 0) return 0;
+        if (next > 7) return 7;
+        if (record_limit_is_digit_char_index(next)) return next;
+    }
+}
+
+static int record_limit_segment_from_cursor_char(int cursor_char)
+{
+    int cursor = record_limit_nearest_digit_cursor_char(cursor_char);
+    if (cursor <= 1) return 0; // HH
+    if (cursor <= 4) return 1; // MM
+    return 2; // SS
+}
+
+static void record_limit_begin_timecode_edit(void)
+{
+    snprintf(s_record_limit_timecode_edit_buffer, sizeof(s_record_limit_timecode_edit_buffer), "%s", s_record_limit_timecode);
+    if (!parse_record_limit_timecode(s_record_limit_timecode_edit_buffer, NULL)) {
+        format_record_limit_timecode(s_record_limit_timecode_edit_buffer, sizeof(s_record_limit_timecode_edit_buffer), s_record_limit_seconds);
+    }
+    s_record_limit_cursor_char = 0;
+    s_record_limit_backspace_repeat_at = 0.0;
+    s_record_limit_timecode_edit = true;
+}
+
+static void record_limit_set_cursor_from_field_click(void)
+{
+    Clay_ElementData field = Clay_GetElementData(CLAY_ID("RecordLimitTimecodeField"));
+    if (!field.found) {
+        s_record_limit_cursor_char = 0;
+        return;
+    }
+
+    Vector2 mouse = GetMousePosition();
+    float content_left = field.boundingBox.x + (float)RECORD_LIMIT_TIMECODE_BORDER_X;
+    float content_width = field.boundingBox.width - (float)(RECORD_LIMIT_TIMECODE_BORDER_X * 2);
+    if (content_width < 8.0f) content_width = 8.0f;
+    float local_x = mouse.x - content_left;
+    if (local_x < 0.0f) local_x = 0.0f;
+    if (local_x > content_width - 1.0f) local_x = content_width - 1.0f;
+
+    int char_idx = (int)floorf((local_x / content_width) * 8.0f); // HH:MM:SS (8 chars)
+    if (char_idx < 0) char_idx = 0;
+    if (char_idx > 7) char_idx = 7;
+    s_record_limit_cursor_char = record_limit_nearest_digit_cursor_char(char_idx);
 }
 
 static inline void gui_ui_set_click_consumed(void) { // 130226 - added
@@ -118,10 +207,106 @@ static char status_missed_display[16];
 static char status_errors_display[16];
 static char status_rf_buf_display[16];
 static char status_aud_buf_display[16];
+static char record_limit_state_display[96];
+static char record_limit_timecode_display[20];
 
 
 static Clay_String make_string(const char *str) {
     return (Clay_String){ .isStaticallyAllocated = false, .length = (int32_t)strlen(str), .chars = str };
+}
+
+static void format_record_limit_timecode(char *dst, size_t dst_len, uint32_t total_seconds)
+{
+    if (!dst || dst_len == 0) return;
+    uint32_t hh = total_seconds / 3600u;
+    uint32_t mm = (total_seconds / 60u) % 60u;
+    uint32_t ss = total_seconds % 60u;
+    snprintf(dst, dst_len, "%02u:%02u:%02u", hh, mm, ss);
+}
+
+static bool parse_record_limit_timecode(const char *src, uint32_t *out_seconds)
+{
+    if (!src) return false;
+
+    unsigned int hh = 0;
+    unsigned int mm = 0;
+    unsigned int ss = 0;
+    char sep1 = 0;
+    char sep2 = 0;
+
+    int matched = sscanf(src, " %u%1[:/]%u%1[:/]%u ", &hh, &sep1, &mm, &sep2, &ss);
+    if (matched != 5) {
+        return false;
+    }
+    if (mm > 59u || ss > 59u) {
+        return false;
+    }
+
+    uint64_t total = ((uint64_t)hh * 3600u) + ((uint64_t)mm * 60u) + (uint64_t)ss;
+    if (total > (uint64_t)UINT32_MAX) {
+        return false;
+    }
+
+    if (out_seconds) {
+        *out_seconds = (uint32_t)total;
+    }
+    return true;
+}
+
+static void gui_record_limit_runtime_tick(gui_app_t *app)
+{
+    if (!app) return;
+
+    if (!app->is_recording) {
+        s_record_limit_session_seen = false;
+        s_record_limit_deadline_active = false;
+        s_record_limit_deadline_s = 0.0;
+        return;
+    }
+
+    if (!s_record_limit_session_seen) {
+        s_record_limit_session_seen = true;
+        s_record_limit_deadline_active = false;
+        s_record_limit_deadline_s = 0.0;
+    }
+
+    uint32_t parsed_seconds = 0;
+    bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds) && parsed_seconds > 0;
+    if (timecode_valid) {
+        s_record_limit_seconds = parsed_seconds;
+    }
+
+    if (!s_record_limit_armed || !timecode_valid) {
+        s_record_limit_deadline_active = false;
+        s_record_limit_deadline_s = 0.0;
+        return;
+    }
+
+    double now = GetTime();
+    double requested_deadline_s = app->recording_start_time + (double)s_record_limit_seconds;
+
+    if (!s_record_limit_deadline_active) {
+        // If the requested limit is already behind elapsed recording time,
+        // ignore it while recording (only longer extensions are applied live).
+        if (requested_deadline_s > now) {
+            s_record_limit_deadline_active = true;
+            s_record_limit_deadline_s = requested_deadline_s;
+        }
+        return;
+    }
+
+    // Allow only extensions while currently recording.
+    if (requested_deadline_s > s_record_limit_deadline_s) {
+        s_record_limit_deadline_s = requested_deadline_s;
+    }
+
+    if (now >= s_record_limit_deadline_s) {
+        gui_app_set_status(app, "Record time limit reached");
+        gui_app_stop_recording(app);
+        s_record_limit_deadline_active = false;
+        s_record_limit_deadline_s = 0.0;
+        s_record_limit_session_seen = false;
+    }
 }
 
 static Color ui_disabled_color(Color c) {
@@ -179,12 +364,275 @@ static bool gui_ui_flac_affinity_char_allowed(int ch) {
     return ((ch >= '0' && ch <= '9') || ch == ',' || ch == '-' || ch == ' ' || ch == '\t');
 }
 
+static bool gui_ui_is_text_field_active(ui_text_field_t field)
+{
+    return s_active_text_field == field;
+}
+
+static void gui_ui_clear_text_edit(void)
+{
+    s_active_text_field = UI_TEXT_FIELD_NONE;
+    s_active_text_cursor = 0;
+    s_active_text_backspace_repeat_at = 0.0;
+}
+
+static const char *gui_ui_build_text_with_caret(const char *src, int cursor)
+{
+    static char caret_buf[512];
+    if (!src) src = "";
+    size_t len = strlen(src);
+    if (len > sizeof(caret_buf) - 2) len = sizeof(caret_buf) - 2;
+    if (cursor < 0) cursor = 0;
+    if (cursor > (int)len) cursor = (int)len;
+
+    size_t out = 0;
+    for (size_t i = 0; i <= len && out + 1 < sizeof(caret_buf); ++i) {
+        if ((int)i == cursor && out + 1 < sizeof(caret_buf)) {
+            caret_buf[out++] = '|';
+        }
+        if (i < len && out + 1 < sizeof(caret_buf)) {
+            caret_buf[out++] = src[i];
+        }
+    }
+    caret_buf[out] = '\0';
+    return caret_buf;
+}
+
+static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, char **dst, size_t *cap)
+{
+    if (!app || !dst || !cap) return false;
+
+    switch (field) {
+        case UI_TEXT_FIELD_OUTPUT_BASE_NAME:
+            *dst = app->settings.output_base_name;
+            *cap = sizeof(app->settings.output_base_name);
+            return true;
+        case UI_TEXT_FIELD_OUTPUT_PATH:
+            *dst = app->settings.output_path;
+            *cap = sizeof(app->settings.output_path);
+            return true;
+        case UI_TEXT_FIELD_FLAC_AFFINITY:
+            *dst = app->settings.flac_affinity_cpu_list;
+            *cap = sizeof(app->settings.flac_affinity_cpu_list);
+            return true;
+        case UI_TEXT_FIELD_RF_TAG_A:
+            *dst = app->settings.rf_channel_tags[0];
+            *cap = sizeof(app->settings.rf_channel_tags[0]);
+            return true;
+        case UI_TEXT_FIELD_RF_TAG_B:
+            *dst = app->settings.rf_channel_tags[1];
+            *cap = sizeof(app->settings.rf_channel_tags[1]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_TAG_4CH:
+            *dst = app->settings.audio_output_tags[0];
+            *cap = sizeof(app->settings.audio_output_tags[0]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_TAG_12:
+            *dst = app->settings.audio_output_tags[1];
+            *cap = sizeof(app->settings.audio_output_tags[1]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_TAG_34:
+            *dst = app->settings.audio_output_tags[2];
+            *cap = sizeof(app->settings.audio_output_tags[2]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_LABEL_1:
+            *dst = app->settings.audio_1ch_labels[0];
+            *cap = sizeof(app->settings.audio_1ch_labels[0]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_LABEL_2:
+            *dst = app->settings.audio_1ch_labels[1];
+            *cap = sizeof(app->settings.audio_1ch_labels[1]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_LABEL_3:
+            *dst = app->settings.audio_1ch_labels[2];
+            *cap = sizeof(app->settings.audio_1ch_labels[2]);
+            return true;
+        case UI_TEXT_FIELD_AUDIO_LABEL_4:
+            *dst = app->settings.audio_1ch_labels[3];
+            *cap = sizeof(app->settings.audio_1ch_labels[3]);
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
+{
+    if (!app || !app->settings_panel_open) return false;
+    switch (field) {
+        case UI_TEXT_FIELD_OUTPUT_BASE_NAME:
+            return app->settings.auto_names_enabled;
+        case UI_TEXT_FIELD_OUTPUT_PATH:
+            return true;
+        case UI_TEXT_FIELD_FLAC_AFFINITY:
+            return app->settings.use_flac &&
+                   app->settings.flac_affinity_enabled &&
+                   gui_ui_flac_affinity_supported();
+        case UI_TEXT_FIELD_RF_TAG_A:
+        case UI_TEXT_FIELD_RF_TAG_B:
+        case UI_TEXT_FIELD_AUDIO_TAG_4CH:
+        case UI_TEXT_FIELD_AUDIO_TAG_12:
+        case UI_TEXT_FIELD_AUDIO_TAG_34:
+        case UI_TEXT_FIELD_AUDIO_LABEL_1:
+        case UI_TEXT_FIELD_AUDIO_LABEL_2:
+        case UI_TEXT_FIELD_AUDIO_LABEL_3:
+        case UI_TEXT_FIELD_AUDIO_LABEL_4:
+            return app->settings.auto_names_enabled;
+        default:
+            return false;
+    }
+}
+
+static bool gui_ui_text_field_char_allowed(ui_text_field_t field, int ch)
+{
+    if (field == UI_TEXT_FIELD_FLAC_AFFINITY) {
+        return gui_ui_flac_affinity_char_allowed(ch);
+    }
+    if (ch < 32 || ch >= 127) {
+        return false;
+    }
+    if (field == UI_TEXT_FIELD_OUTPUT_PATH) {
+        return !(ch == '*' || ch == '?' || ch == '\"' || ch == '<' || ch == '>' || ch == '|');
+    }
+    return !(ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '\"' || ch == '<' || ch == '>' || ch == '|');
+}
+
+static int gui_ui_text_cursor_from_click(Clay_ElementId element_id, const char *text, float left_padding, float right_padding)
+{
+    size_t len = text ? strlen(text) : 0;
+    Clay_ElementData field = Clay_GetElementData(element_id);
+    if (!field.found || len == 0) return (int)len;
+
+    Vector2 mouse = GetMousePosition();
+    float content_left = field.boundingBox.x + left_padding;
+    float content_width = field.boundingBox.width - (left_padding + right_padding);
+    if (content_width < 1.0f) return (int)len;
+
+    float local_x = mouse.x - content_left;
+    if (local_x < 0.0f) local_x = 0.0f;
+    if (local_x > content_width) local_x = content_width;
+
+    int cursor = (int)floorf((local_x / content_width) * (float)(len + 1));
+    if (cursor < 0) cursor = 0;
+    if (cursor > (int)len) cursor = (int)len;
+    return cursor;
+}
+
+static void gui_ui_begin_text_edit(gui_app_t *app, ui_text_field_t field, Clay_ElementId element_id, float left_padding, float right_padding)
+{
+    char *dst = NULL;
+    size_t cap = 0;
+    if (!gui_ui_text_field_can_edit(app, field) || !gui_ui_text_field_get_buffer(app, field, &dst, &cap)) {
+        gui_ui_clear_text_edit();
+        return;
+    }
+
+    (void)cap;
+    s_active_text_field = field;
+    s_active_text_backspace_repeat_at = 0.0;
+    s_active_text_cursor = gui_ui_text_cursor_from_click(element_id, dst, left_padding, right_padding);
+}
+
+static bool gui_ui_text_backspace(char *dst, int *cursor)
+{
+    if (!dst || !cursor) return false;
+    size_t len = strlen(dst);
+    if (len == 0 || *cursor <= 0) return false;
+    if ((size_t)*cursor > len) *cursor = (int)len;
+    memmove(dst + *cursor - 1, dst + *cursor, len - (size_t)(*cursor) + 1);
+    (*cursor)--;
+    return true;
+}
+
+static bool gui_ui_text_delete(char *dst, int *cursor)
+{
+    if (!dst || !cursor) return false;
+    size_t len = strlen(dst);
+    if ((size_t)*cursor >= len) return false;
+    memmove(dst + *cursor, dst + *cursor + 1, len - (size_t)(*cursor));
+    return true;
+}
+
+static void gui_ui_handle_active_text_edit(gui_app_t *app)
+{
+    if (s_active_text_field == UI_TEXT_FIELD_NONE) return;
+
+    char *dst = NULL;
+    size_t cap = 0;
+    if (!gui_ui_text_field_get_buffer(app, s_active_text_field, &dst, &cap) ||
+        !gui_ui_text_field_can_edit(app, s_active_text_field)) {
+        gui_ui_clear_text_edit();
+        return;
+    }
+
+    size_t len = strlen(dst);
+    if (s_active_text_cursor < 0) s_active_text_cursor = 0;
+    if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
+
+    bool changed = false;
+    int ch = GetCharPressed();
+    while (ch > 0) {
+        if (gui_ui_text_field_char_allowed(s_active_text_field, ch)) {
+            len = strlen(dst);
+            if (len + 1 < cap) {
+                if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
+                memmove(dst + s_active_text_cursor + 1,
+                        dst + s_active_text_cursor,
+                        len - (size_t)s_active_text_cursor + 1);
+                dst[s_active_text_cursor] = (char)ch;
+                s_active_text_cursor++;
+                changed = true;
+            }
+        }
+        ch = GetCharPressed();
+    }
+
+    if (IsKeyPressed(KEY_LEFT) && s_active_text_cursor > 0) {
+        s_active_text_cursor--;
+    }
+    if (IsKeyPressed(KEY_RIGHT)) {
+        len = strlen(dst);
+        if ((size_t)s_active_text_cursor < len) s_active_text_cursor++;
+    }
+    if (IsKeyPressed(KEY_HOME)) {
+        s_active_text_cursor = 0;
+    }
+    if (IsKeyPressed(KEY_END)) {
+        s_active_text_cursor = (int)strlen(dst);
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE)) {
+        s_active_text_backspace_repeat_at = GetTime() + 0.25;
+        if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+    } else if (IsKeyDown(KEY_BACKSPACE)) {
+        double now = GetTime();
+        if (now >= s_active_text_backspace_repeat_at) {
+            s_active_text_backspace_repeat_at = now + 0.05;
+            if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+        }
+    }
+
+    if (IsKeyPressed(KEY_DELETE)) {
+        if (gui_ui_text_delete(dst, &s_active_text_cursor)) changed = true;
+    }
+
+    if (changed) {
+        gui_settings_save(&app->settings);
+    }
+
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+        gui_settings_save(&app->settings);
+        gui_ui_clear_text_edit();
+    }
+}
+
 // Static storage for custom element data (persists during render)
 static CustomLayoutElement s_osc_a_element;
 static CustomLayoutElement s_osc_b_element;
 static CustomLayoutElement s_vu_a_element;
 static CustomLayoutElement s_vu_b_element;
 static CustomLayoutElement s_settings_icon_element;
+static CustomLayoutElement s_record_limit_icon_element;
 
 static int toolbar_title_font_size(void) {
     int width = GetScreenWidth();
@@ -215,8 +663,8 @@ static void render_settings_panel(gui_app_t *app) {
         .layout = {
             .sizing = { CLAY_SIZING_FIT(.min = 760, .max = 1080), CLAY_SIZING_FIT(.min = 520, .max = 780) },
             .layoutDirection = CLAY_TOP_TO_BOTTOM,
-            .padding = { 14, 14, 14, 14 },
-            .childGap = 10
+            .padding = { 16, 16, 16, 16 },
+            .childGap = 12
         },
         .floating = {
             .attachTo = CLAY_ATTACH_TO_ROOT,
@@ -292,9 +740,8 @@ static void render_settings_panel(gui_app_t *app) {
 
             CLAY(CLAY_ID("OutputBaseNameField"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(base_box_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                 const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
-                // Visual caret indicator when editing.
-                if (s_edit_output_base_name && app->settings.auto_names_enabled) {
-                    snprintf(settings_base_name_display, sizeof(settings_base_name_display), "%s_", base);
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_OUTPUT_BASE_NAME) && app->settings.auto_names_enabled) {
+                    snprintf(settings_base_name_display, sizeof(settings_base_name_display), "%s", gui_ui_build_text_with_caret(base, s_active_text_cursor));
                     CLAY_TEXT(make_string(settings_base_name_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
                 } else {
                     CLAY_TEXT(make_string(base), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
@@ -335,8 +782,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
             .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            if (s_edit_output_path) {
-                snprintf(settings_output_path_display, sizeof(settings_output_path_display), "%s_", app->settings.output_path);
+            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_OUTPUT_PATH)) {
+                snprintf(settings_output_path_display, sizeof(settings_output_path_display), "%s", gui_ui_build_text_with_caret(app->settings.output_path, s_active_text_cursor));
                 CLAY_TEXT(make_string(settings_output_path_display),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             } else {
@@ -410,8 +857,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         Color rf_tag_a_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("RfTagAField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(rf_tag_a_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *rf_tag_a = app->settings.rf_channel_tags[0][0] ? app->settings.rf_channel_tags[0] : "(tag)";
-                            if (s_edit_rf_tag_idx == 0 && app->settings.auto_names_enabled) {
-                                snprintf(settings_rf_tag_a_display, sizeof(settings_rf_tag_a_display), "%s_", rf_tag_a);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_A) && app->settings.auto_names_enabled) {
+                                snprintf(settings_rf_tag_a_display, sizeof(settings_rf_tag_a_display), "%s", gui_ui_build_text_with_caret(rf_tag_a, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_rf_tag_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_a_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(rf_tag_a), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_a_fg) }));
@@ -434,8 +881,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         Color rf_tag_b_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("RfTagBField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(rf_tag_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *rf_tag_b = app->settings.rf_channel_tags[1][0] ? app->settings.rf_channel_tags[1] : "(tag)";
-                            if (s_edit_rf_tag_idx == 1 && app->settings.auto_names_enabled) {
-                                snprintf(settings_rf_tag_b_display, sizeof(settings_rf_tag_b_display), "%s_", rf_tag_b);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_B) && app->settings.auto_names_enabled) {
+                                snprintf(settings_rf_tag_b_display, sizeof(settings_rf_tag_b_display), "%s", gui_ui_build_text_with_caret(rf_tag_b, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_rf_tag_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_b_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(rf_tag_b), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_b_fg) }));
@@ -512,8 +959,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY_TEXT(CLAY_STRING("CPU list:"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_list_fg) }));
                         CLAY(CLAY_ID("FlacAffinityListField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(affinity_list_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *cpu_list = app->settings.flac_affinity_cpu_list[0] ? app->settings.flac_affinity_cpu_list : "10-17";
-                            if (s_edit_flac_affinity_cpu_list && flac_affinity_editable) {
-                                snprintf(settings_flac_affinity_display, sizeof(settings_flac_affinity_display), "%s_", cpu_list);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_FLAC_AFFINITY) && flac_affinity_editable) {
+                                snprintf(settings_flac_affinity_display, sizeof(settings_flac_affinity_display), "%s", gui_ui_build_text_with_caret(cpu_list, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_flac_affinity_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(cpu_list), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
@@ -578,8 +1025,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         Color audio_tag_4ch_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("AudioTag4chField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_4ch_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag4 = app->settings.audio_output_tags[0][0] ? app->settings.audio_output_tags[0] : "(tag)";
-                            if (s_edit_audio_output_tag_idx == 0 && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_4ch_display, sizeof(settings_audio_tag_4ch_display), "%s_", tag4);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_4CH) && app->settings.auto_names_enabled) {
+                                snprintf(settings_audio_tag_4ch_display, sizeof(settings_audio_tag_4ch_display), "%s", gui_ui_build_text_with_caret(tag4, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_audio_tag_4ch_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_4ch_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(tag4), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_4ch_fg) }));
@@ -596,8 +1043,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         Color audio_tag_12_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("AudioTag2ch12Field"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_12_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag12 = app->settings.audio_output_tags[1][0] ? app->settings.audio_output_tags[1] : "(tag)";
-                            if (s_edit_audio_output_tag_idx == 1 && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_12_display, sizeof(settings_audio_tag_12_display), "%s_", tag12);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_12) && app->settings.auto_names_enabled) {
+                                snprintf(settings_audio_tag_12_display, sizeof(settings_audio_tag_12_display), "%s", gui_ui_build_text_with_caret(tag12, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_audio_tag_12_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_12_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(tag12), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_12_fg) }));
@@ -614,8 +1061,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         Color audio_tag_34_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("AudioTag2ch34Field"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_34_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag34 = app->settings.audio_output_tags[2][0] ? app->settings.audio_output_tags[2] : "(tag)";
-                            if (s_edit_audio_output_tag_idx == 2 && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_34_display, sizeof(settings_audio_tag_34_display), "%s_", tag34);
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_34) && app->settings.auto_names_enabled) {
+                                snprintf(settings_audio_tag_34_display, sizeof(settings_audio_tag_34_display), "%s", gui_ui_build_text_with_caret(tag34, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_audio_tag_34_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_34_fg) }));
                             } else {
                                 CLAY_TEXT(make_string(tag34), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_34_fg) }));
@@ -647,8 +1094,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                             Color tag_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                             CLAY(label_id, { .layout = { .sizing = { CLAY_SIZING_FIXED(90), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(tag_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                                 const char *tag = app->settings.audio_1ch_labels[i][0] ? app->settings.audio_1ch_labels[i] : "(tag)";
-                                if (s_edit_audio_label_idx == i && app->settings.auto_names_enabled) {
-                                    snprintf(temp_buf8, sizeof(temp_buf8), "%s_", tag);
+                                if (gui_ui_is_text_field_active((ui_text_field_t)(UI_TEXT_FIELD_AUDIO_LABEL_1 + i)) && app->settings.auto_names_enabled) {
+                                    snprintf(temp_buf8, sizeof(temp_buf8), "%s", gui_ui_build_text_with_caret(tag, s_active_text_cursor));
                                     CLAY_TEXT(make_string(temp_buf8), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
                                 } else {
                                     CLAY_TEXT(make_string(tag), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
@@ -710,8 +1157,210 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
     }
 }
 
+static void render_record_limit_window(gui_app_t *app)
+{
+    if (!s_record_limit_window_open) return;
+
+    uint32_t parsed_seconds = 0;
+    bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds);
+    bool timecode_usable = timecode_valid && parsed_seconds > 0;
+    const char *display_timecode = s_record_limit_timecode_edit ? s_record_limit_timecode_edit_buffer : s_record_limit_timecode;
+    bool display_timecode_valid = parse_record_limit_timecode(display_timecode, NULL);
+    double now = GetTime();
+    record_limit_state_display[0] = '\0';
+
+    if (app->is_recording && s_record_limit_deadline_active) {
+        double remaining_s = s_record_limit_deadline_s - now;
+        if (remaining_s < 0.0) remaining_s = 0.0;
+        uint32_t remaining_ceil = (uint32_t)ceil(remaining_s);
+        char rem_tc[16];
+        format_record_limit_timecode(rem_tc, sizeof(rem_tc), remaining_ceil);
+        snprintf(record_limit_state_display, sizeof(record_limit_state_display), "Remaining: %s", rem_tc);
+    } else if (s_record_limit_armed) {
+        if (timecode_usable) {
+            snprintf(record_limit_state_display, sizeof(record_limit_state_display), "Armed at %s", s_record_limit_timecode);
+        } else {
+            snprintf(record_limit_state_display, sizeof(record_limit_state_display), "Armed: invalid timecode");
+        }
+    } else {
+        snprintf(record_limit_state_display, sizeof(record_limit_state_display), "Disarmed");
+    }
+
+    CLAY(CLAY_ID("RecordLimitBackdrop"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP }
+        },
+        .backgroundColor = (Clay_Color){0, 0, 0, 140}
+    }) {}
+
+    CLAY(CLAY_ID("RecordLimitWindow"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIT(.min = 420, .max = 420), CLAY_SIZING_FIT(.min = 235, .max = 280) },
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .padding = { 16, 16, 16, 16 },
+            .childGap = 12
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_CENTER_CENTER, .parent = CLAY_ATTACH_POINT_CENTER_CENTER }
+        },
+        .backgroundColor = to_clay_color(COLOR_PANEL_BG),
+        .cornerRadius = CLAY_CORNER_RADIUS(8)
+    }) {
+        CLAY(CLAY_ID("RecordLimitHeader"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 8
+            }
+        }) {
+            CLAY_TEXT(CLAY_STRING("Record time limit"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_TITLE, .textColor = to_clay_color(COLOR_TEXT) }));
+
+            CLAY(CLAY_ID("RecordLimitHeaderSpacer"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } }
+            }) {}
+
+            CLAY(CLAY_ID("RecordLimitCloseButton"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(CLAY_STRING("X"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+        }
+
+        CLAY(CLAY_ID("RecordLimitArmRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(34) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 12
+            }
+        }) {
+            CLAY(CLAY_ID("RecordLimitArmToggle"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(96), CLAY_SIZING_FIXED(34) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(s_record_limit_armed ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(s_record_limit_armed ? CLAY_STRING("Disarm") : CLAY_STRING("Arm"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+
+            CLAY_TEXT(make_string(record_limit_state_display),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        CLAY_TEXT(CLAY_STRING("Timecode (HH:MM:SS):"),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+        Color timecode_bg = (Color){25, 25, 30, 255};
+        Color timecode_fg = display_timecode_valid ? COLOR_TEXT : COLOR_CLIP_RED;
+        int record_limit_timecode_font_size = (int)ceilf((float)FONT_SIZE_TITLE * RECORD_LIMIT_TIMECODE_SCALE);
+        Vector2 record_limit_timecode_text_size;
+        if (app->fonts) {
+            record_limit_timecode_text_size = MeasureTextEx(app->fonts[1], "00:00:00", (float)record_limit_timecode_font_size, 0.0f);
+        } else {
+            record_limit_timecode_text_size = (Vector2){
+                (float)record_limit_timecode_font_size * 4.8f,
+                (float)record_limit_timecode_font_size
+            };
+        }
+        int record_limit_timecode_width = (int)ceilf(record_limit_timecode_text_size.x) + (RECORD_LIMIT_TIMECODE_BORDER_X * 2);
+        int record_limit_timecode_height = (int)ceilf(record_limit_timecode_text_size.y) + (RECORD_LIMIT_TIMECODE_BORDER_Y * 2);
+        int record_limit_indicator_height = (int)roundf(4.0f * RECORD_LIMIT_TIMECODE_SCALE);
+        int record_limit_indicator_gap = (int)roundf(8.0f * RECORD_LIMIT_TIMECODE_SCALE);
+        if (record_limit_indicator_height < 1) record_limit_indicator_height = 1;
+        if (record_limit_indicator_gap < 1) record_limit_indicator_gap = 1;
+        int record_limit_segment_width = (record_limit_timecode_width - (record_limit_indicator_gap * 2)) / 3;
+        if (record_limit_segment_width < 1) record_limit_segment_width = 1;
+        CLAY(CLAY_ID("RecordLimitTimecodeCenterRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }
+            }
+        }) {
+            CLAY(CLAY_ID("RecordLimitTimecodeCenterSpacerLeft"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+            }) {}
+
+            CLAY(CLAY_ID("RecordLimitTimecodeBlock"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(record_limit_timecode_width), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    .childGap = 6
+                }
+            }) {
+                CLAY(CLAY_ID("RecordLimitTimecodeField"), {
+                    .layout = {
+                        .sizing = { CLAY_SIZING_FIXED(record_limit_timecode_width), CLAY_SIZING_FIXED(record_limit_timecode_height) },
+                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER },
+                        .padding = { RECORD_LIMIT_TIMECODE_BORDER_X, RECORD_LIMIT_TIMECODE_BORDER_X, RECORD_LIMIT_TIMECODE_BORDER_Y, RECORD_LIMIT_TIMECODE_BORDER_Y }
+                    },
+                    .backgroundColor = to_clay_color(timecode_bg),
+                    .cornerRadius = CLAY_CORNER_RADIUS(4)
+                }) {
+                    if (s_record_limit_timecode_edit) {
+                        snprintf(record_limit_timecode_display, sizeof(record_limit_timecode_display), "%s", s_record_limit_timecode_edit_buffer);
+                        CLAY_TEXT(make_string(record_limit_timecode_display),
+                            CLAY_TEXT_CONFIG({ .fontSize = record_limit_timecode_font_size, .fontId = 1, .textColor = to_clay_color(timecode_fg) }));
+                    } else {
+                        CLAY_TEXT(make_string(display_timecode),
+                            CLAY_TEXT_CONFIG({ .fontSize = record_limit_timecode_font_size, .fontId = 1, .textColor = to_clay_color(timecode_fg) }));
+                    }
+                }
+
+                if (s_record_limit_timecode_edit) {
+                    int active_segment = record_limit_segment_from_cursor_char(s_record_limit_cursor_char);
+                    CLAY(CLAY_ID("RecordLimitSegmentIndicatorRow"), {
+                        .layout = {
+                            .sizing = { CLAY_SIZING_FIXED(record_limit_timecode_width), CLAY_SIZING_FIXED(record_limit_indicator_height) },
+                            .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER },
+                            .childGap = record_limit_indicator_gap
+                        }
+                    }) {
+                        for (int i = 0; i < 3; i++) {
+                            Color segment_color = (i == active_segment) ? COLOR_SYNC_GREEN : ui_disabled_color(COLOR_TEXT_DIM);
+                            CLAY(CLAY_IDI("RecordLimitSegmentIndicator", i), {
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_FIXED(record_limit_segment_width), CLAY_SIZING_FIXED(record_limit_indicator_height) }
+                                },
+                                .backgroundColor = to_clay_color(segment_color),
+                                .cornerRadius = CLAY_CORNER_RADIUS(2)
+                            }) {}
+                        }
+                    }
+                }
+            }
+
+            CLAY(CLAY_ID("RecordLimitTimecodeCenterSpacerRight"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+            }) {}
+        }
+        CLAY_TEXT(CLAY_STRING("Live rule: only longer limits apply while recording."),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+        CLAY_TEXT(CLAY_STRING("Shorter changes are ignored until the next recording."),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+    }
+}
 // Render the toolbar
 static void render_toolbar(gui_app_t *app) {
+    s_settings_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON;
+    s_record_limit_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON;
     CLAY(CLAY_ID("Toolbar"), {
         .layout = {
             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(48) },
@@ -809,6 +1458,57 @@ static void render_toolbar(gui_app_t *app) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
         }
 
+
+        // Record button
+        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
+        if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
+        CLAY(CLAY_ID("RecordButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(record_color),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
+            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
+        }
+        // Record limit button (clock icon)
+        Color limit_button_color = s_record_limit_window_open
+            ? COLOR_BUTTON_ACTIVE
+            : (s_record_limit_armed ? COLOR_SYNC_GREEN : COLOR_BUTTON);
+        CLAY(CLAY_ID("RecordLimitButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(limit_button_color),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY(CLAY_ID("RecordLimitIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_record_limit_icon_element }
+            }) {}
+        }
+
+
+        // Settings button
+        CLAY(CLAY_ID("SettingsButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            // Font-independent settings icon (rendered as a custom Clay element)
+            CLAY(CLAY_ID("SettingsIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_settings_icon_element }
+            }) {}
+        }
+
         // 4 channel horizontal audio meters (compact for toolbar)
         CLAY(CLAY_ID("AudioLevelBars"), {
             .layout = { .sizing = { CLAY_SIZING_FIXED(240), CLAY_SIZING_FIXED(32) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 4, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .padding = { 4, 4, 4, 4 } },
@@ -857,39 +1557,6 @@ static void render_toolbar(gui_app_t *app) {
                     }
                 }
             }
-        }
-
-        // Record button
-        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
-        if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
-        CLAY(CLAY_ID("RecordButton"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(32) },
-                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-            },
-            .backgroundColor = to_clay_color(record_color),
-            .cornerRadius = CLAY_CORNER_RADIUS(4)
-        }) {
-            Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
-            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
-        }
-
-
-        // Settings button
-        CLAY(CLAY_ID("SettingsButton"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
-                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-            },
-            .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
-            .cornerRadius = CLAY_CORNER_RADIUS(4)
-        }) {
-            // Font-independent settings icon (rendered as a custom Clay element)
-            CLAY(CLAY_ID("SettingsIcon"), {
-                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
-                .custom = { .customData = &s_settings_icon_element }
-            }) {}
         }
 
     }
@@ -1609,6 +2276,9 @@ void gui_render_layout(gui_app_t *app) {
     // Settings panel overlay (if open)
     render_settings_panel(app);
 
+    // Record-limit popup overlay (if open)
+    render_record_limit_window(app);
+
     // Device dropdown overlay (if open)
     if (gui_dropdown_is_open(DROPDOWN_DEVICE, 0) && app->device_count > 0) {
         CLAY(CLAY_ID("DeviceDropdownOverlay"), {
@@ -1652,307 +2322,78 @@ void gui_render_layout(gui_app_t *app) {
 void gui_handle_interactions(gui_app_t *app) {
     // Reset click consumed flag at start of each frame
     s_ui_consumed_click = false;
+    gui_record_limit_runtime_tick(app);
+
+    if (s_record_limit_window_open && !s_record_limit_timecode_edit && IsKeyPressed(KEY_ESCAPE)) {
+        s_record_limit_window_open = false;
+    }
 
 
-    // Handle simple text input when editing capture name
-    if (app->settings_panel_open && s_edit_output_base_name) {
-        // If base name editing is active, don't allow audio label edit at same time.
-        s_edit_output_path = false;   // cancel Output-path edit while editing base name
-        s_edit_flac_affinity_cpu_list = false;
-        s_edit_audio_label_idx = -1;
-        s_edit_audio_output_tag_idx = -1;
-        s_edit_rf_tag_idx = -1;
+    if (!app->settings_panel_open || s_record_limit_window_open) {
+        gui_ui_clear_text_edit();
+    } else {
+        gui_ui_handle_active_text_edit(app);
+    }
 
-        // Append printable ASCII chars (avoid locale/undefined behavior with ctype on >255)
+    if (s_record_limit_window_open && s_record_limit_timecode_edit) {
+        gui_ui_clear_text_edit();
+        s_record_limit_cursor_char = record_limit_nearest_digit_cursor_char(s_record_limit_cursor_char);
+
         int ch = GetCharPressed();
         while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
-                size_t len = strlen(app->settings.output_base_name);
-                if (len + 1 < sizeof(app->settings.output_base_name)) {
-                    app->settings.output_base_name[len] = (char)ch;
-                    app->settings.output_base_name[len + 1] = '\0';
-                    gui_settings_save(&app->settings);
+            if (ch >= '0' && ch <= '9') {
+                s_record_limit_timecode_edit_buffer[s_record_limit_cursor_char] = (char)ch;
+                s_record_limit_cursor_char = record_limit_move_cursor_char(s_record_limit_cursor_char, +1);
+            } else if (ch == ':' || ch == '/') {
+                if (s_record_limit_cursor_char <= 1) {
+                    s_record_limit_cursor_char = 3;
+                } else if (s_record_limit_cursor_char <= 4) {
+                    s_record_limit_cursor_char = 6;
                 }
             }
             ch = GetCharPressed();
         }
 
-        // Backspace with repeat
-        if (IsKeyPressed(KEY_BACKSPACE)) {
-            s_base_name_backspace_repeat_at = GetTime() + 0.25; // initial delay
-            size_t len = strlen(app->settings.output_base_name);
-            if (len > 0) {
-                app->settings.output_base_name[len - 1] = '\0';
-                gui_settings_save(&app->settings);
-            }
-        } else if (IsKeyDown(KEY_BACKSPACE)) {
-            double now = GetTime();
-            if (now >= s_base_name_backspace_repeat_at) {
-                s_base_name_backspace_repeat_at = now + 0.05;
-                size_t len = strlen(app->settings.output_base_name);
-                if (len > 0) {
-                    app->settings.output_base_name[len - 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
+        if (IsKeyPressed(KEY_LEFT)) {
+            s_record_limit_cursor_char = record_limit_move_cursor_char(s_record_limit_cursor_char, -1);
         }
-
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-            s_edit_output_base_name = false;
-            gui_settings_save(&app->settings);
+        if (IsKeyPressed(KEY_RIGHT)) {
+            s_record_limit_cursor_char = record_limit_move_cursor_char(s_record_limit_cursor_char, +1);
         }
-    }
-
-        // Handle simple text input when editing output folder path -- MOVED
-        if (app->settings_panel_open && s_edit_output_path) {
-            // Cancel other edits while editing output path
-            s_edit_output_base_name = false;
-            s_edit_flac_affinity_cpu_list = false;
-            s_edit_audio_label_idx = -1;
-            s_edit_audio_output_tag_idx = -1;
-            s_edit_rf_tag_idx = -1;
-
-            int ch = GetCharPressed();
-            while (ch > 0) {
-        // Allow common path characters; block only the usual illegal ones.
-        if (ch >= 32 && ch < 127 &&
-            ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
-
-            size_t len = strlen(app->settings.output_path);
-            if (len + 1 < sizeof(app->settings.output_path)) {
-                app->settings.output_path[len] = (char)ch;
-                app->settings.output_path[len + 1] = '\0';
-                gui_settings_save(&app->settings);
-            }
+        if (IsKeyPressed(KEY_HOME)) {
+            s_record_limit_cursor_char = 0;
         }
-        ch = GetCharPressed();
-    }
-
-    if (IsKeyPressed(KEY_BACKSPACE)) {
-        s_output_path_backspace_repeat_at = GetTime() + 0.25;
-        size_t len = strlen(app->settings.output_path);
-        if (len > 0) {
-            app->settings.output_path[len - 1] = '\0';
-            gui_settings_save(&app->settings);
-        }
-    } else if (IsKeyDown(KEY_BACKSPACE)) {
-        double now = GetTime();
-        if (now >= s_output_path_backspace_repeat_at) {
-            s_output_path_backspace_repeat_at = now + 0.05;
-            size_t len = strlen(app->settings.output_path);
-            if (len > 0) {
-                app->settings.output_path[len - 1] = '\0';
-                gui_settings_save(&app->settings);
-            }
-        }
-    }
-
-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-        s_edit_output_path = false;
-        gui_settings_save(&app->settings);
-    }
-}
-    if (app->settings_panel_open && s_edit_flac_affinity_cpu_list) {
-        bool flac_affinity_editable = app->settings.use_flac &&
-                                      app->settings.flac_affinity_enabled &&
-                                      gui_ui_flac_affinity_supported();
-        s_edit_output_base_name = false;
-        s_edit_output_path = false;
-        s_edit_audio_label_idx = -1;
-        s_edit_audio_output_tag_idx = -1;
-        s_edit_rf_tag_idx = -1;
-
-        if (!flac_affinity_editable) {
-            s_edit_flac_affinity_cpu_list = false;
-        } else {
-            int ch = GetCharPressed();
-            while (ch > 0) {
-                if (gui_ui_flac_affinity_char_allowed(ch)) {
-                    size_t len = strlen(app->settings.flac_affinity_cpu_list);
-                    if (len + 1 < sizeof(app->settings.flac_affinity_cpu_list)) {
-                        app->settings.flac_affinity_cpu_list[len] = (char)ch;
-                        app->settings.flac_affinity_cpu_list[len + 1] = '\0';
-                        gui_settings_save(&app->settings);
-                    }
-                }
-                ch = GetCharPressed();
-            }
-
-            if (IsKeyPressed(KEY_BACKSPACE)) {
-                s_flac_affinity_backspace_repeat_at = GetTime() + 0.25;
-                size_t len = strlen(app->settings.flac_affinity_cpu_list);
-                if (len > 0) {
-                    app->settings.flac_affinity_cpu_list[len - 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            } else if (IsKeyDown(KEY_BACKSPACE)) {
-                double now = GetTime();
-                if (now >= s_flac_affinity_backspace_repeat_at) {
-                    s_flac_affinity_backspace_repeat_at = now + 0.05;
-                    size_t len = strlen(app->settings.flac_affinity_cpu_list);
-                    if (len > 0) {
-                        app->settings.flac_affinity_cpu_list[len - 1] = '\0';
-                        gui_settings_save(&app->settings);
-                    }
-                }
-            }
-
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-                s_edit_flac_affinity_cpu_list = false;
-                gui_settings_save(&app->settings);
-            }
-        }
-    }
-    // Handle text input when editing RF tag
-    if (app->settings_panel_open && s_edit_rf_tag_idx >= 0 && s_edit_rf_tag_idx < 2 && app->settings.auto_names_enabled) {
-        // Cancel other edits
-        s_edit_output_base_name = false;
-        s_edit_output_path = false;
-        s_edit_flac_affinity_cpu_list = false;
-        s_edit_audio_label_idx = -1;
-        s_edit_audio_output_tag_idx = -1;
-
-        int idx = s_edit_rf_tag_idx;
-        char *dst = app->settings.rf_channel_tags[idx];
-        size_t cap = sizeof(app->settings.rf_channel_tags[idx]);
-
-        int ch = GetCharPressed();
-        while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' &&
-                ch != '*' && ch != '?' && ch != 34 && ch != '<' && ch != '>' && ch != '|') {
-                size_t len = strlen(dst);
-                if (len + 1 < cap) {
-                    dst[len] = (char)ch;
-                    dst[len + 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
-            ch = GetCharPressed();
+        if (IsKeyPressed(KEY_END)) {
+            s_record_limit_cursor_char = 7;
         }
 
         if (IsKeyPressed(KEY_BACKSPACE)) {
-            s_rf_tag_backspace_repeat_at = GetTime() + 0.25;
-            size_t len = strlen(dst);
-            if (len > 0) {
-                dst[len - 1] = '\0';
-                gui_settings_save(&app->settings);
-            }
+            s_record_limit_backspace_repeat_at = GetTime() + 0.25;
+            s_record_limit_cursor_char = record_limit_move_cursor_char(s_record_limit_cursor_char, -1);
+            s_record_limit_timecode_edit_buffer[s_record_limit_cursor_char] = '0';
         } else if (IsKeyDown(KEY_BACKSPACE)) {
             double now = GetTime();
-            if (now >= s_rf_tag_backspace_repeat_at) {
-                s_rf_tag_backspace_repeat_at = now + 0.05;
-                size_t len = strlen(dst);
-                if (len > 0) {
-                    dst[len - 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
+            if (now >= s_record_limit_backspace_repeat_at) {
+                s_record_limit_backspace_repeat_at = now + 0.05;
+                s_record_limit_cursor_char = record_limit_move_cursor_char(s_record_limit_cursor_char, -1);
+                s_record_limit_timecode_edit_buffer[s_record_limit_cursor_char] = '0';
             }
         }
-
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-            s_edit_rf_tag_idx = -1;
-            gui_settings_save(&app->settings);
-        }
-    }
-    // Handle text input when editing non-mono audio output tags (4ch, 2ch12, 2ch34)
-    if (app->settings_panel_open && s_edit_audio_output_tag_idx >= 0 && s_edit_audio_output_tag_idx < 3 && app->settings.auto_names_enabled) {
-        // Cancel other edits
-        s_edit_output_base_name = false;
-        s_edit_output_path = false;
-        s_edit_flac_affinity_cpu_list = false;
-        s_edit_audio_label_idx = -1;
-        s_edit_rf_tag_idx = -1;
-
-        int idx = s_edit_audio_output_tag_idx;
-        char *dst = app->settings.audio_output_tags[idx];
-        size_t cap = sizeof(app->settings.audio_output_tags[idx]);
-
-        int ch = GetCharPressed();
-        while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' &&
-                ch != '*' && ch != '?' && ch != 34 && ch != '<' && ch != '>' && ch != '|') {
-                size_t len = strlen(dst);
-                if (len + 1 < cap) {
-                    dst[len] = (char)ch;
-                    dst[len + 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
-            ch = GetCharPressed();
+        if (IsKeyPressed(KEY_DELETE)) {
+            s_record_limit_timecode_edit_buffer[s_record_limit_cursor_char] = '0';
         }
 
-        if (IsKeyPressed(KEY_BACKSPACE)) {
-            s_audio_output_tag_backspace_repeat_at = GetTime() + 0.25;
-            size_t len = strlen(dst);
-            if (len > 0) {
-                dst[len - 1] = '\0';
-                gui_settings_save(&app->settings);
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+            uint32_t parsed = 0;
+            if (parse_record_limit_timecode(s_record_limit_timecode_edit_buffer, &parsed) && parsed > 0) {
+                s_record_limit_seconds = parsed;
+                format_record_limit_timecode(s_record_limit_timecode, sizeof(s_record_limit_timecode), parsed);
+                s_record_limit_timecode_edit = false;
+            } else {
+                gui_app_set_status(app, "Invalid record limit timecode");
             }
-        } else if (IsKeyDown(KEY_BACKSPACE)) {
-            double now = GetTime();
-            if (now >= s_audio_output_tag_backspace_repeat_at) {
-                s_audio_output_tag_backspace_repeat_at = now + 0.05;
-                size_t len = strlen(dst);
-                if (len > 0) {
-                    dst[len - 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
-        }
-
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-            s_edit_audio_output_tag_idx = -1;
-            gui_settings_save(&app->settings);
-        }
-    }
-    // Handle text input when editing audio label
-    if (app->settings_panel_open && s_edit_audio_label_idx >= 0 && s_edit_audio_label_idx < 4 && app->settings.auto_names_enabled) {
-        // Cancel base name edit
-        s_edit_output_base_name = false;
-        s_edit_output_path = false;
-        s_edit_flac_affinity_cpu_list = false;
-        s_edit_audio_output_tag_idx = -1;
-        s_edit_rf_tag_idx = -1;
-
-        int idx = s_edit_audio_label_idx;
-        char *dst = app->settings.audio_1ch_labels[idx];
-        size_t cap = sizeof(app->settings.audio_1ch_labels[idx]);
-
-        int ch = GetCharPressed();
-        while (ch > 0) {
-            if (ch >= 32 && ch < 127 && ch != '/' && ch != '\\' && ch != ':' && ch != '*' && ch != '?' && ch != '"' && ch != '<' && ch != '>' && ch != '|') {
-                size_t len = strlen(dst);
-                if (len + 1 < cap) {
-                    dst[len] = (char)ch;
-                    dst[len + 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
-            ch = GetCharPressed();
-        }
-
-        if (IsKeyPressed(KEY_BACKSPACE)) {
-            s_audio_label_backspace_repeat_at = GetTime() + 0.25;
-            size_t len = strlen(dst);
-            if (len > 0) {
-                dst[len - 1] = '\0';
-                gui_settings_save(&app->settings);
-            }
-        } else if (IsKeyDown(KEY_BACKSPACE)) {
-            double now = GetTime();
-            if (now >= s_audio_label_backspace_repeat_at) {
-                s_audio_label_backspace_repeat_at = now + 0.05;
-                size_t len = strlen(dst);
-                if (len > 0) {
-                    dst[len - 1] = '\0';
-                    gui_settings_save(&app->settings);
-                }
-            }
-        }
-
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
-            s_edit_audio_label_idx = -1;
-            gui_settings_save(&app->settings);
+        } else if (IsKeyPressed(KEY_ESCAPE)) {
+            s_record_limit_timecode_edit = false;
         }
     }
 
@@ -1964,6 +2405,88 @@ void gui_handle_interactions(gui_app_t *app) {
 
     // Handle clicks
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        // Record-limit popup modal interactions (consume before toolbar underneath)
+        if (s_record_limit_window_open) {
+            if (Clay_PointerOver(CLAY_ID("RecordLimitCloseButton"))) {
+                s_record_limit_window_open = false;
+                s_record_limit_timecode_edit = false;
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("RecordLimitArmToggle"))) {
+                if (s_record_limit_armed) {
+                    s_record_limit_armed = false;
+                    s_record_limit_deadline_active = false;
+                    s_record_limit_deadline_s = 0.0;
+                    gui_app_set_status(app, "Record time limit disarmed");
+                } else {
+                    if (s_record_limit_timecode_edit) {
+                        uint32_t staged_seconds = 0;
+                        if (parse_record_limit_timecode(s_record_limit_timecode_edit_buffer, &staged_seconds) && staged_seconds > 0) {
+                            s_record_limit_seconds = staged_seconds;
+                            format_record_limit_timecode(s_record_limit_timecode, sizeof(s_record_limit_timecode), staged_seconds);
+                        }
+                        s_record_limit_timecode_edit = false;
+                    }
+                    uint32_t parsed_seconds = 0;
+                    bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds) && parsed_seconds > 0;
+                    if (!timecode_valid) {
+                        gui_app_set_status(app, "Invalid record limit timecode");
+                    } else {
+                        s_record_limit_seconds = parsed_seconds;
+                        s_record_limit_armed = true;
+                        if (app->is_recording) {
+                            double now = GetTime();
+                            double requested_deadline_s = app->recording_start_time + (double)s_record_limit_seconds;
+                            if (!s_record_limit_deadline_active || requested_deadline_s > s_record_limit_deadline_s) {
+                                if (requested_deadline_s > now) {
+                                    s_record_limit_deadline_active = true;
+                                    s_record_limit_deadline_s = requested_deadline_s;
+                                    gui_app_set_status(app, "Record time limit armed");
+                                } else {
+                                    s_record_limit_deadline_active = false;
+                                    s_record_limit_deadline_s = 0.0;
+                                    gui_app_set_status(app, "Record limit shorter than elapsed; ignored");
+                                }
+                            } else {
+                                gui_app_set_status(app, "Shorter record limit ignored while recording");
+                            }
+                        } else {
+                            gui_app_set_status(app, "Record time limit armed");
+                        }
+                    }
+                }
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("RecordLimitTimecodeField"))) {
+                if (!s_record_limit_timecode_edit) {
+                    record_limit_begin_timecode_edit();
+                }
+                record_limit_set_cursor_from_field_click();
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("RecordLimitWindow"))) {
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("RecordLimitBackdrop"))) {
+                s_record_limit_window_open = false;
+                s_record_limit_timecode_edit = false;
+                gui_ui_set_click_consumed();
+                return;
+            }
+        }
+
+        if (Clay_PointerOver(CLAY_ID("RecordLimitButton"))) {
+            s_record_limit_window_open = !s_record_limit_window_open;
+            if (!s_record_limit_window_open) {
+                s_record_limit_timecode_edit = false;
+            }
+            gui_ui_set_click_consumed();
+            return;
+        }
         // Check connect button
         if (Clay_PointerOver(CLAY_ID("ConnectButton"))) {
             if (app->is_capturing) {
@@ -2016,12 +2539,7 @@ void gui_handle_interactions(gui_app_t *app) {
         // Check settings button
         if (Clay_PointerOver(CLAY_ID("SettingsButton"))) {
             app->settings_panel_open = !app->settings_panel_open;
-            s_edit_output_base_name = false;
-            s_edit_output_path = false;
-            s_edit_flac_affinity_cpu_list = false;
-            s_edit_audio_label_idx = -1;
-            s_edit_audio_output_tag_idx = -1;
-            s_edit_rf_tag_idx = -1;
+            gui_ui_clear_text_edit();
             gui_settings_save(&app->settings);
         }
 
@@ -2040,19 +2558,20 @@ void gui_handle_interactions(gui_app_t *app) {
         if (app->settings_panel_open) {
             if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
                 app->settings_panel_open = false;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_audio_output_tag_idx = -1;
-                s_edit_rf_tag_idx = -1;
+                gui_ui_clear_text_edit();
                 gui_settings_save(&app->settings);
+                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                    gui_ui_clear_text_edit();
+                }
                 return;
             }
 
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureA"))) {
                 app->settings.capture_a = !app->settings.capture_a;
                 gui_settings_save(&app->settings);
+                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                    gui_ui_clear_text_edit();
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
                 app->settings.capture_b = !app->settings.capture_b;
@@ -2060,9 +2579,6 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (Clay_PointerOver(CLAY_ID("ToggleUseFlac"))) {
                 app->settings.use_flac = !app->settings.use_flac;
-                if (!app->settings.use_flac) {
-                    s_edit_flac_affinity_cpu_list = false;
-                }
                 gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ToggleOverwrite"))) {
@@ -2092,10 +2608,10 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("ToggleFlacAffinity"))) {
                 if (gui_ui_flac_affinity_supported() && app->settings.use_flac) {
                     app->settings.flac_affinity_enabled = !app->settings.flac_affinity_enabled;
-                    if (!app->settings.flac_affinity_enabled) {
-                        s_edit_flac_affinity_cpu_list = false;
-                    }
                     gui_settings_save(&app->settings);
+                    if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                        gui_ui_clear_text_edit();
+                    }
                 } else if (!gui_ui_flac_affinity_supported()) {
                     gui_app_set_status(app, "FLAC affinity is Linux-only");
                 }
@@ -2103,19 +2619,8 @@ void gui_handle_interactions(gui_app_t *app) {
             if (app->settings_panel_open &&
                 Clay_PointerOver(CLAY_ID("FlacAffinityListField")) &&
                 !gui_ui_click_consumed()) {
-                bool can_edit_affinity = app->settings.use_flac &&
-                                         app->settings.flac_affinity_enabled &&
-                                         gui_ui_flac_affinity_supported();
-                if (can_edit_affinity) {
-                    s_edit_flac_affinity_cpu_list = true;
-                    s_flac_affinity_backspace_repeat_at = 0.0;
-                    s_edit_output_base_name = false;
-                    s_edit_output_path = false;
-                    s_edit_audio_label_idx = -1;
-                    s_edit_audio_output_tag_idx = -1;
-                    s_edit_rf_tag_idx = -1;
-                    gui_ui_set_click_consumed();
-                }
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_FLAC_AFFINITY, CLAY_ID("FlacAffinityListField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
                 app->settings.enable_resample_a = !app->settings.enable_resample_a;
@@ -2140,45 +2645,19 @@ void gui_handle_interactions(gui_app_t *app) {
                 if (!app->settings.output_base_name[0]) {
                     snprintf(app->settings.output_base_name, sizeof(app->settings.output_base_name), "%s", "capture");
                 }
-                if (!app->settings.auto_names_enabled) {
-                    s_edit_output_base_name = false;
-                    s_edit_output_path = false;
-                    s_edit_flac_affinity_cpu_list = false;
-                    s_edit_audio_label_idx = -1;
-                    s_edit_audio_output_tag_idx = -1;
-                    s_edit_rf_tag_idx = -1;
-                }
                 gui_settings_save(&app->settings);
+                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                    gui_ui_clear_text_edit();
+                }
             }
-//            if (Clay_PointerOver(CLAY_ID("OutputBaseNameField"))) {
-//                s_edit_output_base_name = true;
-//                s_edit_audio_label_idx = -1;
-//                s_base_name_backspace_repeat_at = 0.0;
-//            }
-
-            // Enter editing Capture/Base name only on click
             if (app->settings_panel_open &&
                 Clay_PointerOver(CLAY_ID("OutputBaseNameField")) &&
-                // IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && // 130226 - Changed
                 !gui_ui_click_consumed())
             {
-                s_edit_output_base_name = true;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_audio_output_tag_idx = -1;
-                s_edit_rf_tag_idx = -1;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_OUTPUT_BASE_NAME, CLAY_ID("OutputBaseNameField"), 8.0f, 8.0f);
 
                 gui_ui_set_click_consumed();
             }
-
-
-//            if (Clay_PointerOver(CLAY_ID("OutputPathBox"))) { // 130226 - Enable OUTPUT folder edit
-//            s_edit_output_path = true;
-//            s_edit_output_base_name = false;
-//            s_edit_audio_label_idx = -1;
-//            s_output_path_backspace_repeat_at = 0.0;
-///}
 
             if (Clay_PointerOver(CLAY_ID("AppendTimestampToggle")) && app->settings.auto_names_enabled) {
                 app->settings.append_timestamp_on_capture_start = !app->settings.append_timestamp_on_capture_start;
@@ -2186,19 +2665,11 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_ui_set_click_consumed();
             }
 
-
-            // Enter editing Output folder only on click
             if (app->settings_panel_open &&
                 Clay_PointerOver(CLAY_ID("OutputPathBox")) &&
                 !gui_ui_click_consumed())
             {
-                s_edit_output_path = true;
-                s_edit_output_base_name = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_audio_output_tag_idx = -1;
-                s_edit_rf_tag_idx = -1;
-                s_output_path_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_OUTPUT_PATH, CLAY_ID("OutputPathBox"), 10.0f, 10.0f);
 
                 gui_ui_set_click_consumed();
             }
@@ -2234,54 +2705,24 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("RfTagAField")) && app->settings.auto_names_enabled) {
-                s_edit_rf_tag_idx = 0;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_audio_output_tag_idx = -1;
-                s_rf_tag_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_RF_TAG_A, CLAY_ID("RfTagAField"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
 
             if (Clay_PointerOver(CLAY_ID("AudioTag4chField")) && app->settings.auto_names_enabled) {
-                s_edit_audio_output_tag_idx = 0;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_rf_tag_idx = -1;
-                s_audio_output_tag_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_AUDIO_TAG_4CH, CLAY_ID("AudioTag4chField"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("AudioTag2ch12Field")) && app->settings.auto_names_enabled) {
-                s_edit_audio_output_tag_idx = 1;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_rf_tag_idx = -1;
-                s_audio_output_tag_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_AUDIO_TAG_12, CLAY_ID("AudioTag2ch12Field"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("AudioTag2ch34Field")) && app->settings.auto_names_enabled) {
-                s_edit_audio_output_tag_idx = 2;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_rf_tag_idx = -1;
-                s_audio_output_tag_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_AUDIO_TAG_34, CLAY_ID("AudioTag2ch34Field"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("RfTagBField")) && app->settings.auto_names_enabled) {
-                s_edit_rf_tag_idx = 1;
-                s_edit_output_base_name = false;
-                s_edit_output_path = false;
-                s_edit_flac_affinity_cpu_list = false;
-                s_edit_audio_label_idx = -1;
-                s_edit_audio_output_tag_idx = -1;
-                s_rf_tag_backspace_repeat_at = 0.0;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_RF_TAG_B, CLAY_ID("RfTagBField"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
 
@@ -2304,13 +2745,9 @@ void gui_handle_interactions(gui_app_t *app) {
                     gui_settings_save(&app->settings);
                 }
                 if (Clay_PointerOver(CLAY_IDI("Audio1chLabelField", i)) && app->settings.auto_names_enabled) {
-                    s_edit_audio_label_idx = i;
-                    s_edit_output_base_name = false;
-                    s_edit_output_path = false; //130226 - Added
-                    s_edit_flac_affinity_cpu_list = false;
-                    s_edit_audio_output_tag_idx = -1;
-                    s_edit_rf_tag_idx = -1;
-                    s_audio_label_backspace_repeat_at = 0.0;
+                    ui_text_field_t field = (ui_text_field_t)(UI_TEXT_FIELD_AUDIO_LABEL_1 + i);
+                    gui_ui_begin_text_edit(app, field, CLAY_IDI("Audio1chLabelField", i), 6.0f, 6.0f);
+                    gui_ui_set_click_consumed();
                 }
             }
 
