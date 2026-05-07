@@ -812,7 +812,7 @@ static int fx3_capture_thread(void *ctx) {
             }
             fprintf(stderr, "[FX3] Bulk transfer error on EP 0x%02X: %s (%d)\n",
                     current_ep, libusb_error_name(r), r);
-            atomic_fetch_add(&app->error_count, 1);
+            gui_app_count_system_errors(app, 1);
             continue;
         }
 
@@ -888,6 +888,8 @@ int gui_fx3_start(gui_app_t *app) {
     atomic_store(&app->frame_count, 0);
     atomic_store(&app->missed_frame_count, 0);
     atomic_store(&app->error_count, 0);
+    atomic_store(&app->parser_error_count, 0);
+    atomic_store(&app->system_error_count, 0);
     atomic_store(&app->error_count_a, 0);
     atomic_store(&app->error_count_b, 0);
     atomic_store(&app->clip_count_a_pos, 0);

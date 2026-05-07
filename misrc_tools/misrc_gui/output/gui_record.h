@@ -11,9 +11,16 @@
 #define GUI_RECORD_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Forward declarations
 typedef struct gui_app gui_app_t;
+
+typedef enum {
+    GUI_ERROR_CLASS_NONE = 0,
+    GUI_ERROR_CLASS_SYSTEM = 1,
+    GUI_ERROR_CLASS_PARSER = 2
+} gui_error_class_t;
 
 // Initialize recording subsystem
 void gui_record_init(void);
@@ -44,6 +51,7 @@ void gui_record_stop(gui_app_t *app);
 bool gui_record_is_active(void);
 
 // Append a timestamped capture/record event to the active session log (if any)
-void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message);
+void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message,
+                                  gui_error_class_t error_class, uint32_t error_count);
 
 #endif // GUI_RECORD_H

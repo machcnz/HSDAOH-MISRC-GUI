@@ -728,6 +728,8 @@ int gui_playback_start(gui_app_t *app, const char *file_a, const char *file_b) {
     atomic_store(&app->frame_count, 0);
     atomic_store(&app->missed_frame_count, 0);
     atomic_store(&app->error_count, 0);
+    atomic_store(&app->parser_error_count, 0);
+    atomic_store(&app->system_error_count, 0);
     atomic_store(&app->error_count_a, 0);
     atomic_store(&app->error_count_b, 0);
     atomic_store(&app->clip_count_a_pos, 0);

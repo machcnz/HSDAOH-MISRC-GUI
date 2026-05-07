@@ -438,7 +438,7 @@ static void gui_flac_error_callback(void *user_data, flac_writer_error_t error, 
     writer_ctx_t *wctx = (writer_ctx_t *)user_data;
     if (wctx && wctx->app) {
         gui_app_set_status(wctx->app, message);
-        gui_record_log_capture_event(wctx->app, "ERROR", message);
+        gui_record_log_capture_event(wctx->app, "ERROR", message, GUI_ERROR_CLASS_SYSTEM, 1);
     }
     fprintf(stderr, "FLAC ERROR: %s\n", message);
 }
@@ -507,7 +507,8 @@ static int flac_writer_thread(void *ctx) {
     if (!tmp_i32) {
         fprintf(stderr, "[FLAC] Failed to allocate conversion buffers\n");
         if (wctx && wctx->app) {
-            gui_record_log_capture_event(wctx->app, "ERROR", "FLAC writer failed to allocate conversion buffers");
+            gui_record_log_capture_event(wctx->app, "ERROR", "FLAC writer failed to allocate conversion buffers",
+                                         GUI_ERROR_CLASS_SYSTEM, 1);
         }
         return 0;
     }
@@ -583,7 +584,7 @@ static int flac_writer_thread(void *ctx) {
                         snprintf(msg, sizeof(msg), "FLAC encoder error on channel %c", wctx->channel == 0 ? 'A' : 'B');
                         fprintf(stderr, "%s\n", msg);
                         if (wctx && wctx->app) {
-                            gui_record_log_capture_event(wctx->app, "ERROR", msg);
+                            gui_record_log_capture_event(wctx->app, "ERROR", msg, GUI_ERROR_CLASS_SYSTEM, 1);
                         }
                         flac_encoder_error_logged = true;
                     }
@@ -599,7 +600,7 @@ static int flac_writer_thread(void *ctx) {
                 snprintf(msg, sizeof(msg), "FLAC encoder error on channel %c", wctx->channel == 0 ? 'A' : 'B');
                 fprintf(stderr, "%s\n", msg);
                 if (wctx && wctx->app) {
-                    gui_record_log_capture_event(wctx->app, "ERROR", msg);
+                    gui_record_log_capture_event(wctx->app, "ERROR", msg, GUI_ERROR_CLASS_SYSTEM, 1);
                 }
                 flac_encoder_error_logged = true;
             }
@@ -799,7 +800,8 @@ static bool gui_record_level_is_error(const char *level) {
     return (strcmp(level, "ERROR") == 0 || strcmp(level, "CRITICAL") == 0);
 }
 
-void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message) {
+void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message,
+                                  gui_error_class_t error_class, uint32_t error_count) {
     if (!app || !message || !message[0]) {
         return;
     }
@@ -812,7 +814,12 @@ void gui_record_log_capture_event(gui_app_t *app, const char *level, const char 
     }
 
     if (gui_record_level_is_error(level)) {
-        atomic_fetch_add(&app->error_count, 1);
+        uint32_t increment = (error_count > 0) ? error_count : 1;
+        if (error_class == GUI_ERROR_CLASS_PARSER) {
+            gui_app_count_parser_errors(app, increment);
+        } else if (error_class == GUI_ERROR_CLASS_SYSTEM) {
+            gui_app_count_system_errors(app, increment);
+        }
     }
     if (app == s_recording_app) {
         gui_record_log_write_line(level, clean);
@@ -1403,7 +1410,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_a = flac_writer_create_stream(s_file_a, &config_a);
             if (!s_flac_writer_a) {
                 gui_app_set_status(app, "Failed to create FLAC encoder A");
-                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder A");
+                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder A",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
@@ -1427,7 +1435,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_b = flac_writer_create_stream(s_file_b, &config_b);
             if (!s_flac_writer_b) {
                 gui_app_set_status(app, "Failed to create FLAC encoder B");
-                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder B");
+                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder B",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
                 if (s_file_a) fclose(s_file_a);
@@ -1463,7 +1472,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                                           &s_ctx_a,
                                           THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer A");
-                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer A");
+                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer A",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
                 app->is_recording = false;
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
@@ -1483,7 +1493,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                                           &s_ctx_b,
                                           THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer B");
-                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer B");
+                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer B",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
                 app->is_recording = false;
                 if (started_a) thrd_join(s_writer_thread_a, NULL);
                 proc_set_priority(PROC_PRIORITY_NORMAL);

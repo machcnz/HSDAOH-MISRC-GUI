@@ -2174,7 +2174,7 @@ static void render_status_bar(gui_app_t *app) {
                 }
             //}
 
-            // Total errors
+            // Total errors (single combined counter)
             uint32_t errors = app->is_capturing ? atomic_load(&app->error_count) : 0;
             //if (errors > 0) {
                 snprintf(status_errors_display, sizeof(status_errors_display), "%u", errors);
@@ -2191,7 +2191,7 @@ static void render_status_bar(gui_app_t *app) {
                         .layout = { .sizing = { CLAY_SIZING_FIXED(20), CLAY_SIZING_FIT(0) } }
                     }) {
                         CLAY_TEXT(make_string(status_errors_display),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(COLOR_CLIP_RED) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT) }));
                     }
                 }
             //}

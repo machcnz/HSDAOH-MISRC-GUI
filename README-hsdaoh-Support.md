@@ -2,6 +2,9 @@
 
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
+- 07/05/26  - Error counter behavior update
+            - Restored status-bar counter to a single combined `Errors:` value for users.
+            - Kept internal parser/system event classification for logging and diagnostics.
 
 - 16/02/25  - Fix Windows settings saving and minor path issues. Release portable exe - refer Releases
   

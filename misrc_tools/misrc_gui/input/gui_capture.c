@@ -200,7 +200,7 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
     }
 
     if (gui_message_is_data_damaging(level, buffer)) {
-        gui_record_log_capture_event(app, level_str, buffer);
+        gui_record_log_capture_event(app, level_str, buffer, GUI_ERROR_CLASS_SYSTEM, 1);
     }
     
 #ifdef HSDAOH_UPSTREAM
@@ -220,9 +220,9 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         if (!level_is_error) {
             int n = 0;
             if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
-                atomic_fetch_add(&app->error_count, (unsigned int)n);
+                gui_app_count_parser_errors(app, (uint32_t)n);
             else
-                atomic_fetch_add(&app->error_count, 1);
+                gui_app_count_parser_errors(app, 1);
         }
     } else if (strstr(buffer, "Buffer dropped due to overrun")) {
         atomic_fetch_add(&app->rb_drop_count, 1);
@@ -348,7 +348,8 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
             }
             atomic_store(&app->stream_synced, false);
             if (was_synced) {
-                gui_record_log_capture_event(app, "ERROR", "Lost sync to HDMI input stream");
+                gui_record_log_capture_event(app, "ERROR", "Lost sync to HDMI input stream",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
             }
             s_capture_missed_streak = 0;
             s_capture_missed_burst_reported = false;
@@ -368,7 +369,8 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 !s_capture_missed_burst_reported) {
                 atomic_fetch_add(&app->missed_frame_count, 1);
                 s_capture_missed_burst_reported = true;
-                gui_record_log_capture_event(app, "WARN", "Persistent missed-frame burst detected");
+                gui_record_log_capture_event(app, "WARN", "Persistent missed-frame burst detected",
+                                             GUI_ERROR_CLASS_SYSTEM, 1);
                 gui_capture_request_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
             }
             break;
@@ -453,7 +455,7 @@ void gui_capture_callback(void *data_info_ptr) {
                 snprintf(gap_msg, sizeof(gap_msg),
                          "Capture callback gap detected: %" PRIu64 " ms (dropout stop requested)",
                          elapsed);
-                gui_record_log_capture_event(app, "ERROR", gap_msg);
+                gui_record_log_capture_event(app, "ERROR", gap_msg, GUI_ERROR_CLASS_SYSTEM, 1);
                 gui_capture_request_dropout_stop(app, GUI_DROPOUT_CALLBACK_GAP);
                 s_capture_prev_callback_time_ms = now_ms;
                 return;
@@ -475,7 +477,8 @@ void gui_capture_callback(void *data_info_ptr) {
         capture_handler_reset_audio_sync(&s_capture_handler);
         s_capture_missed_streak = 0;
         s_capture_missed_burst_reported = false;
-        gui_record_log_capture_event(app, "ERROR", "Capture callback reported device_error");
+        gui_record_log_capture_event(app, "ERROR", "Capture callback reported device_error",
+                                     GUI_ERROR_CLASS_SYSTEM, 1);
         gui_capture_request_dropout_stop(app, GUI_DROPOUT_DEVICE_ERROR);
         return;
     }
@@ -516,12 +519,11 @@ void gui_capture_callback(void *data_info_ptr) {
     if (result.error_count > 0 && result.report_errors) {
         char err_msg[128];
         snprintf(err_msg, sizeof(err_msg), "Frame parser error burst: %d errors in callback frame", result.error_count);
-        gui_record_log_capture_event(app, "ERROR", err_msg);
+        gui_record_log_capture_event(app, "ERROR", err_msg, GUI_ERROR_CLASS_PARSER, (uint32_t)result.error_count);
         if (misrc_debug_enabled()) {
             fprintf(stderr, "[CB] %d frame errors, %u frames since last error\n",
                     result.error_count, s_capture_handler.frame_state.frames_since_error);
         }
-        atomic_fetch_add(&app->error_count, (uint32_t)result.error_count);
         if (app->settings.stop_on_dropout) {
             gui_capture_request_dropout_stop(app, GUI_DROPOUT_FRAME_ERROR);
         }
@@ -546,7 +548,8 @@ void gui_capture_callback(void *data_info_ptr) {
             if (misrc_debug_enabled()) {
                 fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
             }
-            gui_record_log_capture_event(app, "WARN", "Dropped RF frame due to ringbuffer backpressure");
+            gui_record_log_capture_event(app, "WARN", "Dropped RF frame due to ringbuffer backpressure",
+                                         GUI_ERROR_CLASS_SYSTEM, 1);
         }
         return;
     }
@@ -1046,6 +1049,8 @@ int gui_app_start_capture(gui_app_t *app) {
     atomic_store(&app->frame_count, 0);
     atomic_store(&app->missed_frame_count, 0);
     atomic_store(&app->error_count, 0);
+    atomic_store(&app->parser_error_count, 0);
+    atomic_store(&app->system_error_count, 0);
     atomic_store(&app->error_count_a, 0);
     atomic_store(&app->error_count_b, 0);
     atomic_store(&app->clip_count_a_pos, 0);
@@ -1330,11 +1335,13 @@ void gui_app_stop_capture(gui_app_t *app) {
     // Print capture summary with backpressure stats
     uint32_t frames = atomic_load(&app->frame_count);
     uint32_t missed = atomic_load(&app->missed_frame_count);
-    uint32_t errors = atomic_load(&app->error_count);
+    uint32_t errors_total = atomic_load(&app->error_count);
+    uint32_t parser_errors = atomic_load(&app->parser_error_count);
+    uint32_t system_errors = atomic_load(&app->system_error_count);
     uint32_t waits = atomic_load(&app->rb_wait_count);
     uint32_t drops = atomic_load(&app->rb_drop_count);
-    fprintf(stderr, "[GUI] Capture stopped: %u frames, %u missed, %u errors, %u waits, %u drops\n",
-            frames, missed, errors, waits, drops);
+    fprintf(stderr, "[GUI] Capture stopped: %u frames, %u missed, %u errors (parser=%u, system=%u), %u waits, %u drops\n",
+            frames, missed, errors_total, parser_errors, system_errors, waits, drops);
 
     // Clear display to show "No Signal"
     gui_app_clear_display(app);

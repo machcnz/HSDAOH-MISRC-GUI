@@ -302,7 +302,9 @@ typedef struct gui_app {
     atomic_uint_fast64_t samples_b;
     atomic_uint_fast32_t frame_count;
     atomic_uint_fast32_t missed_frame_count;  // Missed frames from sync events
-    atomic_uint_fast32_t error_count;
+    atomic_uint_fast32_t error_count;       // Combined total (parser + system events)
+    atomic_uint_fast32_t parser_error_count; // Frame/parser error totals
+    atomic_uint_fast32_t system_error_count; // FLAC/device/sync/system event totals
     atomic_uint_fast32_t error_count_a;     // Per-channel error counts
     atomic_uint_fast32_t error_count_b;
     atomic_uint_fast32_t clip_count_a_pos;  // Positive clipping (sample >= 2047)
@@ -391,6 +393,18 @@ typedef struct gui_app {
     atomic_flag panel_config_lock;
 
 } gui_app_t;
+
+static inline void gui_app_count_parser_errors(gui_app_t *app, uint32_t count) {
+    if (!app || count == 0) return;
+    atomic_fetch_add(&app->parser_error_count, count);
+    atomic_fetch_add(&app->error_count, count);
+}
+
+static inline void gui_app_count_system_errors(gui_app_t *app, uint32_t count) {
+    if (!app || count == 0) return;
+    atomic_fetch_add(&app->system_error_count, count);
+    atomic_fetch_add(&app->error_count, count);
+}
 
 // Application lifecycle
 void gui_app_init(gui_app_t *app);
