@@ -482,6 +482,7 @@ static int flac_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
     size_t len = BUFFER_READ_SIZE * sizeof(int16_t);
     size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
+    bool flac_encoder_error_logged = false;
 
     // Boost thread priority to avoid backpressure when window is minimized
     thrd_set_priority(THRD_PRIORITY_CRITICAL);
@@ -505,6 +506,9 @@ static int flac_writer_thread(void *ctx) {
 
     if (!tmp_i32) {
         fprintf(stderr, "[FLAC] Failed to allocate conversion buffers\n");
+        if (wctx && wctx->app) {
+            gui_record_log_capture_event(wctx->app, "ERROR", "FLAC writer failed to allocate conversion buffers");
+        }
         return 0;
     }
 
@@ -574,8 +578,14 @@ static int flac_writer_thread(void *ctx) {
                     out_n = out_done;
                     convert_i16_to_flac_i32(tmp_i32, tmp_i16, out_n, wctx->flac_bits_per_sample);
                     int result = flac_writer_process(wctx->writer, tmp_i32, (uint32_t)out_n);
-                    if (result < 0) {
-                        fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
+                    if (result < 0 && !flac_encoder_error_logged) {
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "FLAC encoder error on channel %c", wctx->channel == 0 ? 'A' : 'B');
+                        fprintf(stderr, "%s\n", msg);
+                        if (wctx && wctx->app) {
+                            gui_record_log_capture_event(wctx->app, "ERROR", msg);
+                        }
+                        flac_encoder_error_logged = true;
                     }
                 }
             }
@@ -584,8 +594,14 @@ static int flac_writer_thread(void *ctx) {
         {
             convert_i16_to_flac_i32(tmp_i32, in, BUFFER_READ_SIZE, wctx->flac_bits_per_sample);
             int result = flac_writer_process(wctx->writer, tmp_i32, BUFFER_READ_SIZE);
-            if (result < 0) {
-                fprintf(stderr, "FLAC encoder error on channel %c\n", wctx->channel == 0 ? 'A' : 'B');
+            if (result < 0 && !flac_encoder_error_logged) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "FLAC encoder error on channel %c", wctx->channel == 0 ? 'A' : 'B');
+                fprintf(stderr, "%s\n", msg);
+                if (wctx && wctx->app) {
+                    gui_record_log_capture_event(wctx->app, "ERROR", msg);
+                }
+                flac_encoder_error_logged = true;
             }
         }
 
@@ -1288,8 +1304,10 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             if (s_file_a) fclose(s_file_a);
             if (s_file_b) fclose(s_file_b);
             s_file_a = s_file_b = NULL;
+            s_recording_app = NULL;
             return RECORD_ERROR;
         }
+        gui_record_open_session_log(app, path_a, path_b);
         // Boost process priority before creating FLAC encoders/worker threads.
         proc_set_priority(PROC_PRIORITY_ABOVE);
 
@@ -1385,10 +1403,13 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_a = flac_writer_create_stream(s_file_a, &config_a);
             if (!s_flac_writer_a) {
                 gui_app_set_status(app, "Failed to create FLAC encoder A");
+                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder A");
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
                 s_file_a = s_file_b = NULL;
+                gui_record_close_session_log();
+                s_recording_app = NULL;
                 return RECORD_ERROR;
             }
             s_ctx_a.writer = s_flac_writer_a;
@@ -1406,11 +1427,14 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             s_flac_writer_b = flac_writer_create_stream(s_file_b, &config_b);
             if (!s_flac_writer_b) {
                 gui_app_set_status(app, "Failed to create FLAC encoder B");
+                gui_record_log_capture_event(app, "ERROR", "Failed to create FLAC encoder B");
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
                 s_file_a = s_file_b = NULL;
+                gui_record_close_session_log();
+                s_recording_app = NULL;
                 return RECORD_ERROR;
             }
             s_ctx_b.writer = s_flac_writer_b;
@@ -1439,6 +1463,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                                           &s_ctx_a,
                                           THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer A");
+                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer A");
                 app->is_recording = false;
                 proc_set_priority(PROC_PRIORITY_NORMAL);
                 if (s_flac_writer_a) { flac_writer_abort(s_flac_writer_a); s_flac_writer_a = NULL; }
@@ -1446,6 +1471,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
                 s_file_a = s_file_b = NULL;
+                gui_record_close_session_log();
                 s_recording_app = NULL;
                 return RECORD_ERROR;
             }
@@ -1457,6 +1483,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                                           &s_ctx_b,
                                           THRD_PRIORITY_CRITICAL) != thrd_success) {
                 gui_app_set_status(app, "Failed to start FLAC writer B");
+                gui_record_log_capture_event(app, "ERROR", "Failed to start FLAC writer B");
                 app->is_recording = false;
                 if (started_a) thrd_join(s_writer_thread_a, NULL);
                 proc_set_priority(PROC_PRIORITY_NORMAL);
@@ -1465,6 +1492,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
                 if (s_file_a) fclose(s_file_a);
                 if (s_file_b) fclose(s_file_b);
                 s_file_a = s_file_b = NULL;
+                gui_record_close_session_log();
                 s_recording_app = NULL;
                 return RECORD_ERROR;
             }
@@ -1485,7 +1513,6 @@ static int gui_record_start_confirmed(gui_app_t *app) {
 
         // Start audio output/monitoring (if enabled)
         gui_audio_start(app, &app->buffers);
-        gui_record_open_session_log(app, path_a, path_b);
 
         gui_app_set_status(app, "Recording (FLAC)...");
     } else
@@ -1500,6 +1527,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
             if (s_file_a) fclose(s_file_a);
             if (s_file_b) fclose(s_file_b);
             s_file_a = s_file_b = NULL;
+            s_recording_app = NULL;
             return RECORD_ERROR;
         }
 

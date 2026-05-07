@@ -219,6 +219,27 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                         }
                         break;
                     }
+                    case CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON: {
+                        // Simple clock icon drawn with primitives (no font dependency)
+                        float cx = boundingBox.x + boundingBox.width * 0.5f;
+                        float cy = boundingBox.y + boundingBox.height * 0.5f;
+                        float radius = (boundingBox.width < boundingBox.height ? boundingBox.width : boundingBox.height) * 0.45f;
+                        Color col = COLOR_TEXT;
+
+                        DrawCircleLines((int)roundf(cx), (int)roundf(cy), radius, col);
+                        DrawCircle((int)roundf(cx), (int)roundf(cy), 1.8f, col);
+
+                        // Hour hand (roughly 10 o'clock)
+                        DrawLineEx((Vector2){cx, cy},
+                                   (Vector2){cx - radius * 0.40f, cy - radius * 0.20f},
+                                   2.2f, col);
+
+                        // Minute hand (roughly 2 o'clock)
+                        DrawLineEx((Vector2){cx, cy},
+                                   (Vector2){cx + radius * 0.48f, cy - radius * 0.48f},
+                                   2.0f, col);
+                        break;
+                    }
                     default: break;
                 }
                 break;

@@ -22,7 +22,8 @@ typedef struct vu_meter_state vu_meter_state_t;
 typedef enum {
     CUSTOM_LAYOUT_ELEMENT_TYPE_CHANNEL_PANEL,  // Channel panel area (waveform, FFT, histogram, etc.)
     CUSTOM_LAYOUT_ELEMENT_TYPE_VU_METER,
-    CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON
+    CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON,
+    CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON
 } CustomLayoutElementType;
 
 //-----------------------------------------------------------------------------

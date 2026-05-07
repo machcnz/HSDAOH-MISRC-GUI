@@ -154,6 +154,28 @@ static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level
 #endif
 
 
+static bool gui_message_is_data_damaging(enum hsdaoh_msg_level level, const char *message)
+{
+    if (!message || !message[0]) {
+        return false;
+    }
+
+    if (level == HSDAOH_ERROR || level == HSDAOH_CRITICAL) {
+        return true;
+    }
+
+    if (level != HSDAOH_WARNING) {
+        return false;
+    }
+
+    return strstr(message, "Lost sync to HDMI input stream") != NULL ||
+           strstr(message, "Missed at least one frame") != NULL ||
+           strstr(message, "frame errors") != NULL ||
+           strstr(message, "Buffer dropped due to overrun") != NULL ||
+           strstr(message, "corrupted frame") != NULL ||
+           strstr(message, "corrupted frames") != NULL;
+}
+
 // #ifndef HSDAOH_UPSTREAM
 static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const char *format, ...) {
     gui_app_t *app = (gui_app_t *)ctx;
@@ -177,7 +199,7 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         return;
     }
 
-    if (level == HSDAOH_WARNING || level == HSDAOH_ERROR || level == HSDAOH_CRITICAL) {
+    if (gui_message_is_data_damaging(level, buffer)) {
         gui_record_log_capture_event(app, level_str, buffer);
     }
     
@@ -325,6 +347,9 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 fprintf(stderr, "[CB] Lost sync to HDMI input stream\n");
             }
             atomic_store(&app->stream_synced, false);
+            if (was_synced) {
+                gui_record_log_capture_event(app, "ERROR", "Lost sync to HDMI input stream");
+            }
             s_capture_missed_streak = 0;
             s_capture_missed_burst_reported = false;
             break;
@@ -343,6 +368,7 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 !s_capture_missed_burst_reported) {
                 atomic_fetch_add(&app->missed_frame_count, 1);
                 s_capture_missed_burst_reported = true;
+                gui_record_log_capture_event(app, "WARN", "Persistent missed-frame burst detected");
                 gui_capture_request_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
             }
             break;
@@ -423,6 +449,11 @@ void gui_capture_callback(void *data_info_ptr) {
         }
         if (elapsed > s_capture_gap_resync_threshold_ms) {
             if (app->settings.stop_on_dropout) {
+                char gap_msg[160];
+                snprintf(gap_msg, sizeof(gap_msg),
+                         "Capture callback gap detected: %" PRIu64 " ms (dropout stop requested)",
+                         elapsed);
+                gui_record_log_capture_event(app, "ERROR", gap_msg);
                 gui_capture_request_dropout_stop(app, GUI_DROPOUT_CALLBACK_GAP);
                 s_capture_prev_callback_time_ms = now_ms;
                 return;
