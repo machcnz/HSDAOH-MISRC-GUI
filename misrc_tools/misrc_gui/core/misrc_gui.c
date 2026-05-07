@@ -373,7 +373,7 @@ int main(int argc, char **argv) {
     unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT;
     SetConfigFlags(window_flags);
     // Keep defaults usable while fitting common laptop screens.
-    const int default_window_width = 1420;
+    const int default_window_width = 1425;
     const int default_window_height = 720;
     const int min_window_width = 1040;
     const int min_window_height = 650;

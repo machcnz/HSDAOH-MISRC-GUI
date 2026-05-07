@@ -1459,56 +1459,6 @@ static void render_toolbar(gui_app_t *app) {
         }
 
 
-        // Record button
-        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
-        if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
-        CLAY(CLAY_ID("RecordButton"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(32) },
-                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-            },
-            .backgroundColor = to_clay_color(record_color),
-            .cornerRadius = CLAY_CORNER_RADIUS(4)
-        }) {
-            Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
-            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
-        }
-        // Record limit button (clock icon)
-        Color limit_button_color = s_record_limit_window_open
-            ? COLOR_BUTTON_ACTIVE
-            : (s_record_limit_armed ? COLOR_SYNC_GREEN : COLOR_BUTTON);
-        CLAY(CLAY_ID("RecordLimitButton"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
-                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-            },
-            .backgroundColor = to_clay_color(limit_button_color),
-            .cornerRadius = CLAY_CORNER_RADIUS(4)
-        }) {
-            CLAY(CLAY_ID("RecordLimitIcon"), {
-                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
-                .custom = { .customData = &s_record_limit_icon_element }
-            }) {}
-        }
-
-
-        // Settings button
-        CLAY(CLAY_ID("SettingsButton"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
-                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
-            },
-            .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
-            .cornerRadius = CLAY_CORNER_RADIUS(4)
-        }) {
-            // Font-independent settings icon (rendered as a custom Clay element)
-            CLAY(CLAY_ID("SettingsIcon"), {
-                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
-                .custom = { .customData = &s_settings_icon_element }
-            }) {}
-        }
-
         // 4 channel horizontal audio meters (compact for toolbar)
         CLAY(CLAY_ID("AudioLevelBars"), {
             .layout = { .sizing = { CLAY_SIZING_FIXED(240), CLAY_SIZING_FIXED(32) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 4, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .padding = { 4, 4, 4, 4 } },
@@ -1557,6 +1507,54 @@ static void render_toolbar(gui_app_t *app) {
                     }
                 }
             }
+        }
+        // Record button
+        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
+        if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
+        CLAY(CLAY_ID("RecordButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(record_color),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
+            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
+        }
+        // Record limit button (clock icon)
+        Color limit_button_color = s_record_limit_window_open
+            ? COLOR_BUTTON_ACTIVE
+            : (s_record_limit_armed ? COLOR_SYNC_GREEN : COLOR_BUTTON);
+        CLAY(CLAY_ID("RecordLimitButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(limit_button_color),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY(CLAY_ID("RecordLimitIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_record_limit_icon_element }
+            }) {}
+        }
+
+        // Settings button
+        CLAY(CLAY_ID("SettingsButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(app->settings_panel_open ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            // Font-independent settings icon (rendered as a custom Clay element)
+            CLAY(CLAY_ID("SettingsIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_settings_icon_element }
+            }) {}
         }
 
     }
