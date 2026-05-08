@@ -249,6 +249,7 @@ typedef enum {
     GUI_DROPOUT_ERROR_BURST = 3,
     GUI_DROPOUT_CALLBACK_GAP = 4,
     GUI_DROPOUT_DEVICE_ERROR = 5,
+    GUI_DROPOUT_BACKPRESSURE = 6,
 } gui_dropout_reason_t;
 
 // Main application state

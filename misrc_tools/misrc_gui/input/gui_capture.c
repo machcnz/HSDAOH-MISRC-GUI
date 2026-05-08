@@ -255,6 +255,7 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
 static int s_callback_count = 0;
 static uint32_t s_capture_last_wait_count = 0;
 static uint32_t s_capture_last_drop_count = 0;
+static uint32_t s_capture_last_logged_drop_total = 0;
 static uint32_t s_capture_missed_streak = 0;
 static bool s_capture_missed_burst_reported = false;
 static uint64_t s_capture_prev_callback_time_ms = 0;
@@ -543,13 +544,22 @@ void gui_capture_callback(void *data_info_ptr) {
     buf_out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, result.stream0_bytes, &s_capture_rf_write_policy);
     gui_capture_update_backpressure_counters(app);
     if (!buf_out) {
-        // Buffer full after waiting - drop frame (policy allows this)
-        if (atomic_load(&app->rb_drop_count) <= 5) {
-            if (misrc_debug_enabled()) {
-                fprintf(stderr, "[CB] Dropped frame due to ringbuffer backpressure\n");
-            }
-            gui_record_log_capture_event(app, "WARN", "Dropped RF frame due to ringbuffer backpressure",
-                                         GUI_ERROR_CLASS_SYSTEM, 1);
+        uint32_t total_drops = atomic_load(&app->rb_drop_count);
+        uint32_t delta_drops = (total_drops > s_capture_last_logged_drop_total)
+                                 ? (total_drops - s_capture_last_logged_drop_total)
+                                 : 1;
+        s_capture_last_logged_drop_total = total_drops;
+        uint32_t current_frame = atomic_load(&app->frame_count);
+        char drop_msg[192];
+        snprintf(drop_msg, sizeof(drop_msg),
+                 "Capture RF backpressure drop: +%u (total=%u) frame=%u",
+                 delta_drops, total_drops, current_frame);
+        gui_record_log_capture_event(app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, delta_drops);
+        if (misrc_debug_enabled()) {
+            fprintf(stderr, "[CB] %s\n", drop_msg);
+        }
+        if (app->settings.stop_on_dropout) {
+            gui_capture_request_dropout_stop(app, GUI_DROPOUT_BACKPRESSURE);
         }
         return;
     }
@@ -907,6 +917,23 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, &s_capture_rf_write_policy);
         gui_capture_update_backpressure_counters(app);
         if (!out) {
+            uint32_t total_drops = atomic_load(&app->rb_drop_count);
+            uint32_t delta_drops = (total_drops > s_capture_last_logged_drop_total)
+                                     ? (total_drops - s_capture_last_logged_drop_total)
+                                     : 1;
+            s_capture_last_logged_drop_total = total_drops;
+            uint32_t current_frame = atomic_load(&app->frame_count);
+            char drop_msg[192];
+            snprintf(drop_msg, sizeof(drop_msg),
+                     "Capture RF backpressure drop: +%u (total=%u) frame=%u",
+                     delta_drops, total_drops, current_frame);
+            gui_record_log_capture_event(app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, delta_drops);
+            if (misrc_debug_enabled()) {
+                fprintf(stderr, "[CB] %s\n", drop_msg);
+            }
+            if (app->settings.stop_on_dropout) {
+                gui_capture_request_dropout_stop(app, GUI_DROPOUT_BACKPRESSURE);
+            }
             return;
         }
 
@@ -1072,6 +1099,7 @@ int gui_app_start_capture(gui_app_t *app) {
     app->last_recording_duration_s = 0.0;
     s_capture_last_wait_count = 0;
     s_capture_last_drop_count = 0;
+    s_capture_last_logged_drop_total = 0;
     s_capture_missed_streak = 0;
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
@@ -1326,6 +1354,7 @@ void gui_app_stop_capture(gui_app_t *app) {
     s_capture_missed_streak = 0;
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
+    s_capture_last_logged_drop_total = 0;
 #ifndef HSDAOH_UPSTREAM
     // Capture lifecycle boundary: keep parser teardown/reset work in stop
     // cleanup so reconnects begin from a clean baseline.

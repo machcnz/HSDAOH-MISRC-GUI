@@ -9,6 +9,7 @@
 
 #include "gui_extract.h"
 #include "../core/gui_app.h"
+#include "../output/gui_record.h"
 #include "../visualization/gui_oscilloscope.h"
 #include "../signal/gui_cvbs.h"
 #include "../../common/extract.h"
@@ -17,6 +18,7 @@
 #include "../../common/buffer_manager.h"
 #include "../../common/threading.h"
 #include "../../common/buffer.h"
+#include "../../common/misrc_debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,9 +92,16 @@ static int extraction_thread(void *ctx) {
     size_t clip[2] = {0, 0};
     uint16_t peak[2] = {0, 0};
     uint32_t frame_count = 0;
+    uint32_t last_record_drop_a = 0;
+    uint32_t last_record_drop_b = 0;
     thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
     fprintf(stderr, "[EXTRACT] Continuous extraction thread started\n");
+
+    if (s_extract_app) {
+        last_record_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
+        last_record_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
+    }
 
     while (1) {
         // Check for exit
@@ -182,7 +191,13 @@ static int extraction_thread(void *ctx) {
         // Conditionally write to record buffers via buffer manager
         // Note: we always write raw int16 blocks to BUF_RECORD_A/B.
         // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
-        if (atomic_load(&s_recording_enabled)) {
+        bool recording_enabled = atomic_load(&s_recording_enabled);
+        if (!recording_enabled) {
+            last_record_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
+            last_record_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
+        }
+
+        if (recording_enabled) {
             size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
             bool want_a = s_extract_app->settings.capture_a;
             bool want_b = s_b_present && s_extract_app->settings.capture_b;
@@ -204,6 +219,35 @@ static int extraction_thread(void *ctx) {
             }
 
             if ((want_a && !write_a) || (want_b && !write_b)) {
+                uint32_t total_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
+                uint32_t total_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
+                uint32_t delta_drop_a = (total_drop_a > last_record_drop_a)
+                                          ? (total_drop_a - last_record_drop_a)
+                                          : 0;
+                uint32_t delta_drop_b = (total_drop_b > last_record_drop_b)
+                                          ? (total_drop_b - last_record_drop_b)
+                                          : 0;
+                uint32_t delta_total = delta_drop_a + delta_drop_b;
+                if (delta_total == 0) {
+                    delta_total = 1;
+                }
+                last_record_drop_a = total_drop_a;
+                last_record_drop_b = total_drop_b;
+
+                char drop_msg[256];
+                snprintf(drop_msg, sizeof(drop_msg),
+                         "Record backpressure drop at extract_frame=%u: +%u block(s) (A:+%u B:+%u, totals A=%u B=%u)",
+                         frame_count, delta_total, delta_drop_a, delta_drop_b, total_drop_a, total_drop_b);
+                gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, delta_total);
+                if (misrc_debug_enabled()) {
+                    fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
+                }
+
+                if (s_extract_app->settings.stop_on_dropout &&
+                    !atomic_load(&s_extract_app->dropout_stop_requested)) {
+                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_BACKPRESSURE);
+                    atomic_store(&s_extract_app->dropout_stop_requested, true);
+                }
                 if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
                 if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
                 if (atomic_load(&do_exit)) goto exit_thread;

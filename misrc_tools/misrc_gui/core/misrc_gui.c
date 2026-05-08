@@ -120,6 +120,8 @@ static const char *gui_dropout_reason_status(gui_dropout_reason_t reason) {
             return "Capture stopped: dropout (callback gap)";
         case GUI_DROPOUT_DEVICE_ERROR:
             return "Capture stopped: dropout (device error)";
+        case GUI_DROPOUT_BACKPRESSURE:
+            return "Capture stopped: dropout (backpressure drops)";
         case GUI_DROPOUT_NONE:
         default:
             return "Capture stopped: dropout detected";
