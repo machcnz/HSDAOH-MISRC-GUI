@@ -11,6 +11,7 @@
 #define GUI_RECORD_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // Forward declarations
@@ -53,5 +54,19 @@ bool gui_record_is_active(void);
 // Append a timestamped capture/record event to the active session log (if any)
 void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message,
                                   gui_error_class_t error_class, uint32_t error_count);
+
+// Spillover support for record-path backpressure.
+// Channel: 0 = A, 1 = B.
+bool gui_record_spill_is_forced(int channel);
+bool gui_record_spill_enqueue(gui_app_t *app, int channel, const int16_t *samples, size_t bytes,
+                              uint32_t frame_index, char *error_msg, size_t error_msg_size);
+
+// Proactive low-disk guard for active recording paths.
+// Returns true when free space drops below threshold and capture should be stopped safely.
+bool gui_record_check_disk_space_guard(gui_app_t *app, uint32_t frame_index,
+                                       char *status_msg, size_t status_msg_size);
+// Query currently available free bytes for app->settings.output_path.
+// Returns false when output_path is unset or the filesystem query fails.
+bool gui_record_get_output_free_space_bytes(const gui_app_t *app, uint64_t *free_bytes_out);
 
 #endif // GUI_RECORD_H

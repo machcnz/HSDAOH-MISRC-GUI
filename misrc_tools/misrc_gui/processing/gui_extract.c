@@ -30,7 +30,6 @@ extern atomic_int do_exit;
 
 // Buffer sizes
 #define BUFFER_READ_SIZE 65536
-#define BUFFER_RECORD_SIZE ((size_t)256 * 1024 * 1024)  // 256MB per channel
 
 // Extraction buffers (page-aligned for SSE/AVX)
 static int16_t *s_buf_a = NULL;
@@ -92,16 +91,9 @@ static int extraction_thread(void *ctx) {
     size_t clip[2] = {0, 0};
     uint16_t peak[2] = {0, 0};
     uint32_t frame_count = 0;
-    uint32_t last_record_drop_a = 0;
-    uint32_t last_record_drop_b = 0;
     thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
     fprintf(stderr, "[EXTRACT] Continuous extraction thread started\n");
-
-    if (s_extract_app) {
-        last_record_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
-        last_record_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
-    }
 
     while (1) {
         // Check for exit
@@ -110,6 +102,8 @@ static int extraction_thread(void *ctx) {
         }
         const int16_t *mapped_a = NULL;
         const int16_t *mapped_b = NULL;
+        bool recording_enabled = false;
+        uint32_t ui_stride = 1;
 
         // Try to read from capture ringbuffer via buffer manager
         void *buf = bufmgr_read_begin(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size, 20);
@@ -139,13 +133,47 @@ static int extraction_thread(void *ctx) {
 
         // Mark capture buffer as consumed via buffer manager
         bufmgr_read_end(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size);
+        frame_count++;
+        recording_enabled = atomic_load(&s_recording_enabled);
+
+        if (recording_enabled) {
+            bool record_a = s_extract_app->settings.capture_a;
+            bool record_b = s_b_present && s_extract_app->settings.capture_b;
+            unsigned int max_fill_pct = 0;
+            if (record_a) {
+                size_t cap_a = s_extract_app->buffers.buffers[BUF_RECORD_A].buffer_size;
+                if (cap_a > 0) {
+                    size_t fill_a = bufmgr_fill_level(&s_extract_app->buffers, BUF_RECORD_A);
+                    unsigned int pct_a = (unsigned int)((fill_a * 100) / cap_a);
+                    if (pct_a > max_fill_pct) max_fill_pct = pct_a;
+                }
+            }
+            if (record_b) {
+                size_t cap_b = s_extract_app->buffers.buffers[BUF_RECORD_B].buffer_size;
+                if (cap_b > 0) {
+                    size_t fill_b = bufmgr_fill_level(&s_extract_app->buffers, BUF_RECORD_B);
+                    unsigned int pct_b = (unsigned int)((fill_b * 100) / cap_b);
+                    if (pct_b > max_fill_pct) max_fill_pct = pct_b;
+                }
+            }
+
+            if (max_fill_pct >= 85) {
+                ui_stride = 8;
+            } else if (max_fill_pct >= 70) {
+                ui_stride = 4;
+            } else if (max_fill_pct >= 50) {
+                ui_stride = 2;
+            } else {
+                ui_stride = 1;
+            }
+        }
 
         // Signal that space is now available (buffer manager handles events internally)
 
         // Write extracted samples to display buffer (lossy - OK to drop for display)
         // Display thread handles CVBS decode + oscilloscope processing
         // Frame layout: [samples_a: BUFFER_READ_SIZE * 2 bytes] [samples_b: BUFFER_READ_SIZE * 2 bytes]
-        {
+        if ((frame_count % ui_stride) == 0) {
             size_t display_frame_size = BUFFER_READ_SIZE * sizeof(int16_t) * 2;
             uint8_t *display_buf = bufmgr_write_begin(&s_extract_app->buffers, BUF_DISPLAY,
                                                     display_frame_size, NULL);
@@ -166,10 +194,11 @@ static int extraction_thread(void *ctx) {
             // If display buffer full, frame is silently dropped (lossy buffer policy)
         }
 
-
-        // Stats are cheap - always update them
-        //gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
-        gui_extract_update_stats(s_extract_app, mapped_a, mapped_b, BUFFER_READ_SIZE);
+        // Update expensive UI stats at the same dynamic stride used for display.
+        if ((frame_count % ui_stride) == 0) {
+            //gui_extract_update_stats(s_extract_app, s_buf_a, s_buf_b, BUFFER_READ_SIZE);
+            gui_extract_update_stats(s_extract_app, mapped_a, mapped_b, BUFFER_READ_SIZE);
+        }
 
 
         // Sample counters always updated (cheap atomic ops)
@@ -180,7 +209,6 @@ static int extraction_thread(void *ctx) {
         }
 
         // Periodic buffer stats logging
-        frame_count++;
         if (frame_count % BUFMGR_LOG_INTERVAL == 0) {
             bufmgr_log_periodic(&s_extract_app->buffers);
         }
@@ -191,24 +219,48 @@ static int extraction_thread(void *ctx) {
         // Conditionally write to record buffers via buffer manager
         // Note: we always write raw int16 blocks to BUF_RECORD_A/B.
         // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
-        bool recording_enabled = atomic_load(&s_recording_enabled);
-        if (!recording_enabled) {
-            last_record_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
-            last_record_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
-        }
 
         if (recording_enabled) {
+            char disk_guard_msg[640] = {0};
+            if (gui_record_check_disk_space_guard(s_extract_app, frame_count,
+                                                  disk_guard_msg, sizeof(disk_guard_msg))) {
+                atomic_store(&s_recording_enabled, false);
+                if (!atomic_load(&s_extract_app->dropout_stop_requested)) {
+                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_DISK_SPACE);
+                    atomic_store(&s_extract_app->dropout_stop_requested, true);
+                }
+                if (misrc_debug_enabled() && disk_guard_msg[0]) {
+                    fprintf(stderr, "[EXTRACT] %s", disk_guard_msg);
+                    fputc('\n', stderr);
+                }
+                continue;
+            }
             size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
             bool want_a = s_extract_app->settings.capture_a;
             bool want_b = s_b_present && s_extract_app->settings.capture_b;
             int16_t *write_a = NULL;
             int16_t *write_b = NULL;
+            bool drop_a = false;
+            bool drop_b = false;
+            char spill_error_a[256] = {0};
+            char spill_error_b[256] = {0};
 
             if (want_a) {
                 write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
                                                         BUF_RECORD_A,
                                                         sample_bytes,
                                                         &s_record_write_policy);
+                if (!write_a) {
+                    if (gui_record_spill_enqueue(s_extract_app, 0, mapped_a, sample_bytes,
+                                                 frame_count, spill_error_a, sizeof(spill_error_a))) {
+                        uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
+                        if (drops_now > 0) {
+                            atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops, 1);
+                        }
+                    } else {
+                        drop_a = true;
+                    }
+                }
             }
 
             if (want_b) {
@@ -216,52 +268,71 @@ static int extraction_thread(void *ctx) {
                                                         BUF_RECORD_B,
                                                         sample_bytes,
                                                         &s_record_write_policy);
-            }
-
-            if ((want_a && !write_a) || (want_b && !write_b)) {
-                uint32_t total_drop_a = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
-                uint32_t total_drop_b = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
-                uint32_t delta_drop_a = (total_drop_a > last_record_drop_a)
-                                          ? (total_drop_a - last_record_drop_a)
-                                          : 0;
-                uint32_t delta_drop_b = (total_drop_b > last_record_drop_b)
-                                          ? (total_drop_b - last_record_drop_b)
-                                          : 0;
-                uint32_t delta_total = delta_drop_a + delta_drop_b;
-                if (delta_total == 0) {
-                    delta_total = 1;
+                if (!write_b) {
+                    if (gui_record_spill_enqueue(s_extract_app, 1, mapped_b, sample_bytes,
+                                                 frame_count, spill_error_b, sizeof(spill_error_b))) {
+                        uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
+                        if (drops_now > 0) {
+                            atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops, 1);
+                        }
+                    } else {
+                        drop_b = true;
+                    }
                 }
-                last_record_drop_a = total_drop_a;
-                last_record_drop_b = total_drop_b;
-
-                char drop_msg[256];
-                snprintf(drop_msg, sizeof(drop_msg),
-                         "Record backpressure drop at extract_frame=%u: +%u block(s) (A:+%u B:+%u, totals A=%u B=%u)",
-                         frame_count, delta_total, delta_drop_a, delta_drop_b, total_drop_a, total_drop_b);
-                gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, delta_total);
-                if (misrc_debug_enabled()) {
-                    fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
-                }
-
-                if (s_extract_app->settings.stop_on_dropout &&
-                    !atomic_load(&s_extract_app->dropout_stop_requested)) {
-                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_BACKPRESSURE);
-                    atomic_store(&s_extract_app->dropout_stop_requested, true);
-                }
-                if (write_a) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, 0);
-                if (write_b) bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, 0);
-                if (atomic_load(&do_exit)) goto exit_thread;
-                continue;
             }
 
             if (want_a) {
-                memcpy(write_a, mapped_a, sample_bytes);
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+                if (write_a) {
+                    memcpy(write_a, mapped_a, sample_bytes);
+                    bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+                } else if (drop_a) {
+                    char drop_msg[320];
+                    if (spill_error_a[0]) {
+                        snprintf(drop_msg, sizeof(drop_msg),
+                                 "Record data loss on channel A at extract_frame=%u (spill enqueue failed: %s)",
+                                 frame_count, spill_error_a);
+                    } else {
+                        snprintf(drop_msg, sizeof(drop_msg),
+                                 "Record data loss on channel A at extract_frame=%u (spill enqueue failed)",
+                                 frame_count);
+                    }
+                    gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
+                    if (misrc_debug_enabled()) {
+                        fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
+                    }
+                }
             }
 
             if (want_b) {
-                memcpy(write_b, mapped_b, sample_bytes);
-                bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
+                if (write_b) {
+                    memcpy(write_b, mapped_b, sample_bytes);
+                    bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
+                } else if (drop_b) {
+                    char drop_msg[320];
+                    if (spill_error_b[0]) {
+                        snprintf(drop_msg, sizeof(drop_msg),
+                                 "Record data loss on channel B at extract_frame=%u (spill enqueue failed: %s)",
+                                 frame_count, spill_error_b);
+                    } else {
+                        snprintf(drop_msg, sizeof(drop_msg),
+                                 "Record data loss on channel B at extract_frame=%u (spill enqueue failed)",
+                                 frame_count);
+                    }
+                    gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
+                    if (misrc_debug_enabled()) {
+                        fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
+                    }
+                }
+            }
+
+            if ((drop_a || drop_b) &&
+                s_extract_app->settings.stop_on_dropout &&
+                !atomic_load(&s_extract_app->dropout_stop_requested)) {
+                atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_BACKPRESSURE);
+                atomic_store(&s_extract_app->dropout_stop_requested, true);
+            }
+            if ((drop_a || drop_b) && atomic_load(&do_exit)) {
+                goto exit_thread;
             }
         }
     }
@@ -392,14 +463,6 @@ int gui_extract_start(gui_app_t *app) {
         fprintf(stderr, "[EXTRACT] Failed to initialize capture buffer\n");
         return -1;
     }
-    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_A) < 0) {
-        fprintf(stderr, "[EXTRACT] Failed to initialize record buffer A\n");
-        return -1;
-    }
-    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_B) < 0) {
-        fprintf(stderr, "[EXTRACT] Failed to initialize record buffer B\n");
-        return -1;
-    }
 
     // Start extraction thread
     if (thrd_create_with_priority(&s_extract_thread,
@@ -461,8 +524,12 @@ void gui_extract_init_record_rbs(gui_app_t *app) {
     // Initialize record buffers via buffer manager (for simulated capture that
     // doesn't go through gui_extract_start)
     if (app) {
-        bufmgr_ensure_init(&app->buffers, BUF_RECORD_A);
-        bufmgr_ensure_init(&app->buffers, BUF_RECORD_B);
+        if (app->settings.capture_a) {
+            bufmgr_ensure_init(&app->buffers, BUF_RECORD_A);
+        }
+        if (s_b_present && app->settings.capture_b) {
+            bufmgr_ensure_init(&app->buffers, BUF_RECORD_B);
+        }
         fprintf(stderr, "[EXTRACT] Record buffers initialized (for simulated capture)\n");
     }
 }

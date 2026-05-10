@@ -11,6 +11,7 @@
 #include "../visualization/gui_panel.h"
 #include "../input/gui_playback.h"
 #include "../output/gui_audio.h"
+#include "../output/gui_record.h"
 #include "../input/gui_capture.h" // Support hsdoah-rp2350 Error & stats
 #include "version.h"
 #include "../visualization/gui_custom_elements.h"
@@ -207,8 +208,15 @@ static char status_missed_display[16];
 static char status_errors_display[16];
 static char status_rf_buf_display[16];
 static char status_aud_buf_display[16];
+static char status_free_space_display[40];
 static char record_limit_state_display[96];
 static char record_limit_timecode_display[20];
+static bool s_status_free_space_valid = false;
+static uint64_t s_status_free_space_cached_bytes = 0;
+static double s_status_free_space_last_update_s = 0.0;
+#define STATUS_FREE_SPACE_REFRESH_INTERVAL_S 1.0
+#define STATUS_FREE_SPACE_LOW_BYTES ((uint64_t)10 * 1000 * 1000 * 1000)
+#define STATUS_FREE_SPACE_WARN_BYTES ((uint64_t)25 * 1000 * 1000 * 1000)
 
 
 static Clay_String make_string(const char *str) {
@@ -251,6 +259,39 @@ static bool parse_record_limit_timecode(const char *src, uint32_t *out_seconds)
         *out_seconds = (uint32_t)total;
     }
     return true;
+}
+
+static void format_status_free_space_label(char *dst, size_t dst_len, uint64_t free_bytes)
+{
+    if (!dst || dst_len == 0) return;
+    if (free_bytes >= 1000000000ULL) {
+        snprintf(dst, dst_len, "Free: %.2f GB", (double)free_bytes / 1000000000.0);
+    } else if (free_bytes >= 1000000ULL) {
+        snprintf(dst, dst_len, "Free: %.2f MB", (double)free_bytes / 1000000.0);
+    } else if (free_bytes >= 1000ULL) {
+        snprintf(dst, dst_len, "Free: %.2f KB", (double)free_bytes / 1000.0);
+    } else {
+        snprintf(dst, dst_len, "Free: %llu B", (unsigned long long)free_bytes);
+    }
+}
+
+static void update_status_free_space(gui_app_t *app)
+{
+    if (!app) return;
+    double now = GetTime();
+    if (s_status_free_space_last_update_s > 0.0 &&
+        (now - s_status_free_space_last_update_s) < STATUS_FREE_SPACE_REFRESH_INTERVAL_S) {
+        return;
+    }
+    s_status_free_space_last_update_s = now;
+
+    uint64_t free_bytes = 0;
+    if (gui_record_get_output_free_space_bytes(app, &free_bytes)) {
+        s_status_free_space_cached_bytes = free_bytes;
+        s_status_free_space_valid = true;
+    } else {
+        s_status_free_space_valid = false;
+    }
 }
 
 static void gui_record_limit_runtime_tick(gui_app_t *app)
@@ -328,6 +369,27 @@ static void format_msps_label(char *dst, size_t dst_len, float khz) {
     // Trim trailing .0
     if (fabs(msps - (double)((int)msps)) < 1e-6) {
         snprintf(dst, dst_len, "%d MSPS", (int)msps);
+    } else {
+        snprintf(dst, dst_len, "%.1f MSPS", msps);
+    }
+}
+static void format_live_msps_label(char *dst, size_t dst_len, uint32_t sample_rate_raw) {
+    if (!dst || dst_len == 0) return;
+    if (sample_rate_raw == 0) {
+        dst[0] = '\0';
+        return;
+    }
+
+    /* Backward compatibility: some paths report kHz-style RF rates (40000=40MSPS),
+     * while others report Hz. Normalize before display. */
+    double hz = (double)sample_rate_raw;
+    if (sample_rate_raw <= 100000U) {
+        hz *= 1000.0;
+    }
+
+    double msps = hz / 1000000.0;
+    if (fabs(msps - round(msps)) < 1e-6) {
+        snprintf(dst, dst_len, "%d MSPS", (int)lround(msps));
     } else {
         snprintf(dst, dst_len, "%.1f MSPS", msps);
     }
@@ -2015,6 +2077,7 @@ static void render_channels_panel(gui_app_t *app) {
 
 // Render status bar
 static void render_status_bar(gui_app_t *app) {
+    update_status_free_space(app);
     CLAY(CLAY_ID("StatusBar"), {
         .layout = {
             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) },
@@ -2053,6 +2116,28 @@ static void render_status_bar(gui_app_t *app) {
                 CLAY_TEXT(make_string(temp_buf1),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
             }
+
+            Color free_space_color = COLOR_TEXT_DIM;
+            if (s_status_free_space_valid) {
+                format_status_free_space_label(status_free_space_display, sizeof(status_free_space_display),
+                                               s_status_free_space_cached_bytes);
+                if (s_status_free_space_cached_bytes < STATUS_FREE_SPACE_LOW_BYTES) {
+                    free_space_color = COLOR_CLIP_RED;
+                } else if (s_status_free_space_cached_bytes < STATUS_FREE_SPACE_WARN_BYTES) {
+                    free_space_color = COLOR_METER_YELLOW;
+                }
+            } else {
+                snprintf(status_free_space_display, sizeof(status_free_space_display), "Free: N/A");
+            }
+
+            CLAY(CLAY_ID("FreeSpaceStatus"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) }
+                }
+            }) {
+                CLAY_TEXT(make_string(status_free_space_display),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(free_space_color) }));
+            }
         }
 
         // Spacer to push right side to the right
@@ -2089,7 +2174,7 @@ static void render_status_bar(gui_app_t *app) {
             {
                 uint32_t srate = atomic_load(&app->sample_rate);
                 if (srate > 0) {
-                    snprintf(status_sample_rate_display, sizeof(status_sample_rate_display), "%u MSPS", srate / 1000000);
+                    format_live_msps_label(status_sample_rate_display, sizeof(status_sample_rate_display), srate);
                     CLAY(CLAY_ID("SampleRate"), {
                         .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIT(0) } }
                     }) {

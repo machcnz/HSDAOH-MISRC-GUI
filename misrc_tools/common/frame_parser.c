@@ -91,6 +91,18 @@ static int frame_idle_error_tolerance(void)
     }
     return cached;
 }
+
+static unsigned int frame_idle_desync_threshold(unsigned int height)
+{
+    /* Large idle-error bursts are typically validator state desync after
+     * discontinuities, not sustained payload corruption. Use a conservative
+     * threshold tied to frame height (roughly 25% of lines, minimum 64). */
+    unsigned int threshold = height / 4;
+    if (threshold < 64) {
+        threshold = 64;
+    }
+    return threshold;
+}
 /*-----------------------------------------------------------------------------
  * Line Parsing
  *-----------------------------------------------------------------------------*/
@@ -371,9 +383,20 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
                                    idle_error_count == result.error_count &&
                                    idle_tol > 0 &&
                                    idle_error_count <= idle_tol);
+        bool tolerate_mixed_low = (idle_error_count > 0 &&
+                                   crc_error_count > 0 &&
+                                   idle_tol > 0 &&
+                                   crc_tol > 0 &&
+                                   idle_error_count <= idle_tol &&
+                                   crc_error_count <= crc_tol &&
+                                   result.error_count <= (idle_tol + crc_tol));
+        unsigned int idle_desync_threshold = frame_idle_desync_threshold(height);
+        bool idle_desync_burst = (idle_error_count > 0 &&
+                                  (unsigned int)idle_error_count >= idle_desync_threshold &&
+                                  crc_error_count <= crc_tol);
         if (misrc_debug_enabled()) {
             fprintf(stderr,
-                    "[FP] framecounter=%u errors total=%d idle=%d crc=%d idle_tol=%d crc_tol=%d tolerate_idle_only=%s tolerate_crc_only=%s\n",
+                    "[FP] framecounter=%u errors total=%d idle=%d crc=%d idle_tol=%d crc_tol=%d tolerate_idle_only=%s tolerate_crc_only=%s tolerate_mixed_low=%s idle_desync_burst=%s idle_desync_threshold=%u\n",
                     meta->framecounter,
                     result.error_count,
                     idle_error_count,
@@ -381,9 +404,26 @@ frame_process_result_t frame_process(frame_parser_state_t *state,
                     idle_tol,
                     crc_tol,
                     tolerate_idle_only ? "yes" : "no",
-                    tolerate_crc_only ? "yes" : "no");
+                    tolerate_crc_only ? "yes" : "no",
+                    tolerate_mixed_low ? "yes" : "no",
+                    idle_desync_burst ? "yes" : "no",
+                    idle_desync_threshold);
         }
-        if (!tolerate_crc_only && !tolerate_idle_only) {
+
+        if (idle_desync_burst) {
+            /* Re-prime line validators without escalating a one-frame idle
+             * burst to a capture-stop event. Treat this frame as invalid. */
+            frame_crc_init(&state->crc);
+            frame_idle_init(&state->idle);
+            state->line_validation_reprime_frames = 2;
+            state->frames_since_error = 0;
+            result.error_count = 0;
+            result.report_errors = false;
+            result.valid = false;
+            return result;
+        }
+
+        if (!tolerate_crc_only && !tolerate_idle_only && !tolerate_mixed_low) {
             result.report_errors = true;
             state->frames_since_error = 0;
             return result;  /* Frame has non-tolerable errors, don't mark as valid */

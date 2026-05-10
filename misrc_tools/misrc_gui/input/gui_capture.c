@@ -259,6 +259,16 @@ static uint32_t s_capture_last_logged_drop_total = 0;
 static uint32_t s_capture_missed_streak = 0;
 static bool s_capture_missed_burst_reported = false;
 static uint64_t s_capture_prev_callback_time_ms = 0;
+#ifdef HSDAOH_UPSTREAM
+static uint64_t s_diag_last_emit_ms = 0;
+static uint32_t s_diag_last_frame_count = 0;
+static uint32_t s_diag_last_error_count = 0;
+static uint32_t s_diag_last_parser_error_count = 0;
+static uint32_t s_diag_last_system_error_count = 0;
+static uint32_t s_diag_last_missed_count = 0;
+static uint32_t s_diag_last_wait_count = 0;
+static uint32_t s_diag_last_drop_count = 0;
+#endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #define MISRC_THREAD_LOCAL __declspec(thread)
 #else
@@ -269,7 +279,7 @@ static const uint64_t s_capture_gap_resync_threshold_ms = 1000;
 static const uint32_t s_capture_missed_streak_report_threshold = 3;
 static const backpressure_policy_t s_capture_rf_write_policy = {
     // Allow short transient extraction stalls without declaring capture drops.
-    .max_wait_attempts = 24,
+    .max_wait_attempts = 1000,
     .wait_timeout_ms = 1,
     .log_first_wait = true,
     .log_drops = true,
@@ -280,6 +290,25 @@ static const backpressure_policy_t s_capture_audio_write_policy = {
     .log_first_wait = true,
     .log_drops = true,
 };
+
+static inline uint32_t gui_capture_normalize_sample_rate_hz(uint32_t raw_srate)
+{
+    if (raw_srate == 0) return 0;
+
+    /* hsdaoh can report RF sample-rate in kHz (e.g. 40000 for 40 MSPS)
+     * while other paths report Hz (e.g. 40000000). Normalize to Hz. */
+    uint64_t hz = raw_srate;
+    if (raw_srate <= 100000U) {
+        hz = (uint64_t)raw_srate * 1000ULL;
+    }
+
+    /* Reject obviously corrupted values so UI/status does not latch garbage. */
+    if (hz < 1000000ULL || hz > 200000000ULL) {
+        return 0;
+    }
+
+    return (uint32_t)hz;
+}
 
 static inline void gui_capture_update_backpressure_counters(gui_app_t *app)
 {
@@ -315,6 +344,96 @@ static inline void gui_capture_promote_callback_priority_once(void)
         s_capture_callback_thread_priority_set = true;
     }
 }
+#ifdef HSDAOH_UPSTREAM
+static inline void gui_capture_reset_realtime_diag_state(void)
+{
+    s_diag_last_emit_ms = 0;
+    s_diag_last_frame_count = 0;
+    s_diag_last_error_count = 0;
+    s_diag_last_parser_error_count = 0;
+    s_diag_last_system_error_count = 0;
+    s_diag_last_missed_count = 0;
+    s_diag_last_wait_count = 0;
+    s_diag_last_drop_count = 0;
+}
+
+static void gui_capture_emit_realtime_diag(gui_app_t *app, uint64_t now_ms)
+{
+    if (!app) return;
+    if (!app->is_capturing) {
+        gui_capture_reset_realtime_diag_state();
+        return;
+    }
+
+    uint32_t frame_count = atomic_load(&app->frame_count);
+    uint32_t error_count = atomic_load(&app->error_count);
+    uint32_t parser_error_count = atomic_load(&app->parser_error_count);
+    uint32_t system_error_count = atomic_load(&app->system_error_count);
+    uint32_t missed_count = atomic_load(&app->missed_frame_count);
+    uint32_t wait_count = atomic_load(&app->rb_wait_count);
+    uint32_t drop_count = atomic_load(&app->rb_drop_count);
+    uint32_t sample_rate = atomic_load(&app->sample_rate);
+    bool synced = atomic_load(&app->stream_synced);
+    uint64_t last_cb_ms = atomic_load(&app->last_callback_time_ms);
+    uint64_t callback_age_ms = (now_ms >= last_cb_ms) ? (now_ms - last_cb_ms) : 0;
+
+    if (s_diag_last_emit_ms == 0 || now_ms < s_diag_last_emit_ms) {
+        s_diag_last_emit_ms = now_ms;
+        s_diag_last_frame_count = frame_count;
+        s_diag_last_error_count = error_count;
+        s_diag_last_parser_error_count = parser_error_count;
+        s_diag_last_system_error_count = system_error_count;
+        s_diag_last_missed_count = missed_count;
+        s_diag_last_wait_count = wait_count;
+        s_diag_last_drop_count = drop_count;
+        return;
+    }
+
+    uint64_t elapsed_ms = now_ms - s_diag_last_emit_ms;
+    if (elapsed_ms < 1000) {
+        return;
+    }
+
+    uint32_t frame_delta = frame_count - s_diag_last_frame_count;
+    uint32_t error_delta = error_count - s_diag_last_error_count;
+    uint32_t parser_error_delta = parser_error_count - s_diag_last_parser_error_count;
+    uint32_t system_error_delta = system_error_count - s_diag_last_system_error_count;
+    uint32_t missed_delta = missed_count - s_diag_last_missed_count;
+    uint32_t wait_delta = wait_count - s_diag_last_wait_count;
+    uint32_t drop_delta = drop_count - s_diag_last_drop_count;
+    double fps = (elapsed_ms > 0) ? ((double)frame_delta * 1000.0 / (double)elapsed_ms) : 0.0;
+
+    fprintf(stderr,
+            "[DIAG] sync=%s srate=%uHz fps=%.1f frame=+%u err=+%u parser=+%u system=+%u missed=+%u wait=+%u drop=+%u cb_age=%" PRIu64 "ms totals(f=%u,e=%u,p=%u,s=%u,m=%u,w=%u,d=%u)\n",
+            synced ? "OK" : "NO",
+            sample_rate,
+            fps,
+            frame_delta,
+            error_delta,
+            parser_error_delta,
+            system_error_delta,
+            missed_delta,
+            wait_delta,
+            drop_delta,
+            callback_age_ms,
+            frame_count,
+            error_count,
+            parser_error_count,
+            system_error_count,
+            missed_count,
+            wait_count,
+            drop_count);
+
+    s_diag_last_emit_ms = now_ms;
+    s_diag_last_frame_count = frame_count;
+    s_diag_last_error_count = error_count;
+    s_diag_last_parser_error_count = parser_error_count;
+    s_diag_last_system_error_count = system_error_count;
+    s_diag_last_missed_count = missed_count;
+    s_diag_last_wait_count = wait_count;
+    s_diag_last_drop_count = drop_count;
+}
+#endif
 
 void gui_capture_set_audio_capture(bool enabled)
 {
@@ -511,11 +630,6 @@ void gui_capture_callback(void *data_info_ptr) {
 
     atomic_fetch_add(&app->frame_count, 1);
 
-    // Update sample rate from metadata
-    if (meta.stream_info[0].srate > 0) {
-        atomic_store(&app->sample_rate, meta.stream_info[0].srate);
-    }
-
     // Handle errors
     if (result.error_count > 0 && result.report_errors) {
         char err_msg[128];
@@ -534,6 +648,14 @@ void gui_capture_callback(void *data_info_ptr) {
     // Don't process if no payload
     if (!result.valid || result.stream0_bytes == 0) {
         return;
+    }
+
+    // Update sample rate only from valid payload frames.
+    if (meta.stream_info[0].srate > 0) {
+        uint32_t sample_rate_hz = gui_capture_normalize_sample_rate_hz(meta.stream_info[0].srate);
+        if (sample_rate_hz > 0) {
+            atomic_store(&app->sample_rate, sample_rate_hz);
+        }
     }
 
     uint8_t *buf_out = NULL;
@@ -947,7 +1069,10 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         bufmgr_signal_data(&app->buffers, BUF_CAPTURE_RF);
 
         if (data_info->srate > 0) {
-            atomic_store(&app->sample_rate, data_info->srate);
+            uint32_t sample_rate_hz = gui_capture_normalize_sample_rate_hz(data_info->srate);
+            if (sample_rate_hz > 0) {
+                atomic_store(&app->sample_rate, sample_rate_hz);
+            }
         }
 
         atomic_fetch_add(&app->frame_count, 1);
@@ -1499,6 +1624,9 @@ void gui_capture_poll_hsdaoh_status(gui_app_t *app)
     if (!app) return;
 
     uint64_t now = get_time_ms();
+#ifdef HSDAOH_UPSTREAM
+    gui_capture_emit_realtime_diag(app, now);
+#endif
 
     // Poll rate: 2 seconds (non-realtime, as requested)
     if (app->hs_ui_last_poll_ms != 0 && (now - app->hs_ui_last_poll_ms) < 2000) {

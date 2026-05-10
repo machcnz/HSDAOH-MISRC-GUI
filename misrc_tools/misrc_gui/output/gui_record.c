@@ -30,9 +30,14 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
+#include <errno.h>
 #include "version.h"
 
 #if defined(_WIN32) || defined(_WIN64)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <io.h>
 #define access _access
 #define F_OK 0
@@ -47,6 +52,7 @@
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
+#include <sys/statvfs.h>
 #include <sys/utsname.h>
 #endif
 
@@ -166,6 +172,15 @@ static void gui_record_get_os_string(char *dst, size_t dst_len) {
     }
 #endif
 }
+static bool gui_record_get_free_space_bytes(const char *path, uint64_t *free_bytes_out);
+
+bool gui_record_get_output_free_space_bytes(const gui_app_t *app, uint64_t *free_bytes_out) {
+    if (!app || !free_bytes_out || !app->settings.output_path[0]) {
+        return false;
+    }
+    return gui_record_get_free_space_bytes(app->settings.output_path, free_bytes_out);
+}
+
 
 static uint32_t gui_record_get_cpu_core_count(void) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -335,6 +350,317 @@ static uint32_t s_start_rec_a_drop_count = 0;
 static uint32_t s_start_rec_b_wait_count = 0;
 static uint32_t s_start_rec_b_drop_count = 0;
 
+#define GUI_RECORD_SPILL_CHANNELS 2
+#define GUI_RECORD_SPILL_LOG_STEP_BYTES ((uint64_t)256 * 1024 * 1024)
+#define GUI_RECORD_DISK_GUARD_THRESHOLD_BYTES ((uint64_t)10 * 1000 * 1000 * 1000)
+#define GUI_RECORD_DISK_GUARD_CHECK_INTERVAL_MS 1000ULL
+
+static atomic_bool s_disk_guard_tripped = ATOMIC_VAR_INIT(false);
+static atomic_uint_fast64_t s_disk_guard_last_check_ms = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t s_disk_guard_last_free_bytes = ATOMIC_VAR_INIT(0);
+
+typedef struct {
+    FILE *fp;
+    char path[512];
+    atomic_uint_fast64_t write_offset;
+    atomic_uint_fast64_t read_offset;
+    atomic_uint_fast64_t last_backlog_log_mark;
+    atomic_bool forced_mode;
+    atomic_bool opened;
+    atomic_flag io_lock;
+} gui_record_spill_channel_t;
+
+static gui_record_spill_channel_t s_record_spill[GUI_RECORD_SPILL_CHANNELS];
+
+static const char *gui_record_spill_channel_name(int channel) {
+    return (channel == 0) ? "A" : "B";
+}
+
+static void gui_record_spill_lock(gui_record_spill_channel_t *spill) {
+    while (atomic_flag_test_and_set(&spill->io_lock)) {
+        thrd_sleep_ms(0);
+    }
+}
+
+static void gui_record_spill_unlock(gui_record_spill_channel_t *spill) {
+    atomic_flag_clear(&spill->io_lock);
+}
+
+static bool gui_record_spill_valid_channel(int channel) {
+    return (channel >= 0 && channel < GUI_RECORD_SPILL_CHANNELS);
+}
+
+static void gui_record_reset_disk_guard_state(void) {
+    atomic_store(&s_disk_guard_tripped, false);
+    atomic_store(&s_disk_guard_last_check_ms, 0);
+    atomic_store(&s_disk_guard_last_free_bytes, 0);
+}
+
+static bool gui_record_get_free_space_bytes(const char *path, uint64_t *free_bytes_out) {
+    if (!path || !path[0] || !free_bytes_out) {
+        return false;
+    }
+
+#if defined(_WIN32) || defined(_WIN64)
+    ULARGE_INTEGER free_bytes_available;
+    if (!GetDiskFreeSpaceExA(path, &free_bytes_available, NULL, NULL)) {
+        return false;
+    }
+    *free_bytes_out = (uint64_t)free_bytes_available.QuadPart;
+    return true;
+#else
+    struct statvfs fs_stats;
+    if (statvfs(path, &fs_stats) != 0) {
+        return false;
+    }
+    *free_bytes_out = (uint64_t)fs_stats.f_bavail * (uint64_t)fs_stats.f_frsize;
+    return true;
+#endif
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+#define GUI_RECORD_FSEEK(stream, offset, whence) _fseeki64((stream), (__int64)(offset), (whence))
+#else
+#define GUI_RECORD_FSEEK(stream, offset, whence) fseeko((stream), (off_t)(offset), (whence))
+#endif
+
+#if !defined(_WIN32) && !defined(_WIN64)
+static bool gui_record_spill_open_channel_in_dir(const char *base_dir,
+                                                 int channel,
+                                                 FILE **out_fp,
+                                                 char *out_path,
+                                                 size_t out_path_size) {
+    if (!base_dir || !base_dir[0] || !out_fp || !out_path || out_path_size == 0) {
+        return false;
+    }
+
+    char template_path[512];
+    snprintf(template_path, sizeof(template_path), "%s/.misrc_record_spill_%s_XXXXXX",
+             base_dir, gui_record_spill_channel_name(channel));
+
+    int fd = mkstemp(template_path);
+    if (fd < 0) {
+        return false;
+    }
+
+    FILE *fp = fdopen(fd, "w+b");
+    if (!fp) {
+        close(fd);
+        unlink(template_path);
+        return false;
+    }
+
+    (void)setvbuf(fp, NULL, _IOFBF, 1024 * 1024);
+    *out_fp = fp;
+    snprintf(out_path, out_path_size, "%s", template_path);
+    return true;
+}
+#endif
+
+static bool gui_record_spill_open_channel(gui_app_t *app, int channel, char *error_msg, size_t error_msg_size) {
+    if (!gui_record_spill_valid_channel(channel)) {
+        return false;
+    }
+
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    if (atomic_load(&spill->opened)) {
+        return true;
+    }
+
+    FILE *fp = NULL;
+    char path_buf[512] = {0};
+
+#if defined(_WIN32) || defined(_WIN64)
+    fp = tmpfile();
+    if (fp) {
+        snprintf(path_buf, sizeof(path_buf), "%s", "(tmpfile)");
+    }
+    if (fp) {
+        (void)setvbuf(fp, NULL, _IOFBF, 1024 * 1024);
+    }
+#else
+    const char *tmp_dir = getenv("TMPDIR");
+    if (!tmp_dir || !tmp_dir[0]) {
+        tmp_dir = "/tmp";
+    }
+    const char *output_dir = (app && app->settings.output_path[0]) ? app->settings.output_path : NULL;
+    int last_err = 0;
+
+    if (!gui_record_spill_open_channel_in_dir(tmp_dir, channel, &fp, path_buf, sizeof(path_buf))) {
+        last_err = errno;
+    }
+    if (!fp && output_dir && strcmp(output_dir, tmp_dir) != 0) {
+        if (!gui_record_spill_open_channel_in_dir(output_dir, channel, &fp, path_buf, sizeof(path_buf))) {
+            last_err = errno;
+        }
+    }
+    if (!fp && last_err != 0) {
+        errno = last_err;
+    }
+#endif
+
+    if (!fp) {
+        if (error_msg && error_msg_size > 0) {
+            snprintf(error_msg, error_msg_size, "Failed to open spill temp file for channel %s: %s",
+                     gui_record_spill_channel_name(channel), strerror(errno));
+        }
+        return false;
+    }
+
+    spill->fp = fp;
+    snprintf(spill->path, sizeof(spill->path), "%s", path_buf);
+    atomic_store(&spill->write_offset, 0);
+    atomic_store(&spill->read_offset, 0);
+    atomic_store(&spill->last_backlog_log_mark, 0);
+    atomic_store(&spill->opened, true);
+
+    return true;
+}
+
+static void gui_record_spill_close_channel(int channel) {
+    if (!gui_record_spill_valid_channel(channel)) {
+        return;
+    }
+
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    FILE *fp = spill->fp;
+    spill->fp = NULL;
+    if (fp) {
+        fclose(fp);
+    }
+#if !defined(_WIN32) && !defined(_WIN64)
+    if (spill->path[0] != '\0' && strcmp(spill->path, "(tmpfile)") != 0) {
+        unlink(spill->path);
+    }
+#endif
+    spill->path[0] = '\0';
+    atomic_store(&spill->write_offset, 0);
+    atomic_store(&spill->read_offset, 0);
+    atomic_store(&spill->last_backlog_log_mark, 0);
+    atomic_store(&spill->forced_mode, false);
+    atomic_store(&spill->opened, false);
+}
+
+static void gui_record_spill_reset_all(void) {
+    for (int i = 0; i < GUI_RECORD_SPILL_CHANNELS; i++) {
+        atomic_flag_clear(&s_record_spill[i].io_lock);
+        gui_record_spill_close_channel(i);
+    }
+}
+
+static uint64_t gui_record_spill_backlog_bytes_locked(int channel) {
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    uint64_t write_off = atomic_load(&spill->write_offset);
+    uint64_t read_off = atomic_load(&spill->read_offset);
+    return (write_off >= read_off) ? (write_off - read_off) : 0;
+}
+
+static bool gui_record_spill_read_block(int channel, int16_t *dst, size_t bytes) {
+    if (!gui_record_spill_valid_channel(channel) || !dst || bytes == 0) {
+        return false;
+    }
+
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    if (!atomic_load(&spill->opened) || !spill->fp) {
+        return false;
+    }
+
+    uint64_t write_off = atomic_load(&spill->write_offset);
+    uint64_t read_off = atomic_load(&spill->read_offset);
+    if (write_off < read_off || (write_off - read_off) < bytes) {
+        return false;
+    }
+
+    bool ok = false;
+    gui_record_spill_lock(spill);
+    if (GUI_RECORD_FSEEK(spill->fp, read_off, SEEK_SET) == 0) {
+        size_t nread = fread((void *)dst, 1, bytes, spill->fp);
+        if (nread == bytes) {
+            ok = true;
+        } else {
+            clearerr(spill->fp);
+        }
+    }
+    gui_record_spill_unlock(spill);
+
+    if (ok) {
+        atomic_store(&spill->read_offset, read_off + bytes);
+    }
+
+    return ok;
+}
+
+bool gui_record_spill_is_forced(int channel) {
+    if (!gui_record_spill_valid_channel(channel)) {
+        return false;
+    }
+    return atomic_load(&s_record_spill[channel].forced_mode);
+}
+
+bool gui_record_spill_enqueue(gui_app_t *app, int channel, const int16_t *samples, size_t bytes,
+                              uint32_t frame_index, char *error_msg, size_t error_msg_size) {
+    if (!gui_record_spill_valid_channel(channel) || !samples || bytes == 0) {
+        if (error_msg && error_msg_size > 0) {
+            snprintf(error_msg, error_msg_size, "Invalid spill enqueue request");
+        }
+        return false;
+    }
+
+    if (!gui_record_spill_open_channel(app, channel, error_msg, error_msg_size)) {
+        return false;
+    }
+
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    bool first_force = !atomic_exchange(&spill->forced_mode, true);
+    if (first_force && app) {
+        char msg[640];
+        snprintf(msg, sizeof(msg),
+                 "Record buffer backpressure on channel %s at frame=%u. Enabling temp spill file: %s",
+                 gui_record_spill_channel_name(channel), frame_index,
+                 spill->path[0] ? spill->path : "(temp)");
+        gui_record_log_capture_event(app, "WARN", msg, GUI_ERROR_CLASS_NONE, 0);
+    }
+
+    uint64_t write_off = atomic_load(&spill->write_offset);
+    bool ok = false;
+    gui_record_spill_lock(spill);
+    if (GUI_RECORD_FSEEK(spill->fp, write_off, SEEK_SET) == 0) {
+        size_t nwritten = fwrite(samples, 1, bytes, spill->fp);
+        if (nwritten == bytes) {
+            ok = true;
+        } else {
+            clearerr(spill->fp);
+        }
+    }
+    gui_record_spill_unlock(spill);
+
+    if (!ok) {
+        if (error_msg && error_msg_size > 0) {
+            snprintf(error_msg, error_msg_size, "Failed writing spill data for channel %s: %s",
+                     gui_record_spill_channel_name(channel), strerror(errno));
+        }
+        return false;
+    }
+
+    atomic_store(&spill->write_offset, write_off + bytes);
+    uint64_t backlog = gui_record_spill_backlog_bytes_locked(channel);
+    uint64_t mark = backlog / GUI_RECORD_SPILL_LOG_STEP_BYTES;
+    uint64_t last_mark = atomic_load(&spill->last_backlog_log_mark);
+    if (mark > last_mark) {
+        atomic_store(&spill->last_backlog_log_mark, mark);
+        if (app) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "Spill backlog channel %s: %.2f MB",
+                     gui_record_spill_channel_name(channel),
+                     (double)backlog / (1024.0 * 1024.0));
+            gui_record_log_capture_event(app, "WARN", msg, GUI_ERROR_CLASS_NONE, 0);
+        }
+    }
+
+    return true;
+}
+
 // File writer context
 typedef struct {
     buffer_manager_t *bufmgr;  // Buffer manager pointer
@@ -477,6 +803,29 @@ static void convert_i16_to_flac_i32(int32_t *dst, const int16_t *src, size_t n, 
     }
 }
 
+static bool gui_record_get_next_block(writer_ctx_t *wctx, size_t block_bytes, int timeout_ms,
+                                      int16_t *spill_block, const int16_t **out_samples,
+                                      bool *from_ringbuffer) {
+    if (!wctx || !spill_block || !out_samples || !from_ringbuffer) {
+        return false;
+    }
+
+    void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, block_bytes, timeout_ms);
+    if (buf) {
+        *out_samples = (const int16_t *)buf;
+        *from_ringbuffer = true;
+        return true;
+    }
+
+    if (gui_record_spill_read_block(wctx->channel, spill_block, block_bytes)) {
+        *out_samples = spill_block;
+        *from_ringbuffer = false;
+        return true;
+    }
+
+    return false;
+}
+
 // FLAC file writer thread
 static int flac_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
@@ -512,6 +861,19 @@ static int flac_writer_thread(void *ctx) {
         }
         return 0;
     }
+    int16_t *spill_i16 = (int16_t *)aligned_alloc(32, len);
+    if (!spill_i16) {
+#if LIBSOXR_ENABLED
+        if (tmp_i16) aligned_free(tmp_i16);
+#endif
+        aligned_free(tmp_i32);
+        fprintf(stderr, "[FLAC] Failed to allocate spill read buffer\n");
+        if (wctx && wctx->app) {
+            gui_record_log_capture_event(wctx->app, "ERROR", "FLAC writer failed to allocate spill buffer",
+                                         GUI_ERROR_CLASS_SYSTEM, 1);
+        }
+        return 0;
+    }
 
     fprintf(stderr, "[FLAC] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
@@ -525,47 +887,15 @@ static int flac_writer_thread(void *ctx) {
     }
 
     while (1) {
-        // Read from buffer manager with timeout
-        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 10);
-        if (!buf) {
-            // No data available - check if we should exit
-            if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain any remaining whole blocks before exiting
-                size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                while (remaining >= len) {
-                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, len, 0);
-                    if (!buf) break;
-
-                    const int16_t *in = (const int16_t *)buf;
-
-#if LIBSOXR_ENABLED
-                    if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
-                        soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
-                        if (s) {
-                            size_t in_done = 0, out_done = 0;
-                            soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
-                                                           tmp_i16, tmp_cap, &out_done);
-                            if (!err && out_done > 0) {
-                                convert_i16_to_flac_i32(tmp_i32, tmp_i16, out_done, wctx->flac_bits_per_sample);
-                                flac_writer_process(wctx->writer, tmp_i32, (uint32_t)out_done);
-                            }
-                        }
-                    } else
-#endif
-                    {
-                        convert_i16_to_flac_i32(tmp_i32, in, BUFFER_READ_SIZE, wctx->flac_bits_per_sample);
-                        flac_writer_process(wctx->writer, tmp_i32, BUFFER_READ_SIZE);
-                    }
-
-                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
-                    remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                }
+        const int16_t *in = NULL;
+        bool from_ringbuffer = false;
+        int timeout_ms = (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) ? 0 : 10;
+        if (!gui_record_get_next_block(wctx, len, timeout_ms, spill_i16, &in, &from_ringbuffer)) {
+            if (timeout_ms == 0) {
                 break;
             }
             continue;
         }
-
-        const int16_t *in = (const int16_t *)buf;
         size_t out_n = BUFFER_READ_SIZE;
 
 #if LIBSOXR_ENABLED
@@ -606,8 +936,10 @@ static int flac_writer_thread(void *ctx) {
             }
         }
 
-        // Mark as consumed - buffer manager signals space event automatically
-        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
+        // Mark ringbuffer blocks as consumed; spill blocks are consumed by file read offset.
+        if (from_ringbuffer) {
+            bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
+        }
 
         if (s_recording_app) {
             atomic_fetch_add(&s_recording_app->recording_bytes, len);
@@ -630,6 +962,7 @@ static int flac_writer_thread(void *ctx) {
     if (tmp_i16) aligned_free(tmp_i16);
     if (tmp_i32) aligned_free(tmp_i32);
 
+    if (spill_i16) aligned_free(spill_i16);
     fprintf(stderr, "[FLAC] Writer thread %c exiting\n", wctx->channel == 0 ? 'A' : 'B');
     return 0;
 }
@@ -682,51 +1015,28 @@ static int raw_writer_thread(void *ctx) {
 #endif
         return 0;
     }
+    int16_t *spill_i16 = (int16_t *)aligned_alloc(32, in_len);
+    if (!spill_i16) {
+        fprintf(stderr, "[RAW] Failed to allocate spill read buffer\n");
+#if LIBSOXR_ENABLED
+        aligned_free(tmp_i16);
+#endif
+        aligned_free(tmp_out);
+        return 0;
+    }
 
     fprintf(stderr, "[RAW] Writer thread %c started\n", wctx->channel == 0 ? 'A' : 'B');
 
     while (1) {
-        void *buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, in_len, 10);
-        if (!buf) {
-            if (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) {
-                // Drain remaining whole blocks
-                size_t remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                while (remaining >= in_len) {
-                    buf = bufmgr_read_begin(wctx->bufmgr, wctx->buf_id, in_len, 0);
-                    if (!buf) break;
-
-                    const int16_t *in = (const int16_t *)buf;
-                    size_t out_n = BUFFER_READ_SIZE;
-
-#if LIBSOXR_ENABLED
-                    if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
-                        soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
-                        if (s) {
-                            size_t in_done = 0, out_done = 0;
-                            soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
-                                                           tmp_i16, BUFFER_READ_SIZE, &out_done);
-                            if (!err && out_done > 0) {
-                                out_n = out_done;
-                                convert_i16_to_raw_bytes(tmp_out, tmp_i16, out_n, wctx->rf_bits);
-                                fwrite(tmp_out, 1, out_n * bps, wctx->file);
-                            }
-                        }
-                    } else
-#endif
-                    {
-                        convert_i16_to_raw_bytes(tmp_out, in, out_n, wctx->rf_bits);
-                        fwrite(tmp_out, 1, out_n * bps, wctx->file);
-                    }
-
-                    bufmgr_read_end(wctx->bufmgr, wctx->buf_id, in_len);
-                    remaining = bufmgr_fill_level(wctx->bufmgr, wctx->buf_id);
-                }
+        const int16_t *in = NULL;
+        bool from_ringbuffer = false;
+        int timeout_ms = (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) ? 0 : 10;
+        if (!gui_record_get_next_block(wctx, in_len, timeout_ms, spill_i16, &in, &from_ringbuffer)) {
+            if (timeout_ms == 0) {
                 break;
             }
             continue;
         }
-
-        const int16_t *in = (const int16_t *)buf;
         size_t out_n = BUFFER_READ_SIZE;
 
 #if LIBSOXR_ENABLED
@@ -749,7 +1059,9 @@ static int raw_writer_thread(void *ctx) {
             fwrite(tmp_out, 1, out_n * bps, wctx->file);
         }
 
-        bufmgr_read_end(wctx->bufmgr, wctx->buf_id, in_len);
+        if (from_ringbuffer) {
+            bufmgr_read_end(wctx->bufmgr, wctx->buf_id, in_len);
+        }
 
         if (s_recording_app) {
             // Approximate byte accounting: count input bytes consumed
@@ -770,6 +1082,7 @@ static int raw_writer_thread(void *ctx) {
     }
     aligned_free(tmp_i16);
 #endif
+    aligned_free(spill_i16);
     aligned_free(tmp_out);
 
     fprintf(stderr, "[RAW] Writer thread %c exiting\n", wctx->channel == 0 ? 'A' : 'B');
@@ -778,11 +1091,14 @@ static int raw_writer_thread(void *ctx) {
 
 // Initialize recording subsystem
 void gui_record_init(void) {
-    // Nothing to initialize here anymore - ringbuffers are in gui_extract
+    gui_record_reset_disk_guard_state();
+    gui_record_spill_reset_all();
 }
 
 // Cleanup recording subsystem
 void gui_record_cleanup(void) {
+    gui_record_reset_disk_guard_state();
+    gui_record_spill_reset_all();
     gui_record_close_session_log();
 }
 
@@ -824,6 +1140,54 @@ void gui_record_log_capture_event(gui_app_t *app, const char *level, const char 
     if (app == s_recording_app) {
         gui_record_log_write_line(level, clean);
     }
+}
+
+bool gui_record_check_disk_space_guard(gui_app_t *app, uint32_t frame_index,
+                                       char *status_msg, size_t status_msg_size) {
+    if (status_msg && status_msg_size > 0) {
+        status_msg[0] = '\0';
+    }
+
+    if (!app || !app->is_recording || !app->settings.output_path[0]) {
+        return false;
+    }
+
+    if (atomic_load(&s_disk_guard_tripped)) {
+        return true;
+    }
+
+    uint64_t now_ms = get_time_ms();
+    uint64_t last_check_ms = atomic_load(&s_disk_guard_last_check_ms);
+    if (last_check_ms != 0 && now_ms >= last_check_ms &&
+        (now_ms - last_check_ms) < GUI_RECORD_DISK_GUARD_CHECK_INTERVAL_MS) {
+        return false;
+    }
+    atomic_store(&s_disk_guard_last_check_ms, now_ms);
+
+    uint64_t free_bytes = 0;
+    if (!gui_record_get_free_space_bytes(app->settings.output_path, &free_bytes)) {
+        return false;
+    }
+    atomic_store(&s_disk_guard_last_free_bytes, free_bytes);
+
+    if (free_bytes >= GUI_RECORD_DISK_GUARD_THRESHOLD_BYTES) {
+        return false;
+    }
+
+    char free_buf[32];
+    char msg[640];
+    format_file_size_u64(free_bytes, free_buf, sizeof(free_buf));
+    snprintf(msg, sizeof(msg),
+             "Low disk-space guard triggered at extract_frame=%u: free space %s is below threshold 10.00 GB on output path %s; requesting safe capture stop.",
+             frame_index, free_buf, app->settings.output_path);
+    if (status_msg && status_msg_size > 0) {
+        snprintf(status_msg, status_msg_size, "%s", msg);
+    }
+
+    if (!atomic_exchange(&s_disk_guard_tripped, true)) {
+        gui_record_log_capture_event(app, "ERROR", msg, GUI_ERROR_CLASS_SYSTEM, 1);
+    }
+    return true;
 }
 
 // Forward declaration of actual recording start (after confirmation)
@@ -1241,6 +1605,7 @@ void gui_record_check_popup(gui_app_t *app) {
 
 // Internal: Start recording after confirmation
 static int gui_record_start_confirmed(gui_app_t *app) {
+    gui_record_reset_disk_guard_state();
 
     // Build full output paths (output_path + filenames)
     char path_a[512];
@@ -1264,10 +1629,9 @@ static int gui_record_start_confirmed(gui_app_t *app) {
     if (is_simulated) {
         gui_extract_init_record_rbs(app);
     }
-
-    // Ensure record buffers are initialized in buffer manager
-    if (bufmgr_ensure_init(&app->buffers, BUF_RECORD_A) < 0 ||
-        bufmgr_ensure_init(&app->buffers, BUF_RECORD_B) < 0) {
+    // Ensure record buffers are initialized in buffer manager for enabled channels
+    if ((app->settings.capture_a && bufmgr_ensure_init(&app->buffers, BUF_RECORD_A) < 0) ||
+        (app->settings.capture_b && bufmgr_ensure_init(&app->buffers, BUF_RECORD_B) < 0)) {
         gui_app_set_status(app, "Record buffers not initialized");
         return RECORD_ERROR;
     }
@@ -1296,6 +1660,7 @@ static int gui_record_start_confirmed(gui_app_t *app) {
     atomic_store(&app->recording_compressed_a, 0);
     atomic_store(&app->recording_compressed_b, 0);
     app->last_recording_duration_s = 0.0;
+    gui_record_spill_reset_all();
 
     // Reset record buffers before starting
     gui_extract_reset_record_rbs(app);
@@ -1653,6 +2018,7 @@ void gui_record_stop(gui_app_t *app) {
     if (!app->is_recording) {
         return;
     }
+    gui_record_reset_disk_guard_state();
 
     // Disable recording in extraction thread first
     // This stops new data from being written to record ringbuffers
@@ -1686,6 +2052,7 @@ void gui_record_stop(gui_app_t *app) {
         if (app->settings.capture_b) thrd_join(s_writer_thread_b, NULL);
         s_writer_threads_running = false;
     }
+    gui_record_spill_reset_all();
 
 #if LIBFLAC_ENABLED == 1
     // Finalize FLAC writers (this also cleans them up)
