@@ -72,6 +72,16 @@ static void format_file_size_u64(uint64_t size, char *buf, size_t buf_size) {
     }
 }
 
+static void format_duration_hhmmss(double seconds, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    if (seconds < 0.0) seconds = 0.0;
+    uint64_t total_seconds = (uint64_t)seconds;
+    uint64_t hh = total_seconds / 3600ULL;
+    uint64_t mm = (total_seconds / 60ULL) % 60ULL;
+    uint64_t ss = total_seconds % 60ULL;
+    snprintf(dst, dst_len, "%02" PRIu64 ".%02" PRIu64 ".%02" PRIu64, hh, mm, ss);
+}
+
 // Format data sizes for capture logs using clear MB/GB units
 static void format_log_data_size_u64(uint64_t size, char *buf, size_t buf_size) {
     if (!buf || buf_size == 0) return;
@@ -2100,6 +2110,7 @@ void gui_record_stop(gui_app_t *app) {
         return;
     }
     gui_record_reset_disk_guard_state();
+    double stop_request_time = GetTime();
 
     // Disable recording in extraction thread first
     // This stops new data from being written to record ringbuffers
@@ -2158,8 +2169,14 @@ void gui_record_stop(gui_app_t *app) {
     }
 
     // Print recording summary with backpressure stats
-    double duration = GetTime() - app->recording_start_time;
-    app->last_recording_duration_s = duration;
+    double stop_complete_time = GetTime();
+    double total_duration = stop_complete_time - app->recording_start_time;
+    double capture_duration = stop_request_time - app->recording_start_time;
+    double processing_duration = stop_complete_time - stop_request_time;
+    if (capture_duration < 0.0) capture_duration = 0.0;
+    if (processing_duration < 0.0) processing_duration = 0.0;
+    if (total_duration < 0.0) total_duration = 0.0;
+    app->last_recording_duration_s = capture_duration;
     uint64_t raw_a = atomic_load(&app->recording_raw_a);
     uint64_t raw_b = atomic_load(&app->recording_raw_b);
     uint64_t comp_a = atomic_load(&app->recording_compressed_a);
@@ -2179,15 +2196,20 @@ void gui_record_stop(gui_app_t *app) {
     uint32_t rec_drops = rec_a_drops + rec_b_drops;
 
     char size_a[64], size_b[64], size_comp_a[64], size_comp_b[64], size_raw_total[64], size_comp_total[64];
+    char total_hms[32], capture_hms[32], processing_hms[32];
     format_log_data_size_u64(raw_a, size_a, sizeof(size_a));
     format_log_data_size_u64(raw_b, size_b, sizeof(size_b));
     format_log_data_size_u64(comp_a, size_comp_a, sizeof(size_comp_a));
     format_log_data_size_u64(comp_b, size_comp_b, sizeof(size_comp_b));
     format_log_data_size_u64(raw_total, size_raw_total, sizeof(size_raw_total));
     format_log_data_size_u64(comp_total, size_comp_total, sizeof(size_comp_total));
+    format_duration_hhmmss(total_duration, total_hms, sizeof(total_hms));
+    format_duration_hhmmss(capture_duration, capture_hms, sizeof(capture_hms));
+    format_duration_hhmmss(processing_duration, processing_hms, sizeof(processing_hms));
 
-    fprintf(stderr, "[REC] Recording stopped: %.1fs, A=%s, B=%s, waits=%u, drops=%u\n",
-            duration, size_a, size_b, rec_waits, rec_drops);
+    fprintf(stderr, "[REC] Recording stopped: total=%.1fs (%s), capture=%.1fs (%s), processing=%.1fs (%s), A=%s, B=%s, waits=%u, drops=%u\n",
+            total_duration, total_hms, capture_duration, capture_hms, processing_duration, processing_hms,
+            size_a, size_b, rec_waits, rec_drops);
     fprintf(stderr, "[REC] Record buffers: A waits=%u drops=%u, B waits=%u drops=%u\n",
             rec_a_waits, rec_a_drops, rec_b_waits, rec_b_drops);
 
@@ -2195,8 +2217,10 @@ void gui_record_stop(gui_app_t *app) {
         fprintf(stderr, "[REC] WARNING: %u frames were dropped during recording due to backpressure!\n", rec_drops);
     }
 
-    gui_record_log_writef("INFO", "Recording stopped: duration=%.2fs rawA=%s rawB=%s waits=%u drops=%u",
-                          duration, size_a, size_b, rec_waits, rec_drops);
+    gui_record_log_writef("INFO", "Recording stopped: duration=%.2fs (%s) rawA=%s rawB=%s waits=%u drops=%u",
+                          total_duration, total_hms, size_a, size_b, rec_waits, rec_drops);
+    gui_record_log_writef("INFO", "Capture time: %.2fs (%s)", capture_duration, capture_hms);
+    gui_record_log_writef("INFO", "Processing time: %.2fs (%s)", processing_duration, processing_hms);
     gui_record_log_writef("INFO", "Output data: compressedA=%s compressedB=%s",
                           size_comp_a, size_comp_b);
     if (comp_total > 0) {

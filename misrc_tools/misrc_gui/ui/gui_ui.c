@@ -1754,18 +1754,28 @@ static void render_channel_stats(gui_app_t *app, int channel) {
                                     : atomic_load(&app->recording_compressed_b);
             bool show_record_stats = app->is_capturing && (app->is_recording || raw_bytes > 0 || comp_bytes > 0 || app->last_recording_duration_s > 0.0);
             if (show_record_stats) {
-                double raw_mb = (double)raw_bytes / (1024.0 * 1024.0);
                 double shown_duration = app->is_recording ? (GetTime() - app->recording_start_time) : app->last_recording_duration_s;
                 int d_hours = (int)(shown_duration / 3600.0);
                 int d_mins = ((int)(shown_duration / 60.0)) % 60;
                 int d_secs = ((int)(shown_duration)) % 60;
 
                 snprintf(buf_rec_duration, 24, "Dur: %02d:%02d:%02d", d_hours, d_mins, d_secs);
-                snprintf(buf_rec_raw, 32, "RAW: %.1f MB", raw_mb);
+                if (raw_bytes >= 1073741824ULL) {
+                    double raw_gb = (double)raw_bytes / (1024.0 * 1024.0 * 1024.0);
+                    snprintf(buf_rec_raw, 32, "RAW: %.2f GB", raw_gb);
+                } else {
+                    double raw_mb = (double)raw_bytes / (1024.0 * 1024.0);
+                    snprintf(buf_rec_raw, 32, "RAW: %.1f MB", raw_mb);
+                }
                 if (comp_bytes > 0 || app->settings.use_flac) {
-                    double comp_mb = (double)comp_bytes / (1024.0 * 1024.0);
                     double ratio = (comp_bytes > 0) ? ((double)raw_bytes / (double)comp_bytes) : 0.0;
-                    snprintf(buf_rec_flac, 32, "FLAC: %.1f MB", comp_mb);
+                    if (comp_bytes >= 1073741824ULL) {
+                        double comp_gb = (double)comp_bytes / (1024.0 * 1024.0 * 1024.0);
+                        snprintf(buf_rec_flac, 32, "FLAC: %.2f GB", comp_gb);
+                    } else {
+                        double comp_mb = (double)comp_bytes / (1024.0 * 1024.0);
+                        snprintf(buf_rec_flac, 32, "FLAC: %.1f MB", comp_mb);
+                    }
                     snprintf(buf_rec_ratio, 24, "Ratio: %.1fx", ratio);
                 } else {
                     buf_rec_flac[0] = '\0';
