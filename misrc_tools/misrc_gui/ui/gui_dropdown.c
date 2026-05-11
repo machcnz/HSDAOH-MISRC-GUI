@@ -11,9 +11,11 @@
 #include "../visualization/gui_panel.h"
 #include "gui_ui.h"
 #include "../signal/gui_cvbs.h"
+#include "../output/gui_record.h"
 #include <string.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 //-----------------------------------------------------------------------------
 // State
@@ -25,6 +27,25 @@ static struct {
     char id[64];
     uint32_t index;
 } s_open_dropdown = {0};
+
+static bool cvbs_preview_enabled_for_channel_locked(const channel_panel_config_t *config) {
+    if (!config) return false;
+    return (config->left_view == PANEL_VIEW_CVBS) ||
+           (config->split && config->right_view == PANEL_VIEW_CVBS);
+}
+
+static void log_cvbs_preview_state_change(gui_app_t *app, int ch, bool enabled, const char *reason) {
+    if (!app) return;
+    char msg[192];
+    if (reason && reason[0]) {
+        snprintf(msg, sizeof(msg), "CVBS preview channel %c: %s (%s)",
+                 (ch == 0) ? 'A' : 'B', enabled ? "on" : "off", reason);
+    } else {
+        snprintf(msg, sizeof(msg), "CVBS preview channel %c: %s",
+                 (ch == 0) ? 'A' : 'B', enabled ? "on" : "off");
+    }
+    gui_record_log_capture_event(app, "INFO", msg, GUI_ERROR_CLASS_NONE, 0);
+}
 
 //-----------------------------------------------------------------------------
 // State Management
@@ -114,16 +135,30 @@ static bool handle_layout_dropdown(gui_app_t *app, int ch) {
         clicked = true;
     } else if (gui_dropdown_is_open(DROPDOWN_LAYOUT, ch)) {
         if (Clay_PointerOver(CLAY_IDI("LayoutOptSingle", ch))) {
+            bool cvbs_before = false;
+            bool cvbs_after = false;
             while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
+            cvbs_before = cvbs_preview_enabled_for_channel_locked(config);
             panel_config_set_split(config, false);
+            cvbs_after = cvbs_preview_enabled_for_channel_locked(config);
             atomic_flag_clear(&app->panel_config_lock);
+            if (cvbs_before != cvbs_after) {
+                log_cvbs_preview_state_change(app, ch, cvbs_after, "layout change");
+            }
             gui_dropdown_close_all();
             clicked = true;
         }
         if (Clay_PointerOver(CLAY_IDI("LayoutOptSplit", ch))) {
+            bool cvbs_before = false;
+            bool cvbs_after = false;
             while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
+            cvbs_before = cvbs_preview_enabled_for_channel_locked(config);
             panel_config_set_split(config, true);
+            cvbs_after = cvbs_preview_enabled_for_channel_locked(config);
             atomic_flag_clear(&app->panel_config_lock);
+            if (cvbs_before != cvbs_after) {
+                log_cvbs_preview_state_change(app, ch, cvbs_after, "layout change");
+            }
             gui_dropdown_close_all();
             clicked = true;
         }
@@ -145,9 +180,16 @@ static bool handle_left_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("LeftViewOpt", ch * 10 + vt))) {
+                bool cvbs_before = false;
+                bool cvbs_after = false;
                 while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
+                cvbs_before = cvbs_preview_enabled_for_channel_locked(config);
                 panel_config_set_left_view(config, (panel_view_type_t)vt);
+                cvbs_after = cvbs_preview_enabled_for_channel_locked(config);
                 atomic_flag_clear(&app->panel_config_lock);
+                if (cvbs_before != cvbs_after) {
+                    log_cvbs_preview_state_change(app, ch, cvbs_after, "left view");
+                }
                 gui_dropdown_close_all();
                 clicked = true;
                 break;
@@ -173,9 +215,16 @@ static bool handle_right_view_dropdown(gui_app_t *app, int ch) {
             if (!panel_view_type_available((panel_view_type_t)vt)) continue;
             // Use ch * 10 + vt to match the ID used in rendering
             if (Clay_PointerOver(CLAY_IDI("RightViewOpt", ch * 10 + vt))) {
+                bool cvbs_before = false;
+                bool cvbs_after = false;
                 while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
+                cvbs_before = cvbs_preview_enabled_for_channel_locked(config);
                 panel_config_set_right_view(config, (panel_view_type_t)vt);
+                cvbs_after = cvbs_preview_enabled_for_channel_locked(config);
                 atomic_flag_clear(&app->panel_config_lock);
+                if (cvbs_before != cvbs_after) {
+                    log_cvbs_preview_state_change(app, ch, cvbs_after, "right view");
+                }
                 gui_dropdown_close_all();
                 clicked = true;
                 break;

@@ -554,6 +554,54 @@ static uint64_t gui_record_spill_backlog_bytes_locked(int channel) {
     uint64_t read_off = atomic_load(&spill->read_offset);
     return (write_off >= read_off) ? (write_off - read_off) : 0;
 }
+static void gui_record_spill_recycle_if_drained(int channel) {
+    if (!gui_record_spill_valid_channel(channel)) {
+        return;
+    }
+
+    gui_record_spill_channel_t *spill = &s_record_spill[channel];
+    if (!atomic_load(&spill->opened) || !spill->fp) {
+        return;
+    }
+
+    uint64_t write_off = atomic_load(&spill->write_offset);
+    uint64_t read_off = atomic_load(&spill->read_offset);
+    if (write_off != read_off) {
+        return;
+    }
+
+    gui_record_spill_lock(spill);
+    write_off = atomic_load(&spill->write_offset);
+    read_off = atomic_load(&spill->read_offset);
+    if (write_off == read_off && spill->fp) {
+        bool truncated_ok = false;
+        (void)GUI_RECORD_FSEEK(spill->fp, 0, SEEK_SET);
+#if defined(_WIN32) || defined(_WIN64)
+        int fd = _fileno(spill->fp);
+        if (fd >= 0) {
+            if (fflush(spill->fp) == 0 && _chsize_s(fd, 0) == 0) {
+                truncated_ok = true;
+            }
+        }
+#else
+        int fd = fileno(spill->fp);
+        if (fd >= 0) {
+            if (fflush(spill->fp) == 0 && ftruncate(fd, 0) == 0) {
+                truncated_ok = true;
+            }
+        }
+#endif
+        if (!truncated_ok) {
+            clearerr(spill->fp);
+        }
+        (void)GUI_RECORD_FSEEK(spill->fp, 0, SEEK_SET);
+        atomic_store(&spill->write_offset, 0);
+        atomic_store(&spill->read_offset, 0);
+        atomic_store(&spill->last_backlog_log_mark, 0);
+        atomic_store(&spill->forced_mode, false);
+    }
+    gui_record_spill_unlock(spill);
+}
 
 static bool gui_record_spill_read_block(int channel, int16_t *dst, size_t bytes) {
     if (!gui_record_spill_valid_channel(channel) || !dst || bytes == 0) {
@@ -585,6 +633,7 @@ static bool gui_record_spill_read_block(int channel, int16_t *dst, size_t bytes)
 
     if (ok) {
         atomic_store(&spill->read_offset, read_off + bytes);
+        gui_record_spill_recycle_if_drained(channel);
     }
 
     return ok;
@@ -889,6 +938,7 @@ static int flac_writer_thread(void *ctx) {
     while (1) {
         const int16_t *in = NULL;
         bool from_ringbuffer = false;
+        bool encode_failed = false;
         int timeout_ms = (atomic_load(&do_exit) || !s_recording_app || !s_recording_app->is_recording) ? 0 : 10;
         if (!gui_record_get_next_block(wctx, len, timeout_ms, spill_i16, &in, &from_ringbuffer)) {
             if (timeout_ms == 0) {
@@ -918,6 +968,9 @@ static int flac_writer_thread(void *ctx) {
                         }
                         flac_encoder_error_logged = true;
                     }
+                    if (result < 0) {
+                        encode_failed = true;
+                    }
                 }
             }
         } else
@@ -934,11 +987,22 @@ static int flac_writer_thread(void *ctx) {
                 }
                 flac_encoder_error_logged = true;
             }
+            if (result < 0) {
+                encode_failed = true;
+            }
         }
 
         // Mark ringbuffer blocks as consumed; spill blocks are consumed by file read offset.
         if (from_ringbuffer) {
             bufmgr_read_end(wctx->bufmgr, wctx->buf_id, len);
+        }
+
+        if (encode_failed) {
+            if (wctx && wctx->app && !atomic_load(&wctx->app->dropout_stop_requested)) {
+                atomic_store(&wctx->app->dropout_stop_reason, GUI_DROPOUT_DEVICE_ERROR);
+                atomic_store(&wctx->app->dropout_stop_requested, true);
+            }
+            break;
         }
 
         if (s_recording_app) {
@@ -1239,6 +1303,12 @@ static void sanitize_tag(char *dst, size_t dst_len, const char *src) {
     }
 }
 
+static bool gui_record_cvbs_preview_enabled_locked(const channel_panel_config_t *config) {
+    if (!config) return false;
+    return (config->left_view == PANEL_VIEW_CVBS) ||
+           (config->split && config->right_view == PANEL_VIEW_CVBS);
+}
+
 static void gui_record_open_session_log(gui_app_t *app, const char *path_a, const char *path_b) {
     if (!app) return;
 
@@ -1263,6 +1333,13 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
 
     snprintf(s_capture_log_path, sizeof(s_capture_log_path), "%s/%s_%s_misrc_capture.log",
              app->settings.output_path, base_name, date_tag);
+
+    bool cvbs_preview_a = false;
+    bool cvbs_preview_b = false;
+    while (atomic_flag_test_and_set(&app->panel_config_lock)) {}
+    cvbs_preview_a = gui_record_cvbs_preview_enabled_locked(&app->panel_config_a);
+    cvbs_preview_b = gui_record_cvbs_preview_enabled_locked(&app->panel_config_b);
+    atomic_flag_clear(&app->panel_config_lock);
 
     gui_record_log_lock();
     s_capture_log_file = fopen(s_capture_log_path, "w");
@@ -1320,6 +1397,10 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     gui_record_log_write_line_locked("INFO", msg);
 
     snprintf(msg, sizeof(msg), "Capture channels: A=%s B=%s", app->settings.capture_a ? "on" : "off", app->settings.capture_b ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "CVBS preview state: A=%s B=%s",
+             cvbs_preview_a ? "on" : "off",
+             cvbs_preview_b ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);
 
     uint8_t bits_a = app->settings.use_flac ? clamp_rf_bits_flac(app->settings.rf_bits_a) : rf_bits_for_raw(app->settings.rf_bits_a);
