@@ -518,7 +518,7 @@ jobs:
           if-no-files-found: error
   windows-exe-arm64:
     name: Windows EXE ARM64 build
-    runs-on: windows-2022
+    runs-on: windows-11-arm
     needs:
       - preflight-guard-tests
       - preflight-cross-platform-guards
