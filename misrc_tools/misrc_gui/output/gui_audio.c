@@ -593,7 +593,7 @@ void gui_audio_update_playback(gui_app_t *app)
     if (!app->settings.audio_monitor_playback) return;
 #if !LIBSOXR_ENABLED
     return;
-#endif
+#else
 
     play_q_ensure_alloc();
 
@@ -651,4 +651,5 @@ void gui_audio_update_playback(gui_app_t *app)
             UpdateAudioStream(s_play_stream, chunk, frames_per_chunk);
         }
     }
+#endif
 }
