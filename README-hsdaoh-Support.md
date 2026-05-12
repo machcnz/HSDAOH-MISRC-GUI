@@ -2,6 +2,16 @@
 
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
+- 12/05/26  - v1.0.5 release summary (tag review)
+            - Linux: added FLAC core pinning controls and capture-session metadata logging.
+            - CVBS: added Active/Full geometry toggle, PAL-default Active mode tuning, and follow-up crop/contrast fixes.
+            - Recording and status: added free-space guard, real-time backpressure/drop logging, spill handling updates, and refined status counters.
+            - UI: adjusted record-limit/timecode layout, restored toolbar/default launch width behavior, and added record-clock icon rendering.
+            - Build/runtime fixes: Unix build fixes plus Windows include guards for Win32 symbols in recording paths.
+
+- 12/05/26  - Windows ARM64 build artifacts
+            - GitHub Actions release pipeline now also emits `windows_MISRC_<version>_arm64.zip`.
+            - ARM64 builds are currently cross-built/validated structurally in CI and should still be treated as experimental at runtime.
 - 07/05/26  - Error counter behavior update
             - Restored status-bar counter to a single combined `Errors:` value for users.
             - Kept internal parser/system event classification for logging and diagnostics.

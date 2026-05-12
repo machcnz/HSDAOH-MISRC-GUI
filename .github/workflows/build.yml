@@ -516,6 +516,170 @@ jobs:
           name: windows-exe
           path: windows_MISRC_*_x86.zip
           if-no-files-found: error
+  windows-exe-arm64:
+    name: Windows EXE ARM64 build
+    runs-on: windows-2022
+    needs:
+      - preflight-guard-tests
+      - preflight-cross-platform-guards
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: >-
+            git
+            mingw-w64-clang-aarch64-binutils
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-aarch64-fftw
+            mingw-w64-clang-aarch64-flac
+            mingw-w64-clang-aarch64-libjpeg-turbo
+            mingw-w64-clang-aarch64-libusb
+            mingw-w64-clang-aarch64-libsoxr
+            mingw-w64-clang-aarch64-meson
+            mingw-w64-clang-aarch64-ninja
+            mingw-w64-clang-aarch64-pkgconf
+
+      - name: Resolve build version
+        id: version
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
+            VERSION="${{ github.event.inputs.release_tag }}"
+          else
+            VERSION="$(git describe --tags --dirty --match 'v*' --match 'misrc_tools-*' 2>/dev/null || true)"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="dev-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          case "$VERSION" in
+            misrc_tools-*) VERSION="${VERSION#misrc_tools-}" ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package EXE (ARM64)
+        shell: msys2 {0}
+        env:
+          MISRC_TOOLS_VERSION_OVERRIDE: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DEPS_PREFIX="$PWD/.deps/install"
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${MINGW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          git clone --depth 1 https://github.com/libuvc/libuvc.git .deps/libuvc
+          sed -i 's/^if (MSVC OR MINGW)$/if (MSVC)/' .deps/libuvc/cmake/FindLibUSB.cmake
+          cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLE=OFF \
+            -DBUILD_TEST=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/libuvc/build --parallel
+          cmake --install .deps/libuvc/build
+
+          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
+          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
+          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
+          cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+            -DINSTALL_UDEV_RULES=OFF
+          cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
+          mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
+          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh_static.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          elif [[ -f .deps/hsdaoh/build/src/hsdaoh_static.lib ]]; then
+            cp .deps/hsdaoh/build/src/hsdaoh_static.lib "$DEPS_PREFIX/lib/libhsdaoh.a"
+          else
+            echo "hsdaoh static library not found in expected build output paths" >&2
+            exit 1
+          fi
+          cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          sed -i 's/^Libs: .*/Libs: -L${libdir} -lhsdaoh -luvc -lusb-1.0/' "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
+            if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
+              cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
+            fi
+          done
+          cmake -S .deps/raylib -B .deps/raylib/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_GAMES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build .deps/raylib/build --parallel
+          cmake --install .deps/raylib/build
+
+          export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX:${CMAKE_PREFIX_PATH:-}"
+          meson setup "$BUILD_DIR" misrc_tools --buildtype release
+          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+
+          mkdir -p dist
+          cp "$BUILD_DIR/misrc_gui.exe" dist/MISRC.exe
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          test "$(objdump -p dist/MISRC.exe | awk '/^Subsystem[[:space:]]/ {print $2; exit}')" = "00000002"
+          objdump -f dist/MISRC.exe | grep -Ei 'architecture:[[:space:]]*(aarch64|arm64)'
+          assert_no_nonsystem_dlls() {
+            local target="$1"
+            while IFS= read -r dll; do
+              case "$(echo "$dll" | tr '[:lower:]' '[:upper:]')" in
+                API-MS-WIN-*|KERNEL32.DLL|KERNELBASE.DLL|USER32.DLL|GDI32.DLL|SHELL32.DLL|WINMM.DLL|OLE32.DLL|OLEAUT32.DLL|ADVAPI32.DLL|COMDLG32.DLL|COMCTL32.DLL|SHLWAPI.DLL|WS2_32.DLL|SETUPAPI.DLL|IMM32.DLL|VERSION.DLL|UCRTBASE.DLL|MSVCRT.DLL|MF.DLL|MFPLAT.DLL|MFREADWRITE.DLL|EVR.DLL|STRMIIDS.DLL|AVRT.DLL)
+                  continue
+                  ;;
+                *)
+                  echo "Non-system runtime DLL dependency detected in $target: $dll" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(objdump -p "$target" | awk '/DLL Name:/ {print $3}')
+          }
+
+          assert_no_nonsystem_dlls "dist/MISRC.exe"
+          # Windows ARM64 binaries cannot be executed on windows-2022 x64 runners.
+
+      - name: Create ZIP artifact
+        shell: pwsh
+        run: |
+          $ZipPath = "windows_MISRC_${{ steps.version.outputs.version }}_arm64.zip"
+          Compress-Archive -Path @("dist/MISRC.exe") -DestinationPath $ZipPath -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $ZipPath))
+          try {
+            if ($zip.Entries.Count -ne 1) {
+              throw "Expected 1 entry in $ZipPath, found $($zip.Entries.Count)"
+            }
+            foreach ($entry in $zip.Entries) {
+              if ($entry.FullName.Contains('/') -or $entry.FullName.Contains('\')) {
+                throw "ZIP entry is nested; expected flat layout: $($entry.FullName)"
+              }
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Upload Windows ARM64 ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-exe-arm64
+          path: windows_MISRC_*_arm64.zip
+          if-no-files-found: error
 
   macos-app-build:
     name: macOS APP build (${{ matrix.arch }})
@@ -880,6 +1044,7 @@ jobs:
     needs:
       - linux-appimage
       - windows-exe
+      - windows-exe-arm64
       - macos-app-universal
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
     permissions:
@@ -926,4 +1091,5 @@ jobs:
             release-assets/**/linux_MISRC_*_x86.zip
             release-assets/**/linux_MISRC_*_arm64.zip
             release-assets/**/windows_MISRC_*_x86.zip
+            release-assets/**/windows_MISRC_*_arm64.zip
             release-assets/**/macos_MISRC_*_universal.dmg

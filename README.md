@@ -120,6 +120,7 @@ Supported operating systems with direct links to the latest release (also availa
 
 > [!NOTE]  
 > The arm64 builds for Windows are untested and considered experimental!
+> Release artifacts now include `windows_MISRC_<version>_arm64.zip` in addition to the x86 ZIP.
 
 The packages contain two command-line applications, `misrc_capture` and `misrc_extract`. For detailed usage information see the [misrc_tools readme](/misrc_tools/README.md) and the [usage example](#capture--usage-example) down below.
 
