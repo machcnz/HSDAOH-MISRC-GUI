@@ -406,6 +406,7 @@ jobs:
           cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_EXAMPLE=OFF \
             -DBUILD_TEST=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
@@ -579,6 +580,7 @@ jobs:
           cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_EXAMPLE=OFF \
             -DBUILD_TEST=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
