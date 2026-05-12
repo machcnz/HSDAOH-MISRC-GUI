@@ -37,7 +37,13 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#define Rectangle Win32_Rectangle
+#define CloseWindow Win32_CloseWindow
+#define ShowCursor Win32_ShowCursor
 #include <windows.h>
+#undef ShowCursor
+#undef CloseWindow
+#undef Rectangle
 #include <io.h>
 #define access _access
 #define F_OK 0
