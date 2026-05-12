@@ -12,7 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if LIBSOXR_ENABLED
 #include <soxr.h>
+#endif
 
 // External do_exit flag from ringbuffer.h
 extern atomic_int do_exit;
@@ -48,7 +50,9 @@ static bool s_play_stream_inited = false;
 static bool s_audio_device_inited = false;
 
 // Resampler for 78.125kHz -> 48kHz conversion
+#if LIBSOXR_ENABLED
 static soxr_t s_resampler = NULL;
+#endif
 
 // Simple lock-free SPSC ring for stereo int16 samples (interleaved) at 48kHz
 #define PLAY_Q_FRAMES (96000) // ~2 seconds at 48kHz
@@ -229,6 +233,7 @@ static int audio_thread_main(void *ctx)
         iter_count++;
 
         // Playback monitoring: downmix 4ch 24-bit to stereo 16-bit, resample 78.125kHz -> 48kHz
+#if LIBSOXR_ENABLED
         if (a->app && atomic_load(&s_playback_enabled) && a->app->settings.audio_monitor_playback && s_resampler) {
             const uint8_t *b = (const uint8_t *)buf;
             const size_t frames_78khz = len / 12; // 4ch * 3 bytes per frame
@@ -284,6 +289,7 @@ static int audio_thread_main(void *ctx)
         
 skip_monitoring:
         ;
+#endif
 
         // Check if recording state changed
         bool is_recording = a->app && a->app->is_recording;
@@ -545,10 +551,12 @@ void gui_audio_stop(gui_app_t *app)
         UnloadAudioStream(s_play_stream);
         s_play_stream_inited = false;
     }
+#if LIBSOXR_ENABLED
     if (s_resampler) {
         soxr_delete(s_resampler);
         s_resampler = NULL;
     }
+#endif
 }
 
 void gui_audio_set_playback_enabled(gui_app_t *app, bool enabled)
@@ -571,9 +579,11 @@ void gui_audio_set_playback_enabled(gui_app_t *app, bool enabled)
         atomic_store(&s_play_q_head, 0);
         atomic_store(&s_play_q_tail, 0);
     }
+#if LIBSOXR_ENABLED
     if (s_resampler) {
         soxr_clear(s_resampler);
     }
+#endif
 }
 
 void gui_audio_update_playback(gui_app_t *app)
@@ -581,6 +591,9 @@ void gui_audio_update_playback(gui_app_t *app)
     if (!app) return;
     if (!app->is_capturing) return;
     if (!app->settings.audio_monitor_playback) return;
+#if !LIBSOXR_ENABLED
+    return;
+#endif
 
     play_q_ensure_alloc();
 
