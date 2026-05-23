@@ -122,7 +122,12 @@ static int extraction_thread(void *ctx) {
             // Prevent stale/uninitialized data from driving CH-B meters/display
             memset(s_buf_b, 0, BUFFER_READ_SIZE * sizeof(int16_t));
         }
-        bool swap_channels = (s_extract_app && s_extract_app->settings.misrc_mode);
+        bool swap_channels = false;
+        if (s_extract_app) {
+            swap_channels = s_extract_app->is_recording
+                            ? s_extract_app->capture_mode_runtime_misrc
+                            : s_extract_app->user_capture_mode_misrc;
+        }
         if (s_b_present && swap_channels) {
             mapped_a = s_buf_b;
             mapped_b = s_buf_a;

@@ -276,6 +276,8 @@ typedef struct gui_app {
     // Capture state
     bool is_capturing;
     bool is_recording;
+    bool user_capture_mode_misrc;      // Authoritative user-selected mode (changes only via mode toggle)
+    bool capture_mode_runtime_misrc;   // Mode latched at recording start (stable for recording session)
 
     // Device enumeration
     device_info_t devices[MAX_DEVICES];

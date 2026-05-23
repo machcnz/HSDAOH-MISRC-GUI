@@ -1433,7 +1433,7 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     snprintf(msg, sizeof(msg), "Audio monitor: playback=%s monitor_ch34=%s misrc_mode=%s",
              app->settings.audio_monitor_playback ? "on" : "off",
              app->settings.audio_monitor_ch34 ? "on" : "off",
-             app->settings.misrc_mode ? "on" : "off");
+             app->user_capture_mode_misrc ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);
     snprintf(msg, sizeof(msg), "Dropout handling: stop_on_dropout=%s",
              app->settings.stop_on_dropout ? "on" : "off");
@@ -1732,6 +1732,15 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         gui_app_set_status(app, "Record buffers not initialized");
         return RECORD_ERROR;
     }
+
+    // Recording uses a hard user-set mode latched at record start.
+    bool prev_runtime_mode = app->capture_mode_runtime_misrc;
+    app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+    TraceLog(LOG_INFO,
+             "MODE TRACE: source=gui_record_start_confirmed latch_runtime old=%s new=%s user=%s",
+             prev_runtime_mode ? "MISRC" : "HSDAOH",
+             app->capture_mode_runtime_misrc ? "MISRC" : "HSDAOH",
+             app->user_capture_mode_misrc ? "MISRC" : "HSDAOH");
 
 #if LIBFLAC_ENABLED == 1
     if (app->settings.use_flac && app->settings.flac_affinity_enabled) {

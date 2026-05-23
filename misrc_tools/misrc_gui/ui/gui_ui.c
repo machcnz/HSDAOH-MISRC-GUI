@@ -30,6 +30,100 @@
 
 // Track if UI consumed the current frame's click (prevents click-through)
 static bool s_ui_consumed_click = false;
+// Authoritative capture mode selected by user via CaptureModeToggle.
+// Keeping this outside gui_app_t protects mode from unrelated runtime mutations.
+static bool s_capture_mode_state_initialized = false;
+static bool s_capture_mode_state_misrc = true;
+static bool s_capture_mode_trace_initialized = false;
+static bool s_capture_mode_trace_last_ui = true;
+static bool s_capture_mode_trace_last_user = true;
+static bool s_capture_mode_trace_last_runtime = true;
+static bool s_capture_mode_trace_last_settings = true;
+static bool s_capture_mode_trace_last_recording = false;
+static bool s_capture_mode_trace_last_capturing = false;
+static bool s_capture_mode_render_trace_initialized = false;
+static bool s_capture_mode_render_last_mode = true;
+static bool s_capture_mode_render_last_user = true;
+static bool s_capture_mode_render_last_runtime = true;
+static bool s_capture_mode_render_last_settings = true;
+static bool s_capture_mode_render_last_recording = false;
+static bool s_capture_mode_render_last_capturing = false;
+static bool s_capture_mode_render_last_source_runtime = false;
+
+static const char *gui_ui_capture_mode_name(bool misrc_mode) {
+    return misrc_mode ? "MISRC" : "HSDAOH";
+}
+
+static void gui_ui_trace_capture_mode_state(gui_app_t *app, const char *source, bool force) {
+    if (!app) return;
+    bool ui_mode = s_capture_mode_state_misrc;
+    bool user_mode = app->user_capture_mode_misrc;
+    bool runtime_mode = app->capture_mode_runtime_misrc;
+    bool settings_mode = app->settings.misrc_mode;
+    bool recording = app->is_recording;
+    bool capturing = app->is_capturing;
+    bool changed = force || !s_capture_mode_trace_initialized ||
+                   (ui_mode != s_capture_mode_trace_last_ui) ||
+                   (user_mode != s_capture_mode_trace_last_user) ||
+                   (runtime_mode != s_capture_mode_trace_last_runtime) ||
+                   (settings_mode != s_capture_mode_trace_last_settings) ||
+                   (recording != s_capture_mode_trace_last_recording) ||
+                   (capturing != s_capture_mode_trace_last_capturing);
+    if (changed) {
+        TraceLog(LOG_INFO,
+                 "MODE TRACE: source=%s ui=%s user=%s runtime=%s settings=%s recording=%d capturing=%d",
+                 (source && source[0]) ? source : "unknown",
+                 gui_ui_capture_mode_name(ui_mode),
+                 gui_ui_capture_mode_name(user_mode),
+                 gui_ui_capture_mode_name(runtime_mode),
+                 gui_ui_capture_mode_name(settings_mode),
+                 recording ? 1 : 0,
+                 capturing ? 1 : 0);
+    }
+    s_capture_mode_trace_initialized = true;
+    s_capture_mode_trace_last_ui = ui_mode;
+    s_capture_mode_trace_last_user = user_mode;
+    s_capture_mode_trace_last_runtime = runtime_mode;
+    s_capture_mode_trace_last_settings = settings_mode;
+    s_capture_mode_trace_last_recording = recording;
+    s_capture_mode_trace_last_capturing = capturing;
+}
+
+static void gui_ui_trace_capture_mode_render(gui_app_t *app, bool rendered_mode, bool source_runtime) {
+    if (!app) return;
+    bool user_mode = app->user_capture_mode_misrc;
+    bool runtime_mode = app->capture_mode_runtime_misrc;
+    bool settings_mode = app->settings.misrc_mode;
+    bool recording = app->is_recording;
+    bool capturing = app->is_capturing;
+    bool changed = !s_capture_mode_render_trace_initialized ||
+                   (rendered_mode != s_capture_mode_render_last_mode) ||
+                   (user_mode != s_capture_mode_render_last_user) ||
+                   (runtime_mode != s_capture_mode_render_last_runtime) ||
+                   (settings_mode != s_capture_mode_render_last_settings) ||
+                   (recording != s_capture_mode_render_last_recording) ||
+                   (capturing != s_capture_mode_render_last_capturing) ||
+                   (source_runtime != s_capture_mode_render_last_source_runtime);
+    if (changed) {
+        TraceLog(LOG_INFO,
+                 "MODE RENDER TRACE: rendered=%s source=%s user=%s runtime=%s settings=%s recording=%d capturing=%d",
+                 gui_ui_capture_mode_name(rendered_mode),
+                 source_runtime ? "runtime" : "user",
+                 gui_ui_capture_mode_name(user_mode),
+                 gui_ui_capture_mode_name(runtime_mode),
+                 gui_ui_capture_mode_name(settings_mode),
+                 recording ? 1 : 0,
+                 capturing ? 1 : 0);
+    }
+    s_capture_mode_render_trace_initialized = true;
+    s_capture_mode_render_last_mode = rendered_mode;
+    s_capture_mode_render_last_user = user_mode;
+    s_capture_mode_render_last_runtime = runtime_mode;
+    s_capture_mode_render_last_settings = settings_mode;
+    s_capture_mode_render_last_recording = recording;
+    s_capture_mode_render_last_capturing = capturing;
+    s_capture_mode_render_last_source_runtime = source_runtime;
+}
 
 typedef enum {
     UI_TEXT_FIELD_NONE = 0,
@@ -217,6 +311,55 @@ static double s_status_free_space_last_update_s = 0.0;
 #define STATUS_FREE_SPACE_REFRESH_INTERVAL_S 1.0
 #define STATUS_FREE_SPACE_LOW_BYTES ((uint64_t)10 * 1000 * 1000 * 1000)
 #define STATUS_FREE_SPACE_WARN_BYTES ((uint64_t)25 * 1000 * 1000 * 1000)
+
+static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
+    if (!app) return;
+    if (!s_capture_mode_state_initialized) {
+        s_capture_mode_state_misrc = app->settings.misrc_mode;
+        s_capture_mode_state_initialized = true;
+        gui_ui_trace_capture_mode_state(app, "ui_init_from_settings", true);
+    }
+    bool expected_mode = s_capture_mode_state_misrc;
+    bool mismatch_user = (app->user_capture_mode_misrc != expected_mode);
+    bool mismatch_settings = (app->settings.misrc_mode != expected_mode);
+    bool mismatch_runtime = (!app->is_recording && app->capture_mode_runtime_misrc != expected_mode);
+    if (mismatch_user || mismatch_settings || mismatch_runtime) {
+        TraceLog(LOG_INFO,
+                 "MODE TRACE: source=gui_ui_sync_capture_mode_state reconcile expected=%s before_user=%s before_runtime=%s before_settings=%s recording=%d",
+                 gui_ui_capture_mode_name(expected_mode),
+                 gui_ui_capture_mode_name(app->user_capture_mode_misrc),
+                 gui_ui_capture_mode_name(app->capture_mode_runtime_misrc),
+                 gui_ui_capture_mode_name(app->settings.misrc_mode),
+                 app->is_recording ? 1 : 0);
+    }
+    app->user_capture_mode_misrc = expected_mode;
+    app->settings.misrc_mode = expected_mode;
+    if (!app->is_recording) {
+        app->capture_mode_runtime_misrc = expected_mode;
+    }
+    gui_ui_trace_capture_mode_state(app, "gui_ui_sync_capture_mode_state", false);
+}
+
+static void gui_ui_set_capture_mode_state(gui_app_t *app, bool misrc_mode) {
+    if (!app) return;
+    bool old_mode = s_capture_mode_state_misrc;
+    s_capture_mode_state_misrc = misrc_mode;
+    s_capture_mode_state_initialized = true;
+    app->user_capture_mode_misrc = misrc_mode;
+    app->settings.misrc_mode = misrc_mode;
+    if (!app->is_recording) {
+        app->capture_mode_runtime_misrc = misrc_mode;
+    }
+    if (old_mode != misrc_mode) {
+        TraceLog(LOG_INFO,
+                 "MODE TRACE: source=CaptureModeToggle old=%s new=%s recording=%d capturing=%d",
+                 gui_ui_capture_mode_name(old_mode),
+                 gui_ui_capture_mode_name(misrc_mode),
+                 app->is_recording ? 1 : 0,
+                 app->is_capturing ? 1 : 0);
+    }
+    gui_ui_trace_capture_mode_state(app, "gui_ui_set_capture_mode_state", true);
+}
 
 
 static Clay_String make_string(const char *str) {
@@ -1480,7 +1623,16 @@ static void render_toolbar(gui_app_t *app) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
         // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B)
-        Color mode_bg = app->settings.misrc_mode ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+        bool mode_source_runtime = app->is_recording;
+        bool mode_misrc = mode_source_runtime ? app->capture_mode_runtime_misrc
+                                              : app->user_capture_mode_misrc;
+        gui_ui_trace_capture_mode_render(app, mode_misrc, mode_source_runtime);
+        bool mode_change_allowed = !app->is_recording;
+        Color mode_bg = mode_misrc ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+        if (!mode_change_allowed) {
+            mode_bg = ui_disabled_color(mode_bg);
+        }
+        Color mode_fg = mode_change_allowed ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
         CLAY(CLAY_ID("CaptureModeToggle"), {
             .layout = {
                 .sizing = { CLAY_SIZING_FIXED(125), CLAY_SIZING_FIXED(32) },
@@ -1489,8 +1641,8 @@ static void render_toolbar(gui_app_t *app) {
             .backgroundColor = to_clay_color(mode_bg),
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            CLAY_TEXT(app->settings.misrc_mode ? CLAY_STRING("Mode: MISRC") : CLAY_STRING("Mode: HSDAOH"),
-                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            CLAY_TEXT(mode_misrc ? CLAY_STRING("Mode: MISRC") : CLAY_STRING("Mode: HSDAOH"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(mode_fg) }));
         }
 
         // Spacer
@@ -2346,6 +2498,7 @@ static void render_status_bar(gui_app_t *app) {
 
 // Main layout function
 void gui_render_layout(gui_app_t *app) {
+    gui_ui_sync_capture_mode_state(app);
     // Root container
     CLAY(CLAY_ID("Root"), {
         .layout = {
@@ -2415,6 +2568,7 @@ void gui_render_layout(gui_app_t *app) {
 void gui_handle_interactions(gui_app_t *app) {
     // Reset click consumed flag at start of each frame
     s_ui_consumed_click = false;
+    gui_ui_sync_capture_mode_state(app);
     gui_record_limit_runtime_tick(app);
 
     if (s_record_limit_window_open && !s_record_limit_timecode_edit && IsKeyPressed(KEY_ESCAPE)) {
@@ -2580,6 +2734,18 @@ void gui_handle_interactions(gui_app_t *app) {
             gui_ui_set_click_consumed();
             return;
         }
+        Vector2 click_pos = GetMousePosition();
+        bool mode_toggle_hit = Clay_PointerOver(CLAY_ID("CaptureModeToggle"));
+        if (mode_toggle_hit) {
+            TraceLog(LOG_INFO,
+                     "MODE CLICK TRACE: x=%.1f y=%.1f recording=%d capturing=%d user=%s runtime=%s settings=%s",
+                     click_pos.x, click_pos.y,
+                     app->is_recording ? 1 : 0,
+                     app->is_capturing ? 1 : 0,
+                     gui_ui_capture_mode_name(app->user_capture_mode_misrc),
+                     gui_ui_capture_mode_name(app->capture_mode_runtime_misrc),
+                     gui_ui_capture_mode_name(app->settings.misrc_mode));
+        }
         // Check connect button
         if (Clay_PointerOver(CLAY_ID("ConnectButton"))) {
             if (app->is_capturing) {
@@ -2593,12 +2759,21 @@ void gui_handle_interactions(gui_app_t *app) {
                 }
             }
         }
-        if (Clay_PointerOver(CLAY_ID("CaptureModeToggle"))) {
-            app->settings.misrc_mode = !app->settings.misrc_mode;
-            gui_settings_save(&app->settings);
-            gui_app_set_status(app, app->settings.misrc_mode
-                ? "Capture mode set to MISRC (A/B swapped)"
-                : "Capture mode set to HSDAOH (A/B normal)");
+        if (mode_toggle_hit) {
+            if (app->is_recording) {
+                TraceLog(LOG_INFO,
+                         "MODE TRACE: source=CaptureModeToggle blocked current=%s recording=1",
+                         gui_ui_capture_mode_name(s_capture_mode_state_misrc));
+                gui_app_set_status(app, "Capture mode is locked while recording");
+            } else {
+                gui_ui_set_capture_mode_state(app, !s_capture_mode_state_misrc);
+                gui_settings_save(&app->settings);
+                gui_app_set_status(app, s_capture_mode_state_misrc
+                    ? "Capture mode set to MISRC (A/B swapped)"
+                    : "Capture mode set to HSDAOH (A/B normal)");
+            }
+            gui_ui_set_click_consumed();
+            return;
         }
         if (Clay_PointerOver(CLAY_ID("StopOnDropoutToggle"))) {
             app->settings.stop_on_dropout = !app->settings.stop_on_dropout;

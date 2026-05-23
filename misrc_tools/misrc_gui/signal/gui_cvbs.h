@@ -87,6 +87,19 @@ typedef enum {
     CVBS_FRAME_VIEW_FULL   = 1,  // Full line/frame geometry (4fsc width, 625/525 lines)
 } cvbs_frame_view_t;
 
+// Video level mode controls whether black/white/sync levels keep adapting
+// each field (AUTO) or are held fixed after lock (FIXED).
+typedef enum {
+    CVBS_LEVEL_MODE_AUTO  = 0,
+    CVBS_LEVEL_MODE_FIXED = 1,
+} cvbs_level_mode_t;
+// Sync mode controls whether H/V lock timing keeps adapting (AUTO)
+// or uses a fixed lock profile once stable (FIXED).
+typedef enum {
+    CVBS_SYNC_MODE_AUTO  = 0,
+    CVBS_SYNC_MODE_FIXED = 1,
+} cvbs_sync_mode_t;
+
 // Software PLL state for H-sync tracking
 typedef struct {
     // Core PLL state
@@ -140,12 +153,23 @@ typedef struct {
 typedef struct cvbs_decoder {
     // Track whether we've received each field for the current frame
     bool field_ready[2];
+    uint64_t field_sequence;          // Monotonic sequence number for completed fields
+    uint64_t field_last_update_seq[2];// Last sequence value written to each field buffer
     // Frame state
     cvbs_frame_state_t state;
 
     // Decoder configuration
     cvbs_osd_mode_t osd_mode;           // Off / Minimal / Stats
     cvbs_frame_view_t frame_view_mode;  // Active-only vs full-frame view
+    cvbs_level_mode_t level_mode;       // Auto-adaptive vs fixed video levels
+    cvbs_sync_mode_t sync_mode;         // Auto-adaptive vs fixed H/V sync behavior
+    bool fixed_levels_valid;            // Fixed mode has latched levels from signal
+    int16_t fixed_black_level;          // Latched black level used in fixed mode
+    int16_t fixed_white_level;          // Latched white level used in fixed mode
+    bool fixed_sync_locked;             // FIXED mode has acquired lock and frozen line period
+    double fixed_line_period;           // Frozen line period used while fixed sync lock is active
+    int fixed_bad_syncs;                // Consecutive bad H-syncs while fixed lock is active
+    int16_t fixed_sync_threshold;       // Latched sync threshold used while fixed lock is active
 
     // Field buffers (grayscale, 720 x field_height each)
     // Each field buffer stores half the vertical resolution
@@ -206,14 +230,21 @@ typedef struct cvbs_decoder {
         int hsyncs_last_field;         // H-syncs found in last field
         int last_half_line_count;      // Half-line count from last V-sync
         int log_counter;               // Per-instance debug log counter
+        bool mode_trace_initialized;   // CVBS mode transition trace initialized
+        int last_level_mode;           // Last observed cvbs_level_mode_t value
+        int last_sync_mode;            // Last observed cvbs_sync_mode_t value
+        bool last_fixed_sync_locked;   // Last observed fixed-sync lock state
+        bool last_fixed_levels_valid;  // Last observed fixed-level latch state
     } debug;
 
     // UI overlay state (for panel-top controls)
     struct {
-        // Buttons (right-aligned): [Decoder][OSD][Frame][System]
+        // Buttons (right-aligned vertical): [Decoder], [OSD], [Frame], [Levels], [Sync], [System]
         Rectangle decoder_btn_rect;    // Hit box for decoder mode button
         Rectangle osd_btn_rect;        // Hit box for OSD mode button
         Rectangle frame_btn_rect;      // Hit box for frame mode button
+        Rectangle level_btn_rect;      // Hit box for levels mode button
+        Rectangle sync_btn_rect;       // Hit box for sync mode button
         Rectangle system_btn_rect;     // Hit box for system selector button
 
         // Dropdown options for system selector (0=625-line PAL/SECAM, 1=525-line NTSC)

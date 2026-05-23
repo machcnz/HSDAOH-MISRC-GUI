@@ -18,6 +18,13 @@
 static uint64_t g_field_decode_us = 0;      // Accumulated decode time for current field
 static double g_field_decode_avg_ms = 0.0;  // Last completed field's decode time (for OSD)
 
+static inline double cvbs_nominal_line_period(const cvbs_decoder_t *decoder);
+static inline double cvbs_effective_line_period(const cvbs_decoder_t *decoder);
+static inline void cvbs_reset_fixed_sync_lock(cvbs_decoder_t *decoder);
+static const char *cvbs_level_mode_name(cvbs_level_mode_t mode);
+static const char *cvbs_sync_mode_name(cvbs_sync_mode_t mode);
+static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source);
+
 //-----------------------------------------------------------------------------
 // Internal Constants
 //-----------------------------------------------------------------------------
@@ -38,6 +45,68 @@ static double g_field_decode_avg_ms = 0.0;  // Last completed field's decode tim
 //-----------------------------------------------------------------------------
 // Internal Helper Functions
 //-----------------------------------------------------------------------------
+static const char *cvbs_level_mode_name(cvbs_level_mode_t mode) {
+    return (mode == CVBS_LEVEL_MODE_FIXED) ? "Fixed" : "Auto";
+}
+
+static const char *cvbs_sync_mode_name(cvbs_sync_mode_t mode) {
+    return (mode == CVBS_SYNC_MODE_FIXED) ? "Fixed" : "Auto";
+}
+
+static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source) {
+    if (!decoder) return;
+    if (!decoder->debug.mode_trace_initialized) {
+        decoder->debug.mode_trace_initialized = true;
+        decoder->debug.last_level_mode = (int)decoder->level_mode;
+        decoder->debug.last_sync_mode = (int)decoder->sync_mode;
+        decoder->debug.last_fixed_sync_locked = decoder->fixed_sync_locked;
+        decoder->debug.last_fixed_levels_valid = decoder->fixed_levels_valid;
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s init level=%s sync=%s lock=%d fixed_levels_valid=%d",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_level_mode_name(decoder->level_mode),
+                 cvbs_sync_mode_name(decoder->sync_mode),
+                 decoder->fixed_sync_locked ? 1 : 0,
+                 decoder->fixed_levels_valid ? 1 : 0);
+        return;
+    }
+
+    if (decoder->debug.last_level_mode != (int)decoder->level_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=level_mode old=%s new=%s",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_level_mode_name((cvbs_level_mode_t)decoder->debug.last_level_mode),
+                 cvbs_level_mode_name(decoder->level_mode));
+    }
+    if (decoder->debug.last_sync_mode != (int)decoder->sync_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=sync_mode old=%s new=%s",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_sync_mode_name((cvbs_sync_mode_t)decoder->debug.last_sync_mode),
+                 cvbs_sync_mode_name(decoder->sync_mode));
+    }
+    if (decoder->debug.last_fixed_sync_locked != decoder->fixed_sync_locked) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=fixed_sync_locked old=%d new=%d sync_mode=%s",
+                 (source && source[0]) ? source : "unknown",
+                 decoder->debug.last_fixed_sync_locked ? 1 : 0,
+                 decoder->fixed_sync_locked ? 1 : 0,
+                 cvbs_sync_mode_name(decoder->sync_mode));
+    }
+    if (decoder->debug.last_fixed_levels_valid != decoder->fixed_levels_valid) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=fixed_levels_valid old=%d new=%d level_mode=%s",
+                 (source && source[0]) ? source : "unknown",
+                 decoder->debug.last_fixed_levels_valid ? 1 : 0,
+                 decoder->fixed_levels_valid ? 1 : 0,
+                 cvbs_level_mode_name(decoder->level_mode));
+    }
+
+    decoder->debug.last_level_mode = (int)decoder->level_mode;
+    decoder->debug.last_sync_mode = (int)decoder->sync_mode;
+    decoder->debug.last_fixed_sync_locked = decoder->fixed_sync_locked;
+    decoder->debug.last_fixed_levels_valid = decoder->fixed_levels_valid;
+}
 
 // Luma lowpass filter to remove chroma subcarrier
 // 17-tap stronger Gaussian lowpass (sigma≈3.0) for true monochrome.
@@ -312,6 +381,10 @@ bool gui_cvbs_init(cvbs_decoder_t *decoder) {
     decoder->state.in_vsync = false;
     decoder->state.frame_complete = false;
     decoder->state.frames_decoded = 0;
+    decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
+    decoder->sync_mode = CVBS_SYNC_MODE_AUTO;
+    decoder->fixed_levels_valid = false;
+    cvbs_reset_fixed_sync_lock(decoder);
 
     return true;
 }
@@ -382,12 +455,7 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
 
     // Reset software PLL (keep line period consistent with selected system)
     decoder->pll.phase = 0;
-    if (decoder->state.format == CVBS_FORMAT_NTSC) {
-        decoder->pll.line_period = CVBS_SAMPLES_PER_LINE_NTSC;
-    } else {
-        // PAL + SECAM + UNKNOWN use PAL timing
-        decoder->pll.line_period = CVBS_SAMPLES_PER_LINE_PAL;
-    }
+    decoder->pll.line_period = cvbs_nominal_line_period(decoder);
     decoder->pll.freq_adjust = 0;
     decoder->pll.phase_error = 0;
     decoder->pll.phase_integral = 0;
@@ -418,6 +486,13 @@ void gui_cvbs_reset(cvbs_decoder_t *decoder) {
     // Reset field ready flags (important when switching modes)
     decoder->field_ready[0] = false;
     decoder->field_ready[1] = false;
+    decoder->field_sequence = 0;
+    decoder->field_last_update_seq[0] = 0;
+    decoder->field_last_update_seq[1] = 0;
+    decoder->fixed_levels_valid = false;
+    decoder->fixed_black_level = 0;
+    decoder->fixed_white_level = 0;
+    cvbs_reset_fixed_sync_lock(decoder);
 
     // Reset legacy state
     decoder->lines_since_vsync = 0;
@@ -481,10 +556,27 @@ static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
         return;
     }
 
-    // Exponential moving average for stability (update once per field)
-    const float alpha = 0.15f;  // Slightly faster convergence with histogram reliability
 
-    if (decoder->adaptive.sync_tip == 0 && decoder->adaptive.white == 0) {
+    bool first_levels = (decoder->adaptive.sync_tip == 0 && decoder->adaptive.white == 0);
+    bool scene_change = false;
+    float alpha_sync = 0.15f;
+    float alpha_luma = 0.15f;
+
+    if (!first_levels) {
+        int black_delta = abs((int)detected.black_level - (int)decoder->adaptive.black);
+        int white_delta = abs((int)detected.white_level - (int)decoder->adaptive.white);
+        int threshold_delta = abs((int)detected.sync_threshold - (int)decoder->adaptive.threshold);
+        int luma_delta = (black_delta > white_delta) ? black_delta : white_delta;
+        // Scene changes mostly affect luma distribution. Keep sync adaptation conservative
+        // while allowing black/white levels to catch up faster.
+        scene_change = (luma_delta > 220 && threshold_delta < 220);
+        if (scene_change) {
+            alpha_luma = 0.45f;
+            alpha_sync = 0.08f;
+        }
+    }
+
+    if (first_levels) {
         // First time - initialize directly from detected levels
         decoder->adaptive.sync_tip = detected.sig_min;
         decoder->adaptive.blanking = detected.black_level;  // Histogram finds actual blanking
@@ -492,29 +584,69 @@ static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
         decoder->adaptive.white = detected.white_level;
         decoder->adaptive.threshold = detected.sync_threshold;
     } else {
-        // Smooth update using detected histogram peaks
-        decoder->adaptive.sync_tip = (int16_t)(decoder->adaptive.sync_tip * (1.0f - alpha) +
-                                               detected.sig_min * alpha);
-        decoder->adaptive.blanking = (int16_t)(decoder->adaptive.blanking * (1.0f - alpha) +
-                                               detected.black_level * alpha);
-        decoder->adaptive.black = (int16_t)(decoder->adaptive.black * (1.0f - alpha) +
-                                            detected.black_level * alpha);
-        decoder->adaptive.white = (int16_t)(decoder->adaptive.white * (1.0f - alpha) +
-                                            detected.white_level * alpha);
-        decoder->adaptive.threshold = (int16_t)(decoder->adaptive.threshold * (1.0f - alpha) +
-                                                detected.sync_threshold * alpha);
+        // Smooth update using detected histogram peaks.
+        // Sync domain tracks slowly and is step-limited to avoid scene-cut jitter.
+        int16_t target_threshold = detected.sync_threshold;
+        int threshold_step = (int)target_threshold - (int)decoder->adaptive.threshold;
+        int max_threshold_step = scene_change ? 20 : 56;
+        if (threshold_step > max_threshold_step) {
+            target_threshold = (int16_t)(decoder->adaptive.threshold + max_threshold_step);
+        } else if (threshold_step < -max_threshold_step) {
+            target_threshold = (int16_t)(decoder->adaptive.threshold - max_threshold_step);
+        }
+
+        decoder->adaptive.sync_tip = (int16_t)(decoder->adaptive.sync_tip * (1.0f - alpha_sync) +
+                                               detected.sig_min * alpha_sync);
+        decoder->adaptive.blanking = (int16_t)(decoder->adaptive.blanking * (1.0f - alpha_sync) +
+                                               detected.black_level * alpha_sync);
+        decoder->adaptive.black = (int16_t)(decoder->adaptive.black * (1.0f - alpha_luma) +
+                                            detected.black_level * alpha_luma);
+        decoder->adaptive.white = (int16_t)(decoder->adaptive.white * (1.0f - alpha_luma) +
+                                            detected.white_level * alpha_luma);
+        decoder->adaptive.threshold = (int16_t)(decoder->adaptive.threshold * (1.0f - alpha_sync) +
+                                                target_threshold * alpha_sync);
     }
-
-    // Update legacy levels for compatibility
-    int16_t range = decoder->adaptive.white - decoder->adaptive.sync_tip;
-    if (range < 100) range = 100;
-
+    // Keep sync tracking adaptive in both modes.
     decoder->levels.sig_min = decoder->adaptive.sync_tip;
     decoder->levels.sig_max = decoder->adaptive.white;
-    decoder->levels.range = range;
     decoder->levels.sync_threshold = decoder->adaptive.threshold;
-    decoder->levels.black_level = decoder->adaptive.black;
-    decoder->levels.white_level = decoder->adaptive.white;
+
+    // Fixed mode holds display black/white levels to avoid visible pumping.
+    // Auto mode continuously updates display levels each field.
+    if (decoder->level_mode == CVBS_LEVEL_MODE_FIXED) {
+        if (!decoder->fixed_levels_valid) {
+            decoder->fixed_black_level = decoder->adaptive.black;
+            decoder->fixed_white_level = decoder->adaptive.white;
+            decoder->fixed_levels_valid = true;
+        }
+        decoder->levels.black_level = decoder->fixed_black_level;
+        decoder->levels.white_level = decoder->fixed_white_level;
+    } else {
+        decoder->fixed_levels_valid = false;
+        decoder->levels.black_level = decoder->adaptive.black;
+        decoder->levels.white_level = decoder->adaptive.white;
+    }
+
+    // Update compatibility range value (used as signal-validity guard).
+    int16_t range = decoder->levels.white_level - decoder->levels.sig_min;
+    if (range < 100) range = 100;
+    decoder->levels.range = range;
+
+    // In FIXED sync mode, keep the lock threshold slowly tracking long-term gain shifts
+    // (AGC/scene changes) without letting scene content cause abrupt threshold jumps.
+    if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED &&
+        decoder->fixed_sync_locked &&
+        decoder->adaptive.threshold != 0) {
+        if (decoder->fixed_sync_threshold == 0) {
+            decoder->fixed_sync_threshold = decoder->adaptive.threshold;
+        } else {
+            int delta = (int)decoder->adaptive.threshold - (int)decoder->fixed_sync_threshold;
+            int max_step = scene_change ? 8 : 16;
+            if (delta > max_step) delta = max_step;
+            if (delta < -max_step) delta = -max_step;
+            decoder->fixed_sync_threshold = (int16_t)(decoder->fixed_sync_threshold + delta);
+        }
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -534,6 +666,10 @@ static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
 #define PLL_LOCK_THRESHOLD  100     // Phase error below this = good sync
 #define PLL_LOCK_COUNT      10      // Good syncs needed to declare lock
 #define PLL_UNLOCK_COUNT    5       // Bad syncs to lose lock
+#define PLL_FIXED_PHASE_GAIN    0.03   // Small phase nudge in fixed mode (no frequency adaptation)
+#define PLL_FIXED_UNLOCK_COUNT  20     // Bad syncs before fixed lock drops back to acquisition
+#define PLL_FIXED_VSYNC_WINDOW  96     // Accept V-sync in fixed lock near expected line cadence
+#define PLL_FIXED_PERIOD_CLAMP  120.0  // Clamp fixed period to nominal ± this many samples
 
 // H-sync pulse validation (aligned with gui_trigger.h constants)
 #define HSYNC_MIN_WIDTH     CVBS_HSYNC_MIN_WIDTH  // 100 samples (~2.5µs minimum)
@@ -546,6 +682,31 @@ static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
 #define LPF_ALPHA_FP        20      // 0.08 * 256 ≈ 20
 #define LPF_ONE_MINUS_FP    236     // (1 - 0.08) * 256 ≈ 236
 #define LPF_SHIFT           8       // Divide by 256
+
+static inline double cvbs_nominal_line_period(const cvbs_decoder_t *decoder) {
+    if (!decoder) return (double)CVBS_SAMPLES_PER_LINE_PAL;
+    return (decoder->state.format == CVBS_FORMAT_NTSC)
+           ? (double)CVBS_SAMPLES_PER_LINE_NTSC
+           : (double)CVBS_SAMPLES_PER_LINE_PAL;
+}
+
+static inline double cvbs_effective_line_period(const cvbs_decoder_t *decoder) {
+    if (!decoder) return (double)CVBS_SAMPLES_PER_LINE_PAL;
+    if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED &&
+        decoder->fixed_sync_locked &&
+        decoder->fixed_line_period > 0.0) {
+        return decoder->fixed_line_period;
+    }
+    return decoder->pll.line_period + decoder->pll.freq_adjust;
+}
+
+static inline void cvbs_reset_fixed_sync_lock(cvbs_decoder_t *decoder) {
+    if (!decoder) return;
+    decoder->fixed_sync_locked = false;
+    decoder->fixed_bad_syncs = 0;
+    decoder->fixed_line_period = cvbs_nominal_line_period(decoder);
+    decoder->fixed_sync_threshold = 0;
+}
 
 //-----------------------------------------------------------------------------
 // Lowpass Filter for Sync Detection
@@ -606,9 +767,23 @@ static void deinterlace_fields(cvbs_decoder_t *decoder) {
     uint8_t *even_field = decoder->field_buffer[1];  // Even field (frame lines 0, 2, 4...)
     uint8_t *frame = decoder->frame_buffer;
 
-    // Check which fields are valid
+    // Check which fields are valid.
+    // Weave only when both fields are temporally adjacent; otherwise one field is stale
+    // and we should bob from the newest field to avoid old/offset field pairing.
     bool have_odd = decoder->field_ready[0];
     bool have_even = decoder->field_ready[1];
+    if (have_odd && have_even) {
+        uint64_t odd_seq = decoder->field_last_update_seq[0];
+        uint64_t even_seq = decoder->field_last_update_seq[1];
+        uint64_t seq_diff = (odd_seq > even_seq) ? (odd_seq - even_seq) : (even_seq - odd_seq);
+        if (seq_diff > 1) {
+            if (odd_seq >= even_seq) {
+                have_even = false;
+            } else {
+                have_odd = false;
+            }
+        }
+    }
 
     if (have_odd && have_even) {
         // Weave mode: interleave both fields for full vertical resolution
@@ -723,6 +898,8 @@ static void complete_field_pll(cvbs_decoder_t *decoder) {
     // Mark this field as received
     int field_idx = decoder->state.current_field ? 1 : 0;
     decoder->field_ready[field_idx] = true;
+    decoder->field_sequence++;
+    decoder->field_last_update_seq[field_idx] = decoder->field_sequence;
 
     // Deinterlace and display - works with one or both fields
     // Bob mode is used until both fields are available, then weave takes over
@@ -760,14 +937,18 @@ static void start_new_field_pll(cvbs_decoder_t *decoder, bool is_odd_field) {
 // Process a detected H-sync edge - update PLL
 static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
     cvbs_pll_state_t *pll = &decoder->pll;
+    bool fixed_mode = (decoder->sync_mode == CVBS_SYNC_MODE_FIXED);
+    bool fixed_locked = fixed_mode && decoder->fixed_sync_locked && decoder->fixed_line_period > 0.0;
+    double line_period = fixed_locked ? decoder->fixed_line_period : pll->line_period;
+    if (line_period < 1.0) line_period = cvbs_nominal_line_period(decoder);
 
     // Calculate phase error: how far off was our prediction?
     // Ideal sync should happen at phase = 0 (or line_period)
     double phase_error = phase_at_sync;
 
     // Wrap to -half_period to +half_period
-    if (phase_error > pll->line_period / 2) {
-        phase_error -= pll->line_period;
+    if (phase_error > line_period / 2) {
+        phase_error -= line_period;
     }
 
     // Update PLL lock status based on phase error magnitude
@@ -784,26 +965,82 @@ static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
             pll->locked = false;
         }
     }
+    if (fixed_mode) {
+        if (!fixed_locked) {
+            // Acquisition phase for fixed mode: use AUTO-style PLL long enough to
+            // find a stable cadence, then freeze line period.
+            if (fabs(phase_error) <= line_period * 0.4) {
+                pll->phase -= phase_error * PLL_PHASE_GAIN;
+                pll->phase_integral += phase_error * PLL_INTEGRAL_GAIN;
+                if (pll->phase_integral > 50) pll->phase_integral = 50;
+                if (pll->phase_integral < -50) pll->phase_integral = -50;
+                pll->freq_adjust = pll->phase_integral;
+            }
 
-    // Reject obviously bad syncs (too far off)
-    if (fabs(phase_error) > pll->line_period * 0.4) {
-        // This sync is way off - probably noise or V-sync region
-        // Don't adjust PLL, just increment line counter if phase wrapped
-        return;
+            if (pll->locked) {
+                double nominal = cvbs_nominal_line_period(decoder);
+                double fixed_period = pll->line_period + pll->freq_adjust;
+                double min_period = nominal - PLL_FIXED_PERIOD_CLAMP;
+                double max_period = nominal + PLL_FIXED_PERIOD_CLAMP;
+                if (fixed_period < min_period) fixed_period = min_period;
+                if (fixed_period > max_period) fixed_period = max_period;
+                decoder->fixed_line_period = fixed_period;
+                decoder->fixed_sync_locked = true;
+                decoder->fixed_bad_syncs = 0;
+                decoder->fixed_sync_threshold = decoder->adaptive.threshold;
+                if (decoder->fixed_sync_threshold == 0) {
+                    decoder->fixed_sync_threshold = decoder->levels.sync_threshold;
+                }
+                pll->line_period = fixed_period;
+                pll->freq_adjust = 0.0;
+                pll->phase_integral = 0.0;
+            }
+        } else {
+            // Locked fixed mode: hold frequency constant, only apply a tiny
+            // phase correction to avoid long-term drift.
+            pll->line_period = decoder->fixed_line_period;
+            pll->freq_adjust = 0.0;
+            pll->phase_integral = 0.0;
+            int expected_lines = (decoder->state.format == CVBS_FORMAT_NTSC)
+                                 ? NTSC_FIELD_LINES
+                                 : PAL_FIELD_LINES;
+            bool near_field_boundary = (pll->current_line < 8) ||
+                                       (pll->current_line > (expected_lines - 8));
+            bool in_vsync_region = decoder->vsync.in_vsync;
+
+            if (fabs(phase_error) < PLL_LOCK_THRESHOLD) {
+                pll->phase -= phase_error * PLL_FIXED_PHASE_GAIN;
+                if (decoder->fixed_bad_syncs > 0) decoder->fixed_bad_syncs--;
+            } else if (fabs(phase_error) > line_period * 0.30) {
+                if (!in_vsync_region && !near_field_boundary) {
+                    decoder->fixed_bad_syncs++;
+                }
+            }
+
+            if (decoder->fixed_bad_syncs >= PLL_FIXED_UNLOCK_COUNT) {
+                cvbs_reset_fixed_sync_lock(decoder);
+                pll->locked = false;
+                pll->good_sync_count = 0;
+                pll->bad_sync_count = 0;
+                pll->phase_integral = 0.0;
+                pll->freq_adjust = 0.0;
+                decoder->sync_errors++;
+            }
+        }
+    } else {
+        // AUTO mode: keep adapting both phase and frequency.
+        if (fabs(phase_error) > line_period * 0.4) {
+            // This sync is way off - probably noise or V-sync region.
+            decoder->debug.hsyncs_last_field++;
+            return;
+        }
+
+        pll->phase -= phase_error * PLL_PHASE_GAIN;
+        pll->phase_integral += phase_error * PLL_INTEGRAL_GAIN;
+        if (pll->phase_integral > 50) pll->phase_integral = 50;
+        if (pll->phase_integral < -50) pll->phase_integral = -50;
+        pll->freq_adjust = pll->phase_integral;
     }
-
-    // Apply phase correction (proportional)
-    pll->phase -= phase_error * PLL_PHASE_GAIN;
-
-    // Accumulate for integral term (frequency drift correction)
-    pll->phase_integral += phase_error * PLL_INTEGRAL_GAIN;
-
-    // Limit integral term to prevent runaway
-    if (pll->phase_integral > 50) pll->phase_integral = 50;
-    if (pll->phase_integral < -50) pll->phase_integral = -50;
-
-    // Apply integral correction to frequency
-    pll->freq_adjust = pll->phase_integral;
 
     // Store for derivative term (not currently used)
     pll->phase_error = phase_error;
@@ -848,6 +1085,49 @@ static void decode_current_line(cvbs_decoder_t *decoder) {
     decoder->line_buffer_count = 0;
 }
 
+// Resolve sync threshold with safe fallbacks:
+// 1) adaptive threshold (preferred, field-tracked)
+// 2) legacy levels threshold
+// 3) one-shot histogram bootstrap from current buffer (startup only)
+static inline int16_t cvbs_get_sync_threshold(cvbs_decoder_t *decoder,
+                                              const int16_t *buf, size_t count) {
+    if (!decoder) return 0;
+    if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED &&
+        decoder->fixed_sync_locked &&
+        decoder->fixed_sync_threshold != 0) {
+        return decoder->fixed_sync_threshold;
+    }
+
+    int16_t threshold = decoder->adaptive.threshold;
+    if (threshold == 0) {
+        threshold = decoder->levels.sync_threshold;
+    }
+
+    // Bootstrap when decoder starts with no committed adaptive levels yet.
+    if (threshold == 0 && buf && count >= 64) {
+        cvbs_levels_t bootstrap = {0};
+        trigger_analyze_cvbs_levels(buf, count, &bootstrap);
+        if (bootstrap.range >= 100) {
+            decoder->levels = bootstrap;
+            if (decoder->adaptive.sync_tip == 0 && decoder->adaptive.white == 0) {
+                decoder->adaptive.sync_tip = bootstrap.sig_min;
+                decoder->adaptive.blanking = bootstrap.black_level;
+                decoder->adaptive.black = bootstrap.black_level;
+                decoder->adaptive.white = bootstrap.white_level;
+                decoder->adaptive.threshold = bootstrap.sync_threshold;
+            }
+            if (decoder->level_mode == CVBS_LEVEL_MODE_FIXED) {
+                decoder->fixed_black_level = bootstrap.black_level;
+                decoder->fixed_white_level = bootstrap.white_level;
+                decoder->fixed_levels_valid = true;
+            }
+            threshold = bootstrap.sync_threshold;
+        }
+    }
+
+    return threshold;
+}
+
 void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
                               const int16_t *buf, size_t count) {
     if (!decoder || !buf || count < 100) return;
@@ -863,15 +1143,15 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
     }
 
     // Cache frequently accessed values in local variables
-    int16_t threshold = decoder->adaptive.threshold;
+    int16_t threshold = cvbs_get_sync_threshold(decoder, buf, count);
     cvbs_pll_state_t *pll = &decoder->pll;
     int16_t *line_buffer = decoder->line_buffer;
     int line_buffer_count = decoder->line_buffer_count;
     size_t global_sample_pos = decoder->global_sample_pos;
     bool last_filtered_above = decoder->last_filtered_above;
 
-    // Pre-calculate effective period (only changes on H-sync, updated in loop)
-    double effective_period = pll->line_period + pll->freq_adjust;
+    // Pre-calculate effective period (only changes on H-sync/state transitions)
+    double effective_period = cvbs_effective_line_period(decoder);
 
     // Pre-calculate max lines for field overflow check
     int max_lines = (decoder->state.format == CVBS_FORMAT_NTSC) ?
@@ -923,21 +1203,53 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
             } else if (vs->in_vsync && interval >= 2200 && interval <= 3000) {
                 // V-sync complete
                 vs->in_vsync = false;
-                decoder->debug.last_half_line_count = vs->total_half_lines;
-                bool is_odd_field = (vs->total_half_lines >= 15);
+                int vsync_half_lines = vs->total_half_lines;
+                decoder->debug.last_half_line_count = vsync_half_lines;
+                bool is_odd_field = (vsync_half_lines >= 15);
+                bool strong_vsync_signature = (vsync_half_lines >= 10);
                 vs->half_line_count = 0;
                 vs->total_half_lines = 0;
+                int expected_lines = (decoder->state.format == CVBS_FORMAT_NTSC)
+                                     ? NTSC_FIELD_LINES
+                                     : PAL_FIELD_LINES;
+                int line_delta = pll->current_line - expected_lines;
+                if (line_delta < 0) line_delta = -line_delta;
+                bool accept_vsync = true;
+                if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED &&
+                    decoder->fixed_sync_locked) {
+                    int allowed_window = PLL_FIXED_VSYNC_WINDOW;
+                    if (decoder->fixed_bad_syncs > (PLL_FIXED_UNLOCK_COUNT / 2)) {
+                        allowed_window += 32;
+                    }
+                    if (line_delta > allowed_window) {
+                        // Allow re-anchoring when the V-sync signature is strong,
+                        // even if line counting drifted.
+                        bool can_reanchor = strong_vsync_signature &&
+                                            (line_delta <= (expected_lines / 2));
+                        accept_vsync = can_reanchor;
+                    }
+                }
 
-                // Write back before calling start_new_field_pll
-                decoder->line_buffer_count = line_buffer_count;
-                decoder->global_sample_pos = global_sample_pos;
-                decoder->last_filtered_above = is_above;
+                if (accept_vsync) {
+                    if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED &&
+                        decoder->fixed_sync_locked &&
+                        !strong_vsync_signature) {
+                        // Weak V-sync signature: keep field cadence deterministic.
+                        is_odd_field = (decoder->state.current_field == 1);
+                    }
+                    // Write back before calling start_new_field_pll
+                    decoder->line_buffer_count = line_buffer_count;
+                    decoder->global_sample_pos = global_sample_pos;
+                    decoder->last_filtered_above = is_above;
 
-                start_new_field_pll(decoder, is_odd_field);
+                    start_new_field_pll(decoder, is_odd_field);
 
-                // Refresh cached values that may have changed
-                effective_period = pll->line_period + pll->freq_adjust;
-                line_buffer_count = decoder->line_buffer_count;
+                    // Refresh cached values that may have changed
+                    effective_period = cvbs_effective_line_period(decoder);
+                    line_buffer_count = decoder->line_buffer_count;
+                } else {
+                    decoder->sync_errors++;
+                }
             } else {
                 vs->half_line_count = 0;
             }
@@ -955,7 +1267,7 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
             if (pulse_width >= HSYNC_MIN_WIDTH && pulse_width <= HSYNC_MAX_WIDTH) {
                 pll_process_hsync(decoder, pll->phase);
                 // Update effective period after PLL adjustment
-                effective_period = pll->line_period + pll->freq_adjust;
+                effective_period = cvbs_effective_line_period(decoder);
             }
         }
 
@@ -984,7 +1296,7 @@ void gui_cvbs_process_buffer(cvbs_decoder_t *decoder,
                 decoder->global_sample_pos = global_sample_pos;
                 decoder->last_filtered_above = last_filtered_above;
                 start_new_field_pll(decoder, next_is_odd);
-                effective_period = pll->line_period + pll->freq_adjust;
+                effective_period = cvbs_effective_line_period(decoder);
                 line_buffer_count = decoder->line_buffer_count;
             }
         }
@@ -1098,9 +1410,9 @@ void gui_cvbs_render_frame(cvbs_decoder_t *decoder,
     // The decoder resamples sync-to-sync across the full frame width, so the
     // active picture is offset from theoretical 4fsc positions.
     bool ntsc = (decoder->state.format == CVBS_FORMAT_NTSC);
-    int active_x = ntsc ? 100 : 130;
+    int active_x = ntsc ? 100 : 120;
     int active_y = ntsc ? 25  : 35;
-    int active_w = ntsc ? 720 : 890;
+    int active_w = ntsc ? 720 : 900;
     int active_h = ntsc ? 470 : 560;
     if (active_x < 0) active_x = 0;
     if (active_y < 0) active_y = 0;
@@ -1244,7 +1556,12 @@ void gui_cvbs_set_format(cvbs_decoder_t *decoder, int format_select) {
 // Render the CVBS overlay controls in the top-right corner of the panel
 // Uses the same style as sidebar dropdowns (FONT_SIZE_DROPDOWN_OPT, COLOR_BUTTON, etc.)
 // Overlay hitbox state is stored in decoder->overlay for click detection.
-// Layout (right-aligned): [Decoder][OSD][System]
+// Layout (right-aligned vertical): [Decoder]
+//                                  [OSD]
+//                                  [Frame]
+//                                  [Levels]
+//                                  [Sync]
+//                                  [System]
 static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
                                         float panel_x, float panel_y, float panel_w) {
     if (!decoder) return;
@@ -1263,6 +1580,12 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     const char *frame_label = (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL)
                               ? "Frame: Full"
                               : "Frame: Active";
+    const char *level_label = (decoder->level_mode == CVBS_LEVEL_MODE_FIXED)
+                              ? "Levels: Fixed"
+                              : "Levels: Auto";
+    const char *sync_label = (decoder->sync_mode == CVBS_SYNC_MODE_FIXED)
+                             ? "Sync: Fixed"
+                             : "Sync: Auto";
 
     // Compute button width large enough for both labels so the box
     // does not change size when switching between PAL and NTSC.
@@ -1281,47 +1604,88 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     float frame_text_w = (float)gui_text_measure(frame_label, FONT_SIZE_DROPDOWN_OPT);
     float frame_btn_w = frame_text_w + 16.0f;
     if (frame_btn_w < 110.0f) frame_btn_w = 110.0f;
+    float level_text_w = (float)gui_text_measure(level_label, FONT_SIZE_DROPDOWN_OPT);
+    float level_btn_w = level_text_w + 16.0f;
+    if (level_btn_w < 120.0f) level_btn_w = 120.0f;
+    float sync_text_w = (float)gui_text_measure(sync_label, FONT_SIZE_DROPDOWN_OPT);
+    float sync_btn_w = sync_text_w + 16.0f;
+    if (sync_btn_w < 120.0f) sync_btn_w = 120.0f;
 
     const char *dec_label = "Decoder: Mono";
     float dec_text_w = (float)gui_text_measure(dec_label, FONT_SIZE_DROPDOWN_OPT);
     float dec_btn_w = dec_text_w + 16.0f;
     if (dec_btn_w < 110.0f) dec_btn_w = 110.0f;
 
-    // Position buttons from right to left
+    // Position buttons in a right-aligned vertical stack.
     float x_right = panel_x + panel_w - 8.0f;
-    float btn_y = panel_y + 8.0f;
+    float btn_y0 = panel_y + 8.0f;
+    float row_step = btn_h + gap;
 
-    float sys_btn_x = x_right - sys_btn_w;
-    float frame_btn_x = sys_btn_x - gap - frame_btn_w;
-    float osd_btn_x = frame_btn_x - gap - osd_btn_w;
-    float dec_btn_x = osd_btn_x - gap - dec_btn_w;
+    float col_btn_w = dec_btn_w;
+    if (osd_btn_w > col_btn_w) col_btn_w = osd_btn_w;
+    if (frame_btn_w > col_btn_w) col_btn_w = frame_btn_w;
+    if (level_btn_w > col_btn_w) col_btn_w = level_btn_w;
+    if (sync_btn_w > col_btn_w) col_btn_w = sync_btn_w;
+    if (sys_btn_w > col_btn_w) col_btn_w = sys_btn_w;
+
+    float col_x = x_right - col_btn_w;
+
+    float dec_btn_x = col_x + (col_btn_w - dec_btn_w);
+    float osd_btn_x = col_x + (col_btn_w - osd_btn_w);
+    float frame_btn_x = col_x + (col_btn_w - frame_btn_w);
+    float level_btn_x = col_x + (col_btn_w - level_btn_w);
+    float sync_btn_x = col_x + (col_btn_w - sync_btn_w);
+    float sys_btn_x = col_x + (col_btn_w - sys_btn_w);
+
+    float dec_btn_y = btn_y0;
+    float osd_btn_y = btn_y0 + row_step;
+    float frame_btn_y = btn_y0 + row_step * 2.0f;
+    float level_btn_y = btn_y0 + row_step * 3.0f;
+    float sync_btn_y = btn_y0 + row_step * 4.0f;
+    float sys_btn_y = btn_y0 + row_step * 5.0f;
 
     // Store hit boxes for click detection
-    decoder->overlay.decoder_btn_rect = (Rectangle){dec_btn_x, btn_y, dec_btn_w, btn_h};
-    decoder->overlay.osd_btn_rect     = (Rectangle){osd_btn_x, btn_y, osd_btn_w, btn_h};
-    decoder->overlay.frame_btn_rect   = (Rectangle){frame_btn_x, btn_y, frame_btn_w, btn_h};
-    decoder->overlay.system_btn_rect  = (Rectangle){sys_btn_x, btn_y, sys_btn_w, btn_h};
+    decoder->overlay.decoder_btn_rect = (Rectangle){dec_btn_x, dec_btn_y, dec_btn_w, btn_h};
+    decoder->overlay.osd_btn_rect     = (Rectangle){osd_btn_x, osd_btn_y, osd_btn_w, btn_h};
+    decoder->overlay.frame_btn_rect   = (Rectangle){frame_btn_x, frame_btn_y, frame_btn_w, btn_h};
+    decoder->overlay.level_btn_rect   = (Rectangle){level_btn_x, level_btn_y, level_btn_w, btn_h};
+    decoder->overlay.sync_btn_rect    = (Rectangle){sync_btn_x, sync_btn_y, sync_btn_w, btn_h};
+    decoder->overlay.system_btn_rect  = (Rectangle){sys_btn_x, sys_btn_y, sys_btn_w, btn_h};
 
     // Decoder mode indicator (Mono only, no cycle)
     Color dec_bg = COLOR_BUTTON;
     DrawRectangleRounded(decoder->overlay.decoder_btn_rect, 0.15f, 4, dec_bg);
     float dec_text_x = dec_btn_x + (dec_btn_w - dec_text_w) / 2.0f;
-    float dec_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    float dec_text_y = dec_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
     gui_text_draw(dec_label, dec_text_x, dec_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
     // OSD mode button (cycles Off/Minimal/Stats)
     Color osd_bg = COLOR_BUTTON;
     DrawRectangleRounded(decoder->overlay.osd_btn_rect, 0.15f, 4, osd_bg);
     float osd_text_x = osd_btn_x + (osd_btn_w - osd_text_w) / 2.0f;
-    float osd_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    float osd_text_y = osd_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
     gui_text_draw(osd_label, osd_text_x, osd_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
     // Frame mode button (Active/Full)
     Color frame_bg = COLOR_BUTTON;
     DrawRectangleRounded(decoder->overlay.frame_btn_rect, 0.15f, 4, frame_bg);
     float frame_text_x = frame_btn_x + (frame_btn_w - frame_text_w) / 2.0f;
-    float frame_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    float frame_text_y = frame_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
     gui_text_draw(frame_label, frame_text_x, frame_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // Levels mode button (Auto/Fixed)
+    Color level_bg = COLOR_BUTTON;
+    DrawRectangleRounded(decoder->overlay.level_btn_rect, 0.15f, 4, level_bg);
+    float level_text_x = level_btn_x + (level_btn_w - level_text_w) / 2.0f;
+    float level_text_y = level_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    gui_text_draw(level_label, level_text_x, level_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+    // Sync mode button (Auto/Fixed)
+    Color sync_bg = COLOR_BUTTON;
+    DrawRectangleRounded(decoder->overlay.sync_btn_rect, 0.15f, 4, sync_bg);
+    float sync_text_x = sync_btn_x + (sync_btn_w - sync_text_w) / 2.0f;
+    float sync_text_y = sync_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    gui_text_draw(sync_label, sync_text_x, sync_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
     // System selector button with dropdown arrow
     bool is_open = decoder->overlay.system_dropdown_open;
@@ -1333,13 +1697,13 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     float arrow_w = 8.0f;
     float total_w = (float)sys_label_w + arrow_w + 4.0f;
     float sys_text_x = sys_btn_rect.x + (sys_btn_rect.width - total_w) / 2.0f;
-    float sys_text_y = btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+    float sys_text_y = sys_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
     gui_text_draw(sys_name, sys_text_x, sys_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
 
     // Arrow
     float arrow_size = 5.0f;
     float arrow_x = sys_text_x + sys_label_w + 6.0f;
-    float arrow_cy = btn_y + btn_h / 2.0f;
+    float arrow_cy = sys_btn_y + btn_h / 2.0f;
     if (is_open) {
         Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
         Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
@@ -1354,7 +1718,7 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
 
     // Draw dropdown options for system if open
     if (is_open) {
-        float opt_y = btn_y + btn_h;
+        float opt_y = sys_btn_y + btn_h;
         const char *options[] = {"PAL/SECAM", "NTSC"};
         int sys_values[] = {0, 1};
         float opt_h = 20.0f;
@@ -1406,11 +1770,16 @@ static void *cvbs_vtable_create(void) {
     // Default OSD mode
     decoder->osd_mode = CVBS_OSD_MINIMAL;
     decoder->frame_view_mode = CVBS_FRAME_VIEW_ACTIVE;
+    decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
+    decoder->sync_mode = CVBS_SYNC_MODE_FIXED;
+    decoder->fixed_levels_valid = false;
+    cvbs_reset_fixed_sync_lock(decoder);
 
     // Default to 625-line PAL/SECAM for real-hardware testing.
     decoder->overlay.selected_system = 0;  // 0=625-line PAL/SECAM, 1=525-line NTSC
     decoder->overlay.system_dropdown_open = false;
     gui_cvbs_set_format(decoder, 0);
+    cvbs_trace_mode_watch(decoder, "create");
 
     return decoder;
 }
@@ -1436,7 +1805,9 @@ static void cvbs_vtable_process(void *state, const int16_t *samples, size_t coun
     (void)sample_rate;  // CVBS uses its own sample rate detection
     if (!state || !samples || count == 0) return;
     cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    cvbs_trace_mode_watch(decoder, "process_enter");
     gui_cvbs_process_buffer(decoder, samples, count);
+    cvbs_trace_mode_watch(decoder, "process_exit");
 }
 
 //-----------------------------------------------------------------------------
@@ -1504,6 +1875,79 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
                                       : CVBS_FRAME_VIEW_ACTIVE;
         decoder->overlay.system_dropdown_open = false;
         gui_cvbs_set_frame_view_mode(decoder, next_mode);
+        return true;
+    }
+
+    // Levels mode button: toggle Auto <-> Fixed
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.level_btn_rect)) {
+        cvbs_level_mode_t old_level_mode = decoder->level_mode;
+        decoder->overlay.system_dropdown_open = false;
+        if (decoder->level_mode == CVBS_LEVEL_MODE_FIXED) {
+            decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
+            decoder->fixed_levels_valid = false;
+        } else {
+            decoder->level_mode = CVBS_LEVEL_MODE_FIXED;
+            bool have_current_levels =
+                (decoder->levels.range >= 100) ||
+                (decoder->adaptive.threshold != 0 &&
+                 decoder->adaptive.white > decoder->adaptive.sync_tip);
+            if (have_current_levels) {
+                int16_t black = decoder->levels.black_level;
+                int16_t white = decoder->levels.white_level;
+                if (white <= black) {
+                    black = decoder->adaptive.black;
+                    white = decoder->adaptive.white;
+                }
+                if (white <= black) {
+                    white = (int16_t)(black + 100);
+                }
+                decoder->fixed_black_level = black;
+                decoder->fixed_white_level = white;
+                decoder->fixed_levels_valid = true;
+            } else {
+                decoder->fixed_levels_valid = false;
+            }
+        }
+        if (old_level_mode != decoder->level_mode) {
+            TraceLog(LOG_INFO,
+                     "CVBS MODE TRACE: source=overlay_click field=level_mode old=%s new=%s",
+                     cvbs_level_mode_name(old_level_mode),
+                     cvbs_level_mode_name(decoder->level_mode));
+        }
+        cvbs_trace_mode_watch(decoder, "overlay_level_click");
+        return true;
+    }
+
+    // Sync mode button: toggle Auto <-> Fixed
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.sync_btn_rect)) {
+        cvbs_sync_mode_t old_sync_mode = decoder->sync_mode;
+        bool old_fixed_lock = decoder->fixed_sync_locked;
+        decoder->overlay.system_dropdown_open = false;
+        if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED) {
+            decoder->sync_mode = CVBS_SYNC_MODE_AUTO;
+        } else {
+            decoder->sync_mode = CVBS_SYNC_MODE_FIXED;
+        }
+        cvbs_reset_fixed_sync_lock(decoder);
+        decoder->pll.locked = false;
+        decoder->pll.good_sync_count = 0;
+        decoder->pll.bad_sync_count = 0;
+        decoder->pll.line_period = cvbs_nominal_line_period(decoder);
+        decoder->pll.phase_integral = 0.0;
+        decoder->pll.freq_adjust = 0.0;
+        if (old_sync_mode != decoder->sync_mode) {
+            TraceLog(LOG_INFO,
+                     "CVBS MODE TRACE: source=overlay_click field=sync_mode old=%s new=%s",
+                     cvbs_sync_mode_name(old_sync_mode),
+                     cvbs_sync_mode_name(decoder->sync_mode));
+        }
+        if (old_fixed_lock != decoder->fixed_sync_locked) {
+            TraceLog(LOG_INFO,
+                     "CVBS MODE TRACE: source=overlay_click field=fixed_sync_locked old=%d new=%d",
+                     old_fixed_lock ? 1 : 0,
+                     decoder->fixed_sync_locked ? 1 : 0);
+        }
+        cvbs_trace_mode_watch(decoder, "overlay_sync_click");
         return true;
     }
 

@@ -785,6 +785,9 @@ void gui_app_init(gui_app_t *app) {
     app->vu_b.peak_neg = 0;
     app->vu_b.peak_hold_time_pos = 0;
     app->vu_b.peak_hold_time_neg = 0;
+    app->user_capture_mode_misrc = app->settings.misrc_mode;
+    app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+    app->settings.misrc_mode = app->user_capture_mode_misrc;
 
     strcpy(app->status_message, "Initializing...");
 
@@ -1338,6 +1341,13 @@ int gui_app_start_capture(gui_app_t *app) {
     gui_capture_configure_handler(app, true);
 #endif
 
+        bool prev_runtime_mode = app->capture_mode_runtime_misrc;
+        app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+        TraceLog(LOG_INFO,
+                 "MODE TRACE: source=gui_app_start_capture latch_runtime old=%s new=%s user=%s",
+                 prev_runtime_mode ? "MISRC" : "HSDAOH",
+                 app->capture_mode_runtime_misrc ? "MISRC" : "HSDAOH",
+                 app->user_capture_mode_misrc ? "MISRC" : "HSDAOH");
         app->is_capturing = true;
         app->capture_start_time = GetTime();
         app->reconnect_pending = false;

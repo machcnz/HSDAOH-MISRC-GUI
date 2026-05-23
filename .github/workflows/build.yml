@@ -41,10 +41,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - ubuntu-22.04
-          - windows-2022
-          - macos-14
+        include:
+          - runner: ubuntu-22.04
+            guard_mode: static
+          - runner: windows-2022
+            guard_mode: static
+          - runner: macos-14
+            guard_mode: runtime
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -55,8 +58,14 @@ jobs:
           python-version: '3.x'
 
       - name: Run static CI guard tests
+        if: matrix.guard_mode == 'static'
         run: |
           python misrc_tools/test/ci_guard_tests.py --static-only
+
+      - name: Run runtime CI guard tests
+        if: matrix.guard_mode == 'runtime'
+        run: |
+          python misrc_tools/test/ci_guard_tests.py
   linux-appimage:
     name: Linux AppImage sanity build (${{ matrix.arch }})
     strategy:

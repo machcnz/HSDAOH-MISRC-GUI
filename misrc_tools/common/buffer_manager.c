@@ -148,15 +148,61 @@ void bufmgr_cleanup(buffer_manager_t *mgr) {
 int bufmgr_ensure_init(buffer_manager_t *mgr, buffer_id_t id) {
     if (!mgr || id >= BUF_COUNT) return -1;
     if (mgr->initialized[id]) return 0;
-
-    const buffer_config_t *cfg = &mgr->configs[id];
+    buffer_config_t *cfg = &mgr->configs[id];
+    size_t requested_size = cfg->size;
+    size_t init_size = cfg->size;
+    bool used_fallback = false;
 
     /* Initialize ringbuffer */
-    int r = rb_init(&mgr->buffers[id], (char *)cfg->name, cfg->size);
+    int r = rb_init(&mgr->buffers[id], (char *)cfg->name, init_size);
+    if (r != 0 && (id == BUF_RECORD_A || id == BUF_RECORD_B)) {
+        /* Root-cause context:
+         * Large record mappings (8GiB default) can fail under virtual-memory
+         * commit/pagefile pressure (observed as rb_init code 4 on Windows).
+         * Retry with deterministic smaller sizes to preserve recording.
+         */
+        static const size_t s_record_fallback_sizes[] = {
+            (size_t)4 * 1024 * 1024 * 1024ULL,
+            (size_t)2 * 1024 * 1024 * 1024ULL,
+            (size_t)1 * 1024 * 1024 * 1024ULL,
+            (size_t)512 * 1024 * 1024ULL,
+            (size_t)256 * 1024 * 1024ULL,
+            (size_t)128 * 1024 * 1024ULL,
+        };
+        for (size_t i = 0; i < (sizeof(s_record_fallback_sizes) / sizeof(s_record_fallback_sizes[0])); i++) {
+            size_t candidate = s_record_fallback_sizes[i];
+            if (candidate >= requested_size) continue;
+            r = rb_init(&mgr->buffers[id], (char *)cfg->name, candidate);
+            if (r == 0) {
+                init_size = candidate;
+                used_fallback = true;
+                break;
+            }
+        }
+    }
     if (r != 0) {
-        fprintf(stderr, "[BUFMGR] Failed to init ringbuffer '%s': %d\n",
-                cfg->name, r);
+        fprintf(stderr, "[BUFMGR] Failed to init ringbuffer '%s': %d (requested=%zu bytes)\\n",
+                cfg->name, r, requested_size);
         return -1;
+    }
+    cfg->size = init_size;
+    if (used_fallback) {
+        fprintf(stderr,
+                "[BUFMGR] Warning: ringbuffer '%s' fallback size in use (%zu -> %zu bytes)\\n",
+                cfg->name, requested_size, init_size);
+        /* Harden against repeated failures when the peer record buffer is
+         * lazily initialized after this one under the same memory pressure. */
+        buffer_id_t peer_id = (id == BUF_RECORD_A) ? BUF_RECORD_B :
+                              ((id == BUF_RECORD_B) ? BUF_RECORD_A : BUF_COUNT);
+        if (peer_id < BUF_COUNT &&
+            !mgr->initialized[peer_id] &&
+            mgr->configs[peer_id].size > init_size) {
+            size_t peer_requested_size = mgr->configs[peer_id].size;
+            mgr->configs[peer_id].size = init_size;
+            fprintf(stderr,
+                    "[BUFMGR] Warning: preemptively lowering '%s' size (%zu -> %zu bytes)\\n",
+                    mgr->configs[peer_id].name, peer_requested_size, init_size);
+        }
     }
 
     /* Initialize events */

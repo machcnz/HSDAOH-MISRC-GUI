@@ -234,6 +234,9 @@ def check_apprun_static_contract(workflow_path: Path) -> int:
 
 
 def check_apprun_runtime_behavior(workflow_path: Path, icon_path: Path) -> int:
+    if not sys.platform.startswith("linux"):
+        print("SKIP: AppRun runtime behavior (linux-only)")
+        return 0
     if shutil.which("bash") is None:
         print("SKIP: AppRun runtime behavior (bash not available)")
         return 0
@@ -428,6 +431,63 @@ def check_no_capture_stability_clutter(workflow_path: Path) -> int:
     return 0
 
 
+def check_record_ringbuffer_fallback_runtime(repo_root: Path) -> int:
+    if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+        print("SKIP: record ringbuffer fallback runtime guard (Linux/macOS only)")
+        return 0
+    cc = shutil.which("cc")
+    if cc is None:
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            return fail("C compiler 'cc' is required for record ringbuffer fallback runtime guard")
+        print("SKIP: record ringbuffer fallback runtime guard (cc not available)")
+        return 0
+
+    harness_path = repo_root / "misrc_tools/test/bufmgr_record_fallback_harness.c"
+    buffer_manager_path = repo_root / "misrc_tools/common/buffer_manager.c"
+    include_dir = repo_root / "misrc_tools/common"
+
+    if not harness_path.exists():
+        return fail(f"Record fallback harness source is missing: {harness_path}")
+    if not buffer_manager_path.exists():
+        return fail(f"buffer_manager.c is missing: {buffer_manager_path}")
+
+    with tempfile.TemporaryDirectory(prefix="misrc_bufmgr_guard_") as temp_root:
+        exe_name = "bufmgr_record_fallback_guard.exe" if os.name == "nt" else "bufmgr_record_fallback_guard"
+        exe_path = Path(temp_root) / exe_name
+        compile_cmd = [
+            cc,
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-D_POSIX_C_SOURCE=200809L",
+            "-D_DEFAULT_SOURCE",
+            f"-I{include_dir}",
+            str(harness_path),
+            str(buffer_manager_path),
+            "-o",
+            str(exe_path),
+        ]
+        try:
+            run_checked(compile_cmd)
+        except subprocess.CalledProcessError as exc:
+            return fail(
+                "Failed to compile record ringbuffer fallback runtime harness\n"
+                f"stdout:\n{exc.stdout}\n"
+                f"stderr:\n{exc.stderr}"
+            )
+
+        try:
+            run_checked([str(exe_path)])
+        except subprocess.CalledProcessError as exc:
+            return fail(
+                "Record ringbuffer fallback runtime harness failed\n"
+                f"stdout:\n{exc.stdout}\n"
+                f"stderr:\n{exc.stderr}"
+            )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="MISRC CI guard tests")
     parser.add_argument(
@@ -463,6 +523,7 @@ def main() -> int:
     ]
     if not args.static_only:
         checks.insert(7, ("AppRun runtime behavior", lambda: check_apprun_runtime_behavior(workflow_path, icon_path)))
+        checks.insert(8, ("record ringbuffer fallback runtime", lambda: check_record_ringbuffer_fallback_runtime(repo_root)))
 
     for name, check in checks:
         rc = check()
