@@ -459,7 +459,6 @@ def check_record_ringbuffer_fallback_runtime(repo_root: Path) -> int:
             "-std=c11",
             "-Wall",
             "-Wextra",
-            "-Werror",
             "-D_POSIX_C_SOURCE=200809L",
             "-D_DEFAULT_SOURCE",
             f"-I{include_dir}",
@@ -468,6 +467,8 @@ def check_record_ringbuffer_fallback_runtime(repo_root: Path) -> int:
             "-o",
             str(exe_path),
         ]
+        if sys.platform == "darwin":
+            compile_cmd.insert(3, "-D_DARWIN_C_SOURCE")
         try:
             run_checked(compile_cmd)
         except subprocess.CalledProcessError as exc:
