@@ -140,6 +140,7 @@ jobs:
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
+          mkdir -p .deps
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
@@ -445,6 +446,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
           cmake --build .deps/libuvc/build --parallel
           cmake --install .deps/libuvc/build
+          mkdir -p .deps
 
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
@@ -456,10 +458,11 @@ jobs:
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
           mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
-          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          for hdr in hsdaoh.h hsdaoh_export.h hsdaoh_raw.h hsdaoh_crc.h; do
+            if [[ -f ".deps/hsdaoh/include/$hdr" ]]; then
+              cp ".deps/hsdaoh/include/$hdr" "$DEPS_PREFIX/include/"
+            fi
+          done
           if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
             cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
           elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
@@ -641,6 +644,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
           cmake --build .deps/libuvc/build --parallel
           cmake --install .deps/libuvc/build
+          mkdir -p .deps
 
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
@@ -652,10 +656,11 @@ jobs:
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
           mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
-          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          for hdr in hsdaoh.h hsdaoh_export.h hsdaoh_raw.h hsdaoh_crc.h; do
+            if [[ -f ".deps/hsdaoh/include/$hdr" ]]; then
+              cp ".deps/hsdaoh/include/$hdr" "$DEPS_PREFIX/include/"
+            fi
+          done
           if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
             cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
           elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
@@ -798,6 +803,7 @@ jobs:
           export CFLAGS="-arch ${MACOS_ARCH} ${CFLAGS:-}"
           export CXXFLAGS="-arch ${MACOS_ARCH} ${CXXFLAGS:-}"
           export LDFLAGS="-arch ${MACOS_ARCH} ${LDFLAGS:-}"
+          mkdir -p .deps
 
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
