@@ -9,14 +9,67 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
+#else
+#include <direct.h>
 #endif
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+
+static bool gui_settings_path_is_dir(const char *path) {
+    struct stat st;
+    if (!path || !path[0]) return false;
+    if (stat(path, &st) != 0) return false;
+#if defined(_WIN32) || defined(_WIN64)
+    return (st.st_mode & _S_IFDIR) != 0;
+#else
+    return S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool gui_settings_make_dir_if_needed(const char *path) {
+    if (!path || !path[0]) return false;
+    if (gui_settings_path_is_dir(path)) return true;
+#if defined(_WIN32) || defined(_WIN64)
+    if (_mkdir(path) == 0) return true;
+#else
+    if (mkdir(path, 0700) == 0) return true;
+#endif
+    if (errno == EEXIST) return gui_settings_path_is_dir(path);
+    return false;
+}
+
+// Best-effort recursive mkdir for a file path's parent directories.
+static bool gui_settings_ensure_parent_dirs(const char *file_path) {
+    if (!file_path || !file_path[0]) return false;
+
+    char path_copy[512];
+    strncpy(path_copy, file_path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+
+    size_t len = strlen(path_copy);
+    if (len == 0) return false;
+
+    for (size_t i = 0; i < len; i++) {
+        char c = path_copy[i];
+        if (c != '/' && c != '\\') continue;
+        if (i == 0) continue;
+#if defined(_WIN32) || defined(_WIN64)
+        // Skip "C:\" root separator.
+        if (i == 2 && path_copy[1] == ':') continue;
+#endif
+        path_copy[i] = '\0';
+        if (!gui_settings_make_dir_if_needed(path_copy)) return false;
+        path_copy[i] = c;
+    }
+
+    return true;
+}
 
 // Settings file location
 static const char* get_settings_file_path(void) {
@@ -34,22 +87,37 @@ static const char* get_settings_file_path(void) {
             strcpy(settings_path, "./misrc_gui_settings.json");
         }
 #elif defined(_WIN32) || defined(_WIN64)
-        // Use %APPDATA% on Windows, fall back to current directory.
+        // Use %APPDATA% on Windows, then LOCALAPPDATA/USERPROFILE fallbacks.
         const char* appdata = getenv("APPDATA");
-        if (appdata) {
+        if (!appdata || !appdata[0]) {
+            appdata = getenv("LOCALAPPDATA");
+        }
+        if (appdata && appdata[0]) {
             snprintf(settings_path, sizeof(settings_path),
                     "%s\\MISRC\\misrc_gui_settings.json", appdata);
         } else {
-            strcpy(settings_path, "./misrc_gui_settings.json");
+            const char* userprofile = getenv("USERPROFILE");
+            if (userprofile && userprofile[0]) {
+                snprintf(settings_path, sizeof(settings_path),
+                        "%s\\AppData\\Roaming\\MISRC\\misrc_gui_settings.json", userprofile);
+            } else {
+                strcpy(settings_path, "./misrc_gui_settings.json");
+            }
         }
 #else
-        // Use ~/.config on Linux
-        const char* home = getenv("HOME");
-        if (home) {
+        // Use XDG config directory on Linux/BSD.
+        const char* xdg_config_home = getenv("XDG_CONFIG_HOME");
+        if (xdg_config_home && xdg_config_home[0]) {
             snprintf(settings_path, sizeof(settings_path),
-                    "%s/.config/misrc_gui_settings.json", home);
+                    "%s/misrc_gui_settings.json", xdg_config_home);
         } else {
-            strcpy(settings_path, "./misrc_gui_settings.json");
+            const char* home = getenv("HOME");
+            if (home && home[0]) {
+                snprintf(settings_path, sizeof(settings_path),
+                        "%s/.config/misrc_gui_settings.json", home);
+            } else {
+                strcpy(settings_path, "./misrc_gui_settings.json");
+            }
         }
 #endif
         initialized = true;
@@ -354,20 +422,13 @@ void gui_settings_save(const gui_settings_t *settings) {
     if (!settings) return;
     
     const char* path = get_settings_file_path();
+    if (!gui_settings_ensure_parent_dirs(path)) {
+        return;
+    }
     FILE *f = fopen(path, "w");
     if (!f) {
         return;
     }
-    
-    // CREATE DIRECTORY IF IT DOESN'T EXIST (Windows)
-#if defined(_WIN32) || defined(_WIN64)
-    const char* appdata = getenv("APPDATA");
-    if (appdata) {
-        char dir_path[512];
-        snprintf(dir_path, sizeof(dir_path), "%s\\MISRC", appdata);
-        mkdir(dir_path);   // MinGW (1 arg), ignore error if exists
-    }
-#endif
     
     fprintf(f, "{\n");
     fprintf(f, "  \"device_index\": %d,\n", settings->device_index);

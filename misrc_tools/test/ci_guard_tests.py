@@ -209,6 +209,32 @@ def check_debug_view_contract(gui_c_path: Path) -> int:
     return 0
 
 
+def check_settings_persistence_contract(gui_settings_c_path: Path) -> int:
+    source = read_text(gui_settings_c_path)
+    required_snippets = [
+        "gui_settings_ensure_parent_dirs(path)",
+        "getenv(\"APPDATA\")",
+        "getenv(\"LOCALAPPDATA\")",
+        "getenv(\"XDG_CONFIG_HOME\")",
+        "_mkdir(path)",
+        "mkdir(path, 0700)",
+    ]
+    for snippet in required_snippets:
+        if snippet not in source:
+            return fail(f"Missing settings persistence contract snippet in gui_settings.c: {snippet}")
+
+    save_pos = source.find("void gui_settings_save(")
+    if save_pos < 0:
+        return fail("Could not locate gui_settings_save() in gui_settings.c")
+    ensure_pos = source.find("gui_settings_ensure_parent_dirs(path)", save_pos)
+    fopen_pos = source.find("FILE *f = fopen(path, \"w\");", save_pos)
+    if ensure_pos < 0 or fopen_pos < 0:
+        return fail("Missing parent-dir ensure or fopen call in gui_settings_save()")
+    if ensure_pos > fopen_pos:
+        return fail("gui_settings_save() must ensure parent directories before fopen")
+    return 0
+
+
 def check_apprun_static_contract(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     apprun = extract_apprun_script(workflow_text)
@@ -502,6 +528,7 @@ def main() -> int:
     workflow_path = repo_root / ".github/workflows/build.yml"
     legacy_workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
+    gui_settings_c_path = repo_root / "misrc_tools/misrc_gui/core/gui_settings.c"
     meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
 
@@ -515,6 +542,7 @@ def main() -> int:
         ("macOS startup admin elevation contract", lambda: check_macos_admin_elevation_contract(gui_c_path)),
         ("Windows meson subsystem contract", lambda: check_windows_meson_subsystem_contract(meson_path)),
         ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
+        ("settings persistence contract", lambda: check_settings_persistence_contract(gui_settings_c_path)),
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
         ("release artifact naming contract", lambda: check_release_artifact_naming_contract(workflow_path)),
