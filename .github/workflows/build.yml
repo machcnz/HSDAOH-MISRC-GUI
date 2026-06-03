@@ -67,7 +67,7 @@ jobs:
         run: |
           python misrc_tools/test/ci_guard_tests.py
   linux-appimage:
-    name: Linux AppImage sanity build (${{ matrix.arch }})
+    name: Linux AppImage build (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -353,7 +353,7 @@ jobs:
           if-no-files-found: error
 
   windows-exe:
-    name: Windows EXE sanity build
+    name: Windows EXE build (x86_64)
     runs-on: windows-2022
     needs:
       - preflight-guard-tests
@@ -362,11 +362,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup MSYS2
+      - name: Setup MSYS2 (cached)
+        id: setup_msys2_cached
+        continue-on-error: true
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
+          cache: true
+          install: >-
+            git
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-flac
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libjpeg-turbo
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-libsoxr
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+
+      - name: Setup MSYS2 (retry no cache)
+        if: steps.setup_msys2_cached.outcome == 'failure'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          cache: false
           install: >-
             git
             mingw-w64-x86_64-cmake
@@ -528,7 +552,7 @@ jobs:
           path: windows_MISRC_*_x86.zip
           if-no-files-found: error
   windows-exe-arm64:
-    name: Windows EXE ARM64 build
+    name: Windows EXE build (arm64)
     runs-on: windows-11-arm
     needs:
       - preflight-guard-tests
@@ -537,11 +561,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup MSYS2
+      - name: Setup MSYS2 (cached)
+        id: setup_msys2_cached
+        continue-on-error: true
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANGARM64
           update: true
+          cache: true
+          install: >-
+            git
+            mingw-w64-clang-aarch64-binutils
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-aarch64-fftw
+            mingw-w64-clang-aarch64-flac
+            mingw-w64-clang-aarch64-libjpeg-turbo
+            mingw-w64-clang-aarch64-libusb
+            mingw-w64-clang-aarch64-meson
+            mingw-w64-clang-aarch64-ninja
+            mingw-w64-clang-aarch64-pkgconf
+
+      - name: Setup MSYS2 (retry no cache)
+        if: steps.setup_msys2_cached.outcome == 'failure'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          cache: false
           install: >-
             git
             mingw-w64-clang-aarch64-binutils
@@ -971,7 +1018,7 @@ jobs:
           if-no-files-found: error
 
   macos-app-universal:
-    name: macOS APP sanity build (universal)
+    name: macOS APP build (universal)
     runs-on: macos-14
     needs:
       - macos-app-build
