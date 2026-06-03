@@ -492,6 +492,7 @@ static bool gui_record_spill_open_channel(gui_app_t *app, int channel, char *err
 
     FILE *fp = NULL;
     char path_buf[512] = {0};
+    const char *output_dir = NULL;
 
 #if defined(_WIN32) || defined(_WIN64)
     fp = tmpfile();
@@ -502,7 +503,7 @@ static bool gui_record_spill_open_channel(gui_app_t *app, int channel, char *err
         (void)setvbuf(fp, NULL, _IOFBF, 1024 * 1024);
     }
 #else
-    const char *output_dir = (app && app->settings.output_path[0]) ? app->settings.output_path : NULL;
+    output_dir = (app && app->settings.output_path[0]) ? app->settings.output_path : NULL;
     const char *tmp_dir = getenv("TMPDIR");
     if (!tmp_dir || !tmp_dir[0]) {
         tmp_dir = "/tmp";

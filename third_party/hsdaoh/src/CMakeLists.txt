@@ -129,7 +129,6 @@ target_link_libraries(hsdaoh_file hsdaoh
     ${LIBFLAC_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
     m
-    ogg
 )
 target_link_libraries(hsdaoh_tcp hsdaoh
     ${CMAKE_THREAD_LIBS_INIT}
