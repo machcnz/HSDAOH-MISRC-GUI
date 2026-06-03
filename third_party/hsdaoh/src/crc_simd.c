@@ -438,8 +438,21 @@ void crc16_simd_init(void) {
 bool crc_simd_available(void);
 
 uint64_t crc64_simd(uint64_t crc, const void *data, uint64_t len) {
-    extern uint64_t crc64speed(uint64_t crc, const void *s, const uint64_t l);
-    return crc64speed(crc, data, len);
+    const uint8_t *buf = (const uint8_t *)data;
+    const uint64_t poly = UINT64_C(0xad93d23594c935a9);
+
+    while (len-- > 0) {
+        crc ^= (uint64_t)(*buf++);
+        for (int bit = 0; bit < 8; bit++) {
+            if (crc & UINT64_C(1)) {
+                crc = (crc >> 1) ^ poly;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+
+    return crc;
 }
 
 void crc64_simd_init(void) {

@@ -194,7 +194,7 @@ elif host_system == 'linux'
   sources_capture += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
   ldflags_capture += [ '-lm' ]
 elif host_system == 'darwin'
-  add_languages('objc')
+  add_languages('objc', native: false)
   ldflags_capture += ['-Wl,-framework,Cocoa', '-Wl,-framework,AVFoundation', '-Wl,-framework,CoreMedia', '-Wl,-framework,CoreVideo', '-Wl,-framework,IOKit', '-Wl,-framework,CoreFoundation', '-Wl,-framework,Security']
   sources_capture += 'misrc_capture/simple_capture/simple_capture_avfoundation.m'
 endif
