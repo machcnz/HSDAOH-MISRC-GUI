@@ -234,6 +234,42 @@ def check_settings_persistence_contract(gui_settings_c_path: Path) -> int:
         return fail("gui_settings_save() must ensure parent directories before fopen")
     return 0
 
+def check_flac_large_file_offsets_contract(flac_writer_c_path: Path) -> int:
+    source = read_text(flac_writer_c_path)
+    required_snippets = [
+        "typedef __int64 flac_file_off_t;",
+        "#define FLAC_STREAM_FSEEK _fseeki64",
+        "#define FLAC_STREAM_FTELL _ftelli64",
+        "#define FLAC_STREAM_FSEEK fseeko",
+        "#define FLAC_STREAM_FTELL ftello",
+        "static FLAC__uint64 flac_stream_max_offset(void)",
+    ]
+    for snippet in required_snippets:
+        if snippet not in source:
+            return fail(f"Missing FLAC large-file contract snippet in flac_writer.c: {snippet}")
+
+    seek_start = source.find("static FLAC__StreamEncoderSeekStatus stream_seek_callback(")
+    tell_start = source.find("static FLAC__StreamEncoderTellStatus stream_tell_callback(")
+    report_start = source.find("static void report_error(")
+    if seek_start < 0 or tell_start < 0 or report_start < 0:
+        return fail("Missing FLAC stream callback functions in flac_writer.c")
+
+    seek_body = source[seek_start:tell_start]
+    tell_body = source[tell_start:report_start]
+
+    if "flac_stream_max_offset()" not in seek_body:
+        return fail("stream_seek_callback() must guard against out-of-range large offsets")
+    if "FLAC_STREAM_FSEEK(" not in seek_body:
+        return fail("stream_seek_callback() must use FLAC_STREAM_FSEEK macro")
+    if "fseek(" in seek_body:
+        return fail("stream_seek_callback() must not use plain fseek()")
+
+    if "FLAC_STREAM_FTELL(" not in tell_body:
+        return fail("stream_tell_callback() must use FLAC_STREAM_FTELL macro")
+    if "ftell(" in tell_body:
+        return fail("stream_tell_callback() must not use plain ftell()")
+    return 0
+
 
 def check_apprun_static_contract(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
@@ -529,6 +565,7 @@ def main() -> int:
     legacy_workflow_path = repo_root / ".github/workflows/release-sanity-build.yml"
     gui_c_path = repo_root / "misrc_tools/misrc_gui/core/misrc_gui.c"
     gui_settings_c_path = repo_root / "misrc_tools/misrc_gui/core/gui_settings.c"
+    flac_writer_c_path = repo_root / "misrc_tools/common/flac_writer.c"
     meson_path = repo_root / "misrc_tools/meson.build"
     icon_path = repo_root / "assets/Icons/MISRC_Icon.png"
 
@@ -543,6 +580,7 @@ def main() -> int:
         ("Windows meson subsystem contract", lambda: check_windows_meson_subsystem_contract(meson_path)),
         ("debug-view runtime contract", lambda: check_debug_view_contract(gui_c_path)),
         ("settings persistence contract", lambda: check_settings_persistence_contract(gui_settings_c_path)),
+        ("FLAC large-file offsets contract", lambda: check_flac_large_file_offsets_contract(flac_writer_c_path)),
         ("AppRun static contract", lambda: check_apprun_static_contract(workflow_path)),
         ("Windows packaging assertions", lambda: check_windows_packaging_assertions(workflow_path)),
         ("release artifact naming contract", lambda: check_release_artifact_naming_contract(workflow_path)),

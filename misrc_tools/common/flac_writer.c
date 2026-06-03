@@ -16,6 +16,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/types.h>
 
 #if defined(__linux__)
 #include <unistd.h>
@@ -206,6 +207,30 @@ bool flac_writer_validate_affinity_cpu_list(
 #include "FLAC/stream_encoder.h"
 #include "FLAC/metadata.h"
 
+#if defined(_WIN32) || defined(_WIN64)
+typedef __int64 flac_file_off_t;
+#define FLAC_STREAM_FSEEK _fseeki64
+#define FLAC_STREAM_FTELL _ftelli64
+#else
+typedef off_t flac_file_off_t;
+#define FLAC_STREAM_FSEEK fseeko
+#define FLAC_STREAM_FTELL ftello
+#endif
+
+static FLAC__uint64 flac_stream_max_offset(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    return (FLAC__uint64)INT64_MAX;
+#else
+    if (sizeof(flac_file_off_t) >= sizeof(int64_t)) {
+        return (FLAC__uint64)INT64_MAX;
+    }
+    if (sizeof(flac_file_off_t) >= sizeof(long)) {
+        return (FLAC__uint64)LONG_MAX;
+    }
+    return (FLAC__uint64)INT_MAX;
+#endif
+}
+
 /* ============================================================================
  * Internal Writer Structure
  * ============================================================================ */
@@ -293,8 +318,10 @@ static FLAC__StreamEncoderSeekStatus stream_seek_callback(
 {
     (void)encoder;
     flac_writer_t *writer = (flac_writer_t *)client_data;
-
-    if (fseek(writer->output_file, (long)absolute_byte_offset, SEEK_SET) < 0) {
+    if (absolute_byte_offset > flac_stream_max_offset()) {
+        return FLAC__STREAM_ENCODER_SEEK_STATUS_ERROR;
+    }
+    if (FLAC_STREAM_FSEEK(writer->output_file, (flac_file_off_t)absolute_byte_offset, SEEK_SET) != 0) {
         return FLAC__STREAM_ENCODER_SEEK_STATUS_ERROR;
     }
     return FLAC__STREAM_ENCODER_SEEK_STATUS_OK;
@@ -308,8 +335,7 @@ static FLAC__StreamEncoderTellStatus stream_tell_callback(
 {
     (void)encoder;
     flac_writer_t *writer = (flac_writer_t *)client_data;
-
-    long pos = ftell(writer->output_file);
+    flac_file_off_t pos = FLAC_STREAM_FTELL(writer->output_file);
     if (pos < 0) {
         return FLAC__STREAM_ENCODER_TELL_STATUS_ERROR;
     }
