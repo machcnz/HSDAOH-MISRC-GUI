@@ -368,12 +368,16 @@ static uint32_t s_start_rec_b_drop_count = 0;
 
 #define GUI_RECORD_SPILL_CHANNELS 2
 #define GUI_RECORD_SPILL_LOG_STEP_BYTES ((uint64_t)256 * 1024 * 1024)
-#define GUI_RECORD_DISK_GUARD_THRESHOLD_BYTES ((uint64_t)10 * 1000 * 1000 * 1000)
 #define GUI_RECORD_DISK_GUARD_CHECK_INTERVAL_MS 1000ULL
+#define GUI_RECORD_DISK_GUARD_MIN_HEADROOM_BYTES ((uint64_t)2 * 1000 * 1000 * 1000)
+#define GUI_RECORD_DISK_GUARD_LOOKAHEAD_SECONDS 180.0
 
 static atomic_bool s_disk_guard_tripped = ATOMIC_VAR_INIT(false);
 static atomic_uint_fast64_t s_disk_guard_last_check_ms = ATOMIC_VAR_INIT(0);
 static atomic_uint_fast64_t s_disk_guard_last_free_bytes = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t s_disk_guard_last_output_bytes = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t s_disk_guard_output_rate_bps = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t s_disk_guard_last_required_bytes = ATOMIC_VAR_INIT(0);
 
 typedef struct {
     FILE *fp;
@@ -410,6 +414,9 @@ static void gui_record_reset_disk_guard_state(void) {
     atomic_store(&s_disk_guard_tripped, false);
     atomic_store(&s_disk_guard_last_check_ms, 0);
     atomic_store(&s_disk_guard_last_free_bytes, 0);
+    atomic_store(&s_disk_guard_last_output_bytes, 0);
+    atomic_store(&s_disk_guard_output_rate_bps, 0);
+    atomic_store(&s_disk_guard_last_required_bytes, 0);
 }
 
 static bool gui_record_get_free_space_bytes(const char *path, uint64_t *free_bytes_out) {
@@ -495,20 +502,20 @@ static bool gui_record_spill_open_channel(gui_app_t *app, int channel, char *err
         (void)setvbuf(fp, NULL, _IOFBF, 1024 * 1024);
     }
 #else
+    const char *output_dir = (app && app->settings.output_path[0]) ? app->settings.output_path : NULL;
     const char *tmp_dir = getenv("TMPDIR");
     if (!tmp_dir || !tmp_dir[0]) {
         tmp_dir = "/tmp";
     }
-    const char *output_dir = (app && app->settings.output_path[0]) ? app->settings.output_path : NULL;
     int last_err = 0;
-
-    if (!gui_record_spill_open_channel_in_dir(tmp_dir, channel, &fp, path_buf, sizeof(path_buf))) {
-        last_err = errno;
-    }
-    if (!fp && output_dir && strcmp(output_dir, tmp_dir) != 0) {
+    // Keep spill files on the capture target filesystem so free-space
+    // accounting tracks the real recording destination.
+    if (output_dir && output_dir[0]) {
         if (!gui_record_spill_open_channel_in_dir(output_dir, channel, &fp, path_buf, sizeof(path_buf))) {
             last_err = errno;
         }
+    } else if (!gui_record_spill_open_channel_in_dir(tmp_dir, channel, &fp, path_buf, sizeof(path_buf))) {
+        last_err = errno;
     }
     if (!fp && last_err != 0) {
         errno = last_err;
@@ -517,8 +524,11 @@ static bool gui_record_spill_open_channel(gui_app_t *app, int channel, char *err
 
     if (!fp) {
         if (error_msg && error_msg_size > 0) {
-            snprintf(error_msg, error_msg_size, "Failed to open spill temp file for channel %s: %s",
-                     gui_record_spill_channel_name(channel), strerror(errno));
+            snprintf(error_msg, error_msg_size,
+                     "Failed to open spill temp file for channel %s in capture path %s: %s",
+                     gui_record_spill_channel_name(channel),
+                     (output_dir && output_dir[0]) ? output_dir : "(unset)",
+                     strerror(errno));
         }
         return false;
     }
@@ -569,6 +579,55 @@ static uint64_t gui_record_spill_backlog_bytes_locked(int channel) {
     uint64_t write_off = atomic_load(&spill->write_offset);
     uint64_t read_off = atomic_load(&spill->read_offset);
     return (write_off >= read_off) ? (write_off - read_off) : 0;
+}
+
+static uint64_t gui_record_spill_backlog_total_bytes(void) {
+    uint64_t total = 0;
+    for (int channel = 0; channel < GUI_RECORD_SPILL_CHANNELS; channel++) {
+        total += gui_record_spill_backlog_bytes_locked(channel);
+    }
+    return total;
+}
+
+static uint64_t gui_record_get_raw_total_bytes(const gui_app_t *app) {
+    if (!app) return 0;
+    return atomic_load(&app->recording_raw_a) + atomic_load(&app->recording_raw_b);
+}
+
+static uint64_t gui_record_get_encoded_total_bytes(const gui_app_t *app) {
+    if (!app) return 0;
+    return atomic_load(&app->recording_compressed_a) + atomic_load(&app->recording_compressed_b);
+}
+
+static uint64_t gui_record_get_effective_output_total_bytes(const gui_app_t *app,
+                                                            uint64_t raw_total,
+                                                            uint64_t encoded_total) {
+    if (!app) return 0;
+    if (app->settings.use_flac) {
+        return (encoded_total > 0) ? encoded_total : raw_total;
+    }
+    return raw_total;
+}
+
+static uint64_t gui_record_estimate_output_bytes_from_raw_backlog(const gui_app_t *app,
+                                                                  uint64_t backlog_raw_bytes,
+                                                                  uint64_t raw_total,
+                                                                  uint64_t encoded_total) {
+    if (!app || backlog_raw_bytes == 0) return 0;
+    if (!app->settings.use_flac) return backlog_raw_bytes;
+
+    double encoded_per_raw = 1.0;
+    if (raw_total > 0 && encoded_total > 0) {
+        encoded_per_raw = (double)encoded_total / (double)raw_total;
+        if (encoded_per_raw < 0.10) encoded_per_raw = 0.10;
+        if (encoded_per_raw > 1.00) encoded_per_raw = 1.00;
+    }
+
+    double estimate = (double)backlog_raw_bytes * encoded_per_raw;
+    if (estimate >= (double)UINT64_MAX) {
+        return UINT64_MAX;
+    }
+    return (uint64_t)estimate;
 }
 static void gui_record_spill_recycle_if_drained(int channel) {
     if (!gui_record_spill_valid_channel(channel)) {
@@ -1249,17 +1308,64 @@ bool gui_record_check_disk_space_guard(gui_app_t *app, uint32_t frame_index,
         return false;
     }
     atomic_store(&s_disk_guard_last_free_bytes, free_bytes);
+    uint64_t raw_total = gui_record_get_raw_total_bytes(app);
+    uint64_t encoded_total = gui_record_get_encoded_total_bytes(app);
+    uint64_t output_total = gui_record_get_effective_output_total_bytes(app, raw_total, encoded_total);
+    uint64_t previous_output_total = atomic_load(&s_disk_guard_last_output_bytes);
+    uint64_t output_rate_bps = atomic_load(&s_disk_guard_output_rate_bps);
 
-    if (free_bytes >= GUI_RECORD_DISK_GUARD_THRESHOLD_BYTES) {
+    if (last_check_ms != 0 && now_ms > last_check_ms && output_total >= previous_output_total) {
+        uint64_t elapsed_ms = now_ms - last_check_ms;
+        if (elapsed_ms > 0) {
+            uint64_t delta_bytes = output_total - previous_output_total;
+            uint64_t instant_bps = (delta_bytes * 1000ULL) / elapsed_ms;
+            if (output_rate_bps == 0) {
+                output_rate_bps = instant_bps;
+            } else {
+                output_rate_bps = (output_rate_bps * 3ULL + instant_bps) / 4ULL;
+            }
+            atomic_store(&s_disk_guard_output_rate_bps, output_rate_bps);
+        }
+    }
+    atomic_store(&s_disk_guard_last_output_bytes, output_total);
+
+    uint64_t spill_backlog_raw = gui_record_spill_backlog_total_bytes();
+    uint64_t spill_backlog_output = gui_record_estimate_output_bytes_from_raw_backlog(
+        app, spill_backlog_raw, raw_total, encoded_total);
+
+    uint64_t projected_growth = 0;
+    if (output_rate_bps > 0) {
+        double projected = (double)output_rate_bps * GUI_RECORD_DISK_GUARD_LOOKAHEAD_SECONDS;
+        projected_growth = (projected >= (double)UINT64_MAX) ? UINT64_MAX : (uint64_t)projected;
+    }
+
+    uint64_t required_headroom = GUI_RECORD_DISK_GUARD_MIN_HEADROOM_BYTES;
+    if (projected_growth > required_headroom) {
+        required_headroom = projected_growth;
+    }
+    if (spill_backlog_output > (UINT64_MAX - required_headroom)) {
+        required_headroom = UINT64_MAX;
+    } else {
+        required_headroom += spill_backlog_output;
+    }
+    atomic_store(&s_disk_guard_last_required_bytes, required_headroom);
+
+    if (free_bytes >= required_headroom) {
         return false;
     }
 
     char free_buf[32];
+    char required_buf[32];
+    char backlog_buf[32];
     char msg[640];
+    double rate_mb_s = (double)output_rate_bps / (1024.0 * 1024.0);
     format_file_size_u64(free_bytes, free_buf, sizeof(free_buf));
+    format_file_size_u64(required_headroom, required_buf, sizeof(required_buf));
+    format_file_size_u64(spill_backlog_output, backlog_buf, sizeof(backlog_buf));
     snprintf(msg, sizeof(msg),
-             "Low disk-space guard triggered at extract_frame=%u: free space %s is below threshold 10.00 GB on output path %s; requesting safe capture stop.",
-             frame_index, free_buf, app->settings.output_path);
+             "Disk-space guard triggered at extract_frame=%u: free=%s required=%s (lookahead=%.0fs, output_rate=%.2f MB/s, spill_backlog=%s) on output path %s; requesting safe capture stop.",
+             frame_index, free_buf, required_buf, GUI_RECORD_DISK_GUARD_LOOKAHEAD_SECONDS,
+             rate_mb_s, backlog_buf, app->settings.output_path);
     if (status_msg && status_msg_size > 0) {
         snprintf(status_msg, status_msg_size, "%s", msg);
     }
@@ -1426,9 +1532,10 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
              app->settings.enable_resample_a ? "on" : "off", app->settings.resample_rate_a,
              app->settings.enable_resample_b ? "on" : "off", app->settings.resample_rate_b);
     gui_record_log_write_line_locked("INFO", msg);
-    snprintf(msg, sizeof(msg), "Capture limits: capture_limit_seconds=%u record_limit_seconds=%u",
+    snprintf(msg, sizeof(msg), "Capture limits: capture_limit_seconds=%u record_limit_seconds=%u (%s)",
              (unsigned)app->settings.capture_limit_seconds,
-             (unsigned)app->settings.record_limit_seconds);
+             (unsigned)app->settings.record_limit_seconds,
+             app->settings.record_limit_seconds > 0 ? "record_timer_armed" : "record_timer_disarmed");
     gui_record_log_write_line_locked("INFO", msg);
     snprintf(msg, sizeof(msg), "Audio monitor: playback=%s monitor_ch34=%s misrc_mode=%s",
              app->settings.audio_monitor_playback ? "on" : "off",

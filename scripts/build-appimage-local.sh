@@ -11,8 +11,7 @@ DEPS_SRC_DIR="${DEPS_SRC_DIR:-$REPO_ROOT/.deps/src-appimage-local}"
 TOOLS_DIR="${TOOLS_DIR:-$REPO_ROOT/.deps/tools-appimage-local}"
 WORK_TMP_DIR="${WORK_TMP_DIR:-$REPO_ROOT/.tmp/appimage-local}"
 APPIMAGE_BUILD_IMAGE="${APPIMAGE_BUILD_IMAGE:-ubuntu:22.04}"
-
-HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
+HSDAOH_SOURCE_DIR="${HSDAOH_SOURCE_DIR:-$REPO_ROOT/third_party/hsdaoh}"
 RAYLIB_TAG="5.5"
 TARGET_MAX_GLIBC="2.35"
 
@@ -40,6 +39,7 @@ Optional environment variables:
   BUILD_DIR            (default: build-appimage-local)
   OUT_DIR              (default: .ci-artifacts/linux-appimage)
   APPIMAGE_BUILD_IMAGE (default: ubuntu:22.04)
+  HSDAOH_SOURCE_DIR    (default: third_party/hsdaoh)
 EOF
 }
 
@@ -120,14 +120,12 @@ build_native() {
   export GIT_CONFIG_GLOBAL="$WORK_TMP_DIR/gitconfig"
   touch "$GIT_CONFIG_GLOBAL"
   git config --global --add safe.directory "$REPO_ROOT" || true
-  git config --global --add safe.directory "$DEPS_SRC_DIR/hsdaoh" || true
+  git config --global --add safe.directory "$HSDAOH_SOURCE_DIR" || true
   git config --global --add safe.directory "$DEPS_SRC_DIR/raylib" || true
 
-  if [[ ! -d "$DEPS_SRC_DIR/hsdaoh/.git" ]]; then
-    git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git "$DEPS_SRC_DIR/hsdaoh"
+  if [[ ! -f "$HSDAOH_SOURCE_DIR/CMakeLists.txt" ]]; then
+    fail "Vendored hsdaoh source not found at $HSDAOH_SOURCE_DIR"
   fi
-  git -C "$DEPS_SRC_DIR/hsdaoh" fetch --depth 1 origin "$HSDAOH_COMMIT"
-  git -C "$DEPS_SRC_DIR/hsdaoh" checkout --detach "$HSDAOH_COMMIT"
 
   if [[ ! -d "$DEPS_SRC_DIR/raylib/.git" ]]; then
     git clone --depth 1 --branch "$RAYLIB_TAG" https://github.com/raysan5/raylib.git "$DEPS_SRC_DIR/raylib"
@@ -135,7 +133,7 @@ build_native() {
   git -C "$DEPS_SRC_DIR/raylib" fetch --depth 1 origin "refs/tags/$RAYLIB_TAG:refs/tags/$RAYLIB_TAG" || true
   git -C "$DEPS_SRC_DIR/raylib" checkout --detach "$RAYLIB_TAG"
 
-  cmake -S "$DEPS_SRC_DIR/hsdaoh" -B "$DEPS_SRC_DIR/hsdaoh/build" \
+  cmake -S "$HSDAOH_SOURCE_DIR" -B "$DEPS_SRC_DIR/hsdaoh/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
     -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \

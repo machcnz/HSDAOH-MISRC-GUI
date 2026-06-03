@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <math.h>
 #include <time.h>
@@ -302,12 +303,15 @@ static char status_missed_display[16];
 static char status_errors_display[16];
 static char status_rf_buf_display[16];
 static char status_aud_buf_display[16];
-static char status_free_space_display[40];
+static char status_free_space_display[120];
 static char record_limit_state_display[96];
 static char record_limit_timecode_display[20];
 static bool s_status_free_space_valid = false;
 static uint64_t s_status_free_space_cached_bytes = 0;
 static double s_status_free_space_last_update_s = 0.0;
+static uint64_t s_status_output_last_bytes = 0;
+static double s_status_output_last_sample_s = 0.0;
+static double s_status_output_rate_bps = 0.0;
 #define STATUS_FREE_SPACE_REFRESH_INTERVAL_S 1.0
 #define STATUS_FREE_SPACE_LOW_BYTES ((uint64_t)10 * 1000 * 1000 * 1000)
 #define STATUS_FREE_SPACE_WARN_BYTES ((uint64_t)25 * 1000 * 1000 * 1000)
@@ -404,6 +408,33 @@ static bool parse_record_limit_timecode(const char *src, uint32_t *out_seconds)
     return true;
 }
 
+static void gui_record_limit_sync_settings(gui_app_t *app)
+{
+    if (!app) return;
+    uint32_t parsed_seconds = 0;
+    bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds) && parsed_seconds > 0;
+    app->settings.capture_limit_seconds = 0;
+    app->settings.record_limit_seconds = (s_record_limit_armed && timecode_valid) ? parsed_seconds : 0;
+}
+
+static void gui_record_limit_log_state(gui_app_t *app, const char *prefix)
+{
+    if (!app || !prefix || !prefix[0]) return;
+    char msg[192];
+    uint32_t parsed_seconds = 0;
+    bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds) && parsed_seconds > 0;
+    if (timecode_valid) {
+        snprintf(msg, sizeof(msg), "%s: armed=%s timecode=%s seconds=%u",
+                 prefix, s_record_limit_armed ? "yes" : "no",
+                 s_record_limit_timecode, parsed_seconds);
+    } else {
+        snprintf(msg, sizeof(msg), "%s: armed=%s timecode=%s (invalid)",
+                 prefix, s_record_limit_armed ? "yes" : "no",
+                 s_record_limit_timecode);
+    }
+    gui_record_log_capture_event(app, "INFO", msg, GUI_ERROR_CLASS_NONE, 0);
+}
+
 static void format_status_free_space_label(char *dst, size_t dst_len, uint64_t free_bytes)
 {
     if (!dst || dst_len == 0) return;
@@ -416,6 +447,28 @@ static void format_status_free_space_label(char *dst, size_t dst_len, uint64_t f
     } else {
         snprintf(dst, dst_len, "Free: %llu B", (unsigned long long)free_bytes);
     }
+}
+
+static uint64_t gui_ui_recording_output_total_bytes(const gui_app_t *app)
+{
+    if (!app) return 0;
+    uint64_t raw_total = atomic_load(&app->recording_raw_a) + atomic_load(&app->recording_raw_b);
+    if (!app->settings.use_flac) {
+        return raw_total;
+    }
+    uint64_t encoded_total = atomic_load(&app->recording_compressed_a) + atomic_load(&app->recording_compressed_b);
+    return (encoded_total > 0) ? encoded_total : raw_total;
+}
+
+static void format_status_runway_hhmmss(char *dst, size_t dst_len, double seconds)
+{
+    if (!dst || dst_len == 0) return;
+    if (seconds < 0.0) seconds = 0.0;
+    uint64_t total = (uint64_t)seconds;
+    uint64_t hh = total / 3600ULL;
+    uint64_t mm = (total / 60ULL) % 60ULL;
+    uint64_t ss = total % 60ULL;
+    snprintf(dst, dst_len, "%02" PRIu64 ":%02" PRIu64 ":%02" PRIu64, hh, mm, ss);
 }
 
 static void update_status_free_space(gui_app_t *app)
@@ -435,6 +488,28 @@ static void update_status_free_space(gui_app_t *app)
     } else {
         s_status_free_space_valid = false;
     }
+
+    if (!app->is_recording) {
+        s_status_output_last_bytes = 0;
+        s_status_output_last_sample_s = 0.0;
+        s_status_output_rate_bps = 0.0;
+        return;
+    }
+
+    uint64_t output_bytes = gui_ui_recording_output_total_bytes(app);
+    if (s_status_output_last_sample_s > 0.0 && output_bytes >= s_status_output_last_bytes) {
+        double elapsed_s = now - s_status_output_last_sample_s;
+        if (elapsed_s > 0.0) {
+            double instant_bps = (double)(output_bytes - s_status_output_last_bytes) / elapsed_s;
+            if (s_status_output_rate_bps <= 0.0) {
+                s_status_output_rate_bps = instant_bps;
+            } else {
+                s_status_output_rate_bps = (s_status_output_rate_bps * 0.75) + (instant_bps * 0.25);
+            }
+        }
+    }
+    s_status_output_last_bytes = output_bytes;
+    s_status_output_last_sample_s = now;
 }
 
 static void gui_record_limit_runtime_tick(gui_app_t *app)
@@ -445,6 +520,7 @@ static void gui_record_limit_runtime_tick(gui_app_t *app)
         s_record_limit_session_seen = false;
         s_record_limit_deadline_active = false;
         s_record_limit_deadline_s = 0.0;
+        gui_record_limit_sync_settings(app);
         return;
     }
 
@@ -459,6 +535,7 @@ static void gui_record_limit_runtime_tick(gui_app_t *app)
     if (timecode_valid) {
         s_record_limit_seconds = parsed_seconds;
     }
+    gui_record_limit_sync_settings(app);
 
     if (!s_record_limit_armed || !timecode_valid) {
         s_record_limit_deadline_active = false;
@@ -485,6 +562,8 @@ static void gui_record_limit_runtime_tick(gui_app_t *app)
     }
 
     if (now >= s_record_limit_deadline_s) {
+        gui_record_log_capture_event(app, "INFO", "Record timer reached deadline; stopping recording",
+                                     GUI_ERROR_CLASS_NONE, 0);
         gui_app_set_status(app, "Record time limit reached");
         gui_app_stop_recording(app);
         s_record_limit_deadline_active = false;
@@ -2283,6 +2362,16 @@ static void render_status_bar(gui_app_t *app) {
             if (s_status_free_space_valid) {
                 format_status_free_space_label(status_free_space_display, sizeof(status_free_space_display),
                                                s_status_free_space_cached_bytes);
+                if (app->is_recording && s_status_output_rate_bps > 0.0) {
+                    char free_only[48];
+                    char runway_hms[24];
+                    double runway_s = (double)s_status_free_space_cached_bytes / s_status_output_rate_bps;
+                    format_status_free_space_label(free_only, sizeof(free_only), s_status_free_space_cached_bytes);
+                    format_status_runway_hhmmss(runway_hms, sizeof(runway_hms), runway_s);
+                    snprintf(status_free_space_display, sizeof(status_free_space_display),
+                             "%s | Runway %s @ %.1f MB/s",
+                             free_only, runway_hms, s_status_output_rate_bps / (1024.0 * 1024.0));
+                }
                 if (s_status_free_space_cached_bytes < STATUS_FREE_SPACE_LOW_BYTES) {
                     free_space_color = COLOR_CLIP_RED;
                 } else if (s_status_free_space_cached_bytes < STATUS_FREE_SPACE_WARN_BYTES) {
@@ -2636,6 +2725,8 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_record_limit_seconds = parsed;
                 format_record_limit_timecode(s_record_limit_timecode, sizeof(s_record_limit_timecode), parsed);
                 s_record_limit_timecode_edit = false;
+                gui_record_limit_sync_settings(app);
+                gui_record_limit_log_state(app, "Record timer updated");
             } else {
                 gui_app_set_status(app, "Invalid record limit timecode");
             }
@@ -2665,6 +2756,8 @@ void gui_handle_interactions(gui_app_t *app) {
                     s_record_limit_armed = false;
                     s_record_limit_deadline_active = false;
                     s_record_limit_deadline_s = 0.0;
+                    gui_record_limit_sync_settings(app);
+                    gui_record_limit_log_state(app, "Record timer disarmed");
                     gui_app_set_status(app, "Record time limit disarmed");
                 } else {
                     if (s_record_limit_timecode_edit) {
@@ -2678,10 +2771,13 @@ void gui_handle_interactions(gui_app_t *app) {
                     uint32_t parsed_seconds = 0;
                     bool timecode_valid = parse_record_limit_timecode(s_record_limit_timecode, &parsed_seconds) && parsed_seconds > 0;
                     if (!timecode_valid) {
+                        gui_record_limit_sync_settings(app);
                         gui_app_set_status(app, "Invalid record limit timecode");
                     } else {
                         s_record_limit_seconds = parsed_seconds;
                         s_record_limit_armed = true;
+                        gui_record_limit_sync_settings(app);
+                        gui_record_limit_log_state(app, "Record timer armed");
                         if (app->is_recording) {
                             double now = GetTime();
                             double requested_deadline_s = app->recording_start_time + (double)s_record_limit_seconds;

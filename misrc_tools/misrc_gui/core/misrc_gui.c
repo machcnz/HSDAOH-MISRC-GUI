@@ -123,7 +123,7 @@ static const char *gui_dropout_reason_status(gui_dropout_reason_t reason) {
         case GUI_DROPOUT_BACKPRESSURE:
             return "Capture stopped: dropout (backpressure drops)";
         case GUI_DROPOUT_DISK_SPACE:
-            return "Capture stopped: low disk space (<10 GB)";
+            return "Capture stopped: low disk space (dynamic guard)";
         case GUI_DROPOUT_NONE:
         default:
             return "Capture stopped: dropout detected";
