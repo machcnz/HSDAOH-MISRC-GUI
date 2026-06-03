@@ -46,6 +46,7 @@ struct hsdaoh_dev {
 	uint16_t last_crc[2];
 	uint16_t idle_cnt;
 	bool stream_synced;
+	bool raw_cb;
 
 	unsigned int width, height, fps;
 

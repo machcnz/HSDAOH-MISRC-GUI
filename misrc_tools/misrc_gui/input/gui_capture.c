@@ -1284,21 +1284,12 @@ int gui_app_start_capture(gui_app_t *app) {
         }
         hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
 #else
-        fprintf(stderr, "[GUI] Allocating device...\n");
+        fprintf(stderr, "[GUI] Opening hsdaoh device...\n");
         proc_set_priority(PROC_PRIORITY_ABOVE);
         thrd_set_priority(THRD_PRIORITY_CRITICAL);
-
-        r = hsdaoh_alloc(&app->hs_dev); // MISRC original path
-        if (r < 0) {
-            fprintf(stderr, "[GUI] hsdaoh_alloc failed: %d\n", r);
-            gui_app_set_status(app, "Failed to allocate device");
-            proc_set_priority(PROC_PRIORITY_NORMAL);
-            return -1;
-        }
-
-        r = hsdaoh_open2(app->hs_dev, dev->index);
-        if (r < 0) {
-            fprintf(stderr, "[GUI] hsdaoh_open2 failed: %d\n", r);
+        r = hsdaoh_open(&app->hs_dev, dev->index);
+        if (r < 0 || !app->hs_dev) {
+            fprintf(stderr, "[GUI] hsdaoh_open failed: %d\n", r);
             if (r == -3) {
                 gui_app_set_status(app, "Permission denied opening MS2130 via libusb; run misrc_gui with sudo");
                 proc_set_priority(PROC_PRIORITY_NORMAL);
@@ -1306,8 +1297,6 @@ int gui_app_start_capture(gui_app_t *app) {
             } else {
                 gui_app_set_status(app, "Failed to open device");
             }
-            /* hsdaoh_open2() may already free the allocated handle on failure
-             * (for example on access/permission errors), so do not close here. */
             app->hs_dev = NULL;
             proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
@@ -1322,7 +1311,7 @@ int gui_app_start_capture(gui_app_t *app) {
 #ifdef HSDAOH_UPSTREAM
         r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
 #else
-        r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
+        r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app, 0);
 #endif
 
         if (r < 0) {

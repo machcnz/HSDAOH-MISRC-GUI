@@ -53,6 +53,7 @@
 #include <filters.h>
 
 #include <hsdaoh.h>
+#include <hsdaoh_raw.h>
 #include <hsdaoh_private.h>
 #include <format_convert.h>
 
@@ -91,38 +92,6 @@ static void hsdaoh_emit_msg(hsdaoh_dev_t *dev,
     fputs(buf, stderr);
 }
 
-enum crc_config {
-	CRC_NONE,		/* No CRC, just 16 bit idle counter */
-	CRC16_1_LINE,		/* Line contains CRC of the last line */
-	CRC16_2_LINE		/* Line contains CRC of the line before the last line */
-};
-
-#define DEFAULT_MAX_STREAMS		8
-
-typedef struct
-{
-	uint64_t data_cnt;
-	uint32_t srate;
-	uint32_t reserved1;
-	char reserved2[16];
-} __attribute__((packed, aligned(1))) stream_info_t;
-
-typedef struct
-{
-	uint32_t magic;
-	uint16_t framecounter;
-	uint8_t  reserved1;
-	uint8_t  crc_config;
-	uint16_t version;
-	uint32_t flags;
-	uint32_t reserved2[8];
-	uint16_t stream0_format;
-	uint16_t max_streamid;
-	stream_info_t stream_info[DEFAULT_MAX_STREAMS];
-} __attribute__((packed, aligned(1))) metadata_t;
-
-#define FLAG_STREAM_ID_PRESENT	(1 << 0)
-#define FLAG_FORMAT_ID_PRESENT	(1 << 1)
 
 #define CTRL_TIMEOUT	300
 
@@ -580,11 +549,21 @@ void hsdaoh_set_msg_callback(hsdaoh_dev_t *dev, hsdaoh_message_cb_t cb, void *ct
 	dev->msg_cb = cb;
 	dev->msg_cb_ctx = ctx;
 }
+
+void hsdaoh_raw_callback(hsdaoh_dev_t *dev, bool raw_cb)
+{
+	if (!dev)
+		return;
+
+	dev->raw_cb = raw_cb;
+}
 void hsdaoh_output(hsdaoh_dev_t *dev, uint16_t sid, int format, uint32_t srate, uint8_t *data, size_t len)
 {
 	hsdaoh_data_info_t data_info;
 	data_info.ctx = dev->cb_ctx;
 	data_info.buf = data;
+	data_info.width = 0;
+	data_info.height = 0;
 	data_info.len = len;
 	data_info.stream_id = sid;
 	data_info.srate = srate;
@@ -713,18 +692,17 @@ void hsdaoh_enqueue_data(hsdaoh_dev_t *dev, uint16_t sid, int format, uint32_t s
 }
 
 /* callback for idle/filler data */
-inline int hsdaoh_check_idle_cnt(hsdaoh_dev_t *dev, uint16_t *buf, size_t length)
+int hsdaoh_check_idle_cnt(uint16_t *idle_cnt, uint16_t *buf, size_t length)
 {
 	int idle_counter_errors = 0;
 
-	if (length == 0)
+	if (!idle_cnt || !buf || length == 0)
 		return 0;
 
 	for (unsigned int i = 0; i < length; i++) {
-		if (buf[i] != ((dev->idle_cnt+1) & 0xffff))
+		if (buf[i] != (((*idle_cnt)+1) & 0xffff))
 			idle_counter_errors++;
-
-		dev->idle_cnt = buf[i];
+		*idle_cnt = buf[i];
 	}
 
 	return idle_counter_errors;
@@ -739,21 +717,13 @@ inline uint16_t crc16_simple(uint8_t *buf, unsigned int len)
 #endif
 }
 
-/* Extract the metadata stored in the upper 4 bits of the last word of each line */
-inline void hsdaoh_extract_metadata(uint8_t *data, metadata_t *metadata, unsigned int width)
-{
-	uint8_t *meta = (uint8_t *)metadata;
-
-	for (unsigned i = 0; i < sizeof(metadata_t)*2; i += 2)
-		meta[i/2] = (data[((i+1)*width*2) - 1] >> 4) | (data[((i+2)*width*2) - 1] & 0xf0);
-}
 
 void hsdaoh_process_frame(hsdaoh_dev_t *dev, uint8_t *data, int size)
 {
 	metadata_t meta;
 	hsdaoh_extract_metadata(data, &meta, dev->width);
 
-	if (meta.magic != 0xda7acab1) {
+	if (meta.magic != HSDAOH_MAGIC) {
 		/* Report sync loss via callback or stderr */
 		if (dev->stream_synced)
 		hsdaoh_emit_msg(dev, HSDAOH_WARNING, "Lost sync to HDMI input stream\n");
@@ -817,7 +787,7 @@ void hsdaoh_process_frame(hsdaoh_dev_t *dev, uint8_t *data, int size)
 
 		if (meta.crc_config == CRC_NONE) {
 			uint16_t idle_len = (dev->width-1) - payload_len;
-			frame_errors += hsdaoh_check_idle_cnt(dev, (uint16_t *)line_dat + payload_len, idle_len);
+			frame_errors += hsdaoh_check_idle_cnt(&dev->idle_cnt, (uint16_t *)line_dat + payload_len, idle_len);
 		} else if ((meta.crc_config == CRC16_1_LINE) || (meta.crc_config == CRC16_2_LINE)) {
 			uint16_t expected_crc = (meta.crc_config == CRC16_1_LINE) ? dev->last_crc[0] : dev->last_crc[1];
 
@@ -883,6 +853,19 @@ void _uvc_callback(uvc_frame_t *frame, void *ptr)
 		if (dev->discard_start_frames == 5)
 			hsdaoh_ms_enable_transparent_mode(dev);
 
+		return;
+	}
+	if (dev->raw_cb) {
+		hsdaoh_data_info_t data_info;
+		memset(&data_info, 0, sizeof(data_info));
+		data_info.ctx = dev->cb_ctx;
+		data_info.buf = (uint8_t *)frame->data;
+		data_info.width = dev->width;
+		data_info.height = dev->height;
+		data_info.len = frame->data_bytes;
+		data_info.device_error = false;
+		if (dev->cb)
+			dev->cb(&data_info);
 		return;
 	}
 

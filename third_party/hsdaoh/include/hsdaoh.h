@@ -41,6 +41,8 @@ extern "C" {
 typedef struct hsdaoh_data_info {
 	void *ctx;
 	unsigned char *buf;
+	unsigned int width;
+	unsigned int height;
 	size_t len;			/* buffer length */
 	uint16_t stream_id;
 	uint32_t srate;
