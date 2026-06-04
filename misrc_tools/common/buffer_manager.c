@@ -166,8 +166,6 @@ int bufmgr_ensure_init(buffer_manager_t *mgr, buffer_id_t id) {
             (size_t)2 * 1024 * 1024 * 1024ULL,
             (size_t)1 * 1024 * 1024 * 1024ULL,
             (size_t)512 * 1024 * 1024ULL,
-            (size_t)256 * 1024 * 1024ULL,
-            (size_t)128 * 1024 * 1024ULL,
         };
         for (size_t i = 0; i < (sizeof(s_record_fallback_sizes) / sizeof(s_record_fallback_sizes[0])); i++) {
             size_t candidate = s_record_fallback_sizes[i];

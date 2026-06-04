@@ -32,6 +32,7 @@
 #include "../processing/gui_display_thread.h"
 #include "../output/gui_audio.h"
 #include <hsdaoh.h>
+#include "../../common/hsdaoh_compat.h"
 #if defined(_WIN32)
 #define Rectangle Win32_Rectangle
 #define CloseWindow Win32_CloseWindow
@@ -1309,9 +1310,9 @@ int gui_app_start_capture(gui_app_t *app) {
         fprintf(stderr, "[GUI] Starting stream...\n");
 
 #ifdef HSDAOH_UPSTREAM
-        r = hsdaoh_start_stream(app->hs_dev, gui_capture_upstream_callback, app, 0);
+        r = MISRC_HSDAOH_START_STREAM(app->hs_dev, gui_capture_upstream_callback, app);
 #else
-        r = hsdaoh_start_stream(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app, 0);
+        r = MISRC_HSDAOH_START_STREAM(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
 #endif
 
         if (r < 0) {

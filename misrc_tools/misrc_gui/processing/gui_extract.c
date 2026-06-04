@@ -60,11 +60,12 @@ static atomic_bool s_use_flac = false;
 static atomic_uchar s_rf_bits_a = 16;
 static atomic_uchar s_rf_bits_b = 16;
 
-// Record path must never block extraction long enough to starve RF ingestion.
-// If writer throughput falls behind, drop record writes instead of stalling.
+// Record path should stay effectively non-blocking for extraction, but allow a
+// very short wait window so transient full-buffer spikes do not immediately
+// force spill mode on a single scheduler hiccup.
 static const backpressure_policy_t s_record_write_policy = {
-    .max_wait_attempts = 0,
-    .wait_timeout_ms = 0,
+    .max_wait_attempts = 2,
+    .wait_timeout_ms = 1,
     .log_first_wait = false,
     .log_drops = false,
 };
@@ -140,6 +141,137 @@ static int extraction_thread(void *ctx) {
         bufmgr_read_end(&s_extract_app->buffers, BUF_CAPTURE_RF, read_size);
         frame_count++;
         recording_enabled = atomic_load(&s_recording_enabled);
+        // Conditionally write to record buffers via buffer manager
+        // Note: we always write raw int16 blocks to BUF_RECORD_A/B.
+        // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
+        if (recording_enabled) {
+            char disk_guard_msg[640] = {0};
+            if (gui_record_check_disk_space_guard(s_extract_app, frame_count,
+                                                  disk_guard_msg, sizeof(disk_guard_msg))) {
+                atomic_store(&s_recording_enabled, false);
+                recording_enabled = false;
+                if (!atomic_load(&s_extract_app->dropout_stop_requested)) {
+                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_DISK_SPACE);
+                    atomic_store(&s_extract_app->dropout_stop_requested, true);
+                }
+                if (misrc_debug_enabled() && disk_guard_msg[0]) {
+                    fprintf(stderr, "[EXTRACT] %s", disk_guard_msg);
+                    fputc('\n', stderr);
+                }
+            } else {
+                size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
+                bool want_a = s_extract_app->settings.capture_a;
+                bool want_b = s_b_present && s_extract_app->settings.capture_b;
+                int16_t *write_a = NULL;
+                int16_t *write_b = NULL;
+                bool attempted_ring_a = false;
+                bool attempted_ring_b = false;
+                bool drop_a = false;
+                bool drop_b = false;
+                char spill_error_a[256] = {0};
+                char spill_error_b[256] = {0};
+
+                if (want_a) {
+                    if (!gui_record_spill_is_forced(0)) {
+                        attempted_ring_a = true;
+                        write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                                BUF_RECORD_A,
+                                                                sample_bytes,
+                                                                &s_record_write_policy);
+                    }
+                    if (!write_a) {
+                        if (gui_record_spill_enqueue(s_extract_app, 0, mapped_a, sample_bytes,
+                                                     frame_count, spill_error_a, sizeof(spill_error_a))) {
+                            if (attempted_ring_a) {
+                                uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
+                                if (drops_now > 0) {
+                                    atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops, 1);
+                                }
+                            }
+                        } else {
+                            drop_a = true;
+                        }
+                    }
+                }
+
+                if (want_b) {
+                    if (!gui_record_spill_is_forced(1)) {
+                        attempted_ring_b = true;
+                        write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
+                                                                BUF_RECORD_B,
+                                                                sample_bytes,
+                                                                &s_record_write_policy);
+                    }
+                    if (!write_b) {
+                        if (gui_record_spill_enqueue(s_extract_app, 1, mapped_b, sample_bytes,
+                                                     frame_count, spill_error_b, sizeof(spill_error_b))) {
+                            if (attempted_ring_b) {
+                                uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
+                                if (drops_now > 0) {
+                                    atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops, 1);
+                                }
+                            }
+                        } else {
+                            drop_b = true;
+                        }
+                    }
+                }
+
+                if (want_a) {
+                    if (write_a) {
+                        memcpy(write_a, mapped_a, sample_bytes);
+                        bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
+                    } else if (drop_a) {
+                        char drop_msg[320];
+                        if (spill_error_a[0]) {
+                            snprintf(drop_msg, sizeof(drop_msg),
+                                     "Record data loss on channel A at extract_frame=%u (spill enqueue failed: %s)",
+                                     frame_count, spill_error_a);
+                        } else {
+                            snprintf(drop_msg, sizeof(drop_msg),
+                                     "Record data loss on channel A at extract_frame=%u (spill enqueue failed)",
+                                     frame_count);
+                        }
+                        gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
+                        if (misrc_debug_enabled()) {
+                            fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
+                        }
+                    }
+                }
+
+                if (want_b) {
+                    if (write_b) {
+                        memcpy(write_b, mapped_b, sample_bytes);
+                        bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
+                    } else if (drop_b) {
+                        char drop_msg[320];
+                        if (spill_error_b[0]) {
+                            snprintf(drop_msg, sizeof(drop_msg),
+                                     "Record data loss on channel B at extract_frame=%u (spill enqueue failed: %s)",
+                                     frame_count, spill_error_b);
+                        } else {
+                            snprintf(drop_msg, sizeof(drop_msg),
+                                     "Record data loss on channel B at extract_frame=%u (spill enqueue failed)",
+                                     frame_count);
+                        }
+                        gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
+                        if (misrc_debug_enabled()) {
+                            fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
+                        }
+                    }
+                }
+
+                if ((drop_a || drop_b) &&
+                    s_extract_app->settings.stop_on_dropout &&
+                    !atomic_load(&s_extract_app->dropout_stop_requested)) {
+                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_BACKPRESSURE);
+                    atomic_store(&s_extract_app->dropout_stop_requested, true);
+                }
+                if ((drop_a || drop_b) && atomic_load(&do_exit)) {
+                    goto exit_thread;
+                }
+            }
+        }
 
         if (recording_enabled) {
             bool record_a = s_extract_app->settings.capture_a;
@@ -205,7 +337,6 @@ static int extraction_thread(void *ctx) {
             gui_extract_update_stats(s_extract_app, mapped_a, mapped_b, BUFFER_READ_SIZE);
         }
 
-
         // Sample counters always updated (cheap atomic ops)
         atomic_fetch_add(&s_extract_app->total_samples, BUFFER_READ_SIZE);
         atomic_fetch_add(&s_extract_app->samples_a, BUFFER_READ_SIZE);
@@ -220,138 +351,6 @@ static int extraction_thread(void *ctx) {
 
         // Note: FFT is now processed from display samples in the render thread
         // (see gui_oscilloscope.c render_oscilloscope_channel split mode)
-
-        // Conditionally write to record buffers via buffer manager
-        // Note: we always write raw int16 blocks to BUF_RECORD_A/B.
-        // The writer threads (FLAC/RAW) handle RF bit depth conversion and optional soxr resampling.
-
-        if (recording_enabled) {
-            char disk_guard_msg[640] = {0};
-            if (gui_record_check_disk_space_guard(s_extract_app, frame_count,
-                                                  disk_guard_msg, sizeof(disk_guard_msg))) {
-                atomic_store(&s_recording_enabled, false);
-                if (!atomic_load(&s_extract_app->dropout_stop_requested)) {
-                    atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_DISK_SPACE);
-                    atomic_store(&s_extract_app->dropout_stop_requested, true);
-                }
-                if (misrc_debug_enabled() && disk_guard_msg[0]) {
-                    fprintf(stderr, "[EXTRACT] %s", disk_guard_msg);
-                    fputc('\n', stderr);
-                }
-                continue;
-            }
-            size_t sample_bytes = BUFFER_READ_SIZE * sizeof(int16_t);
-            bool want_a = s_extract_app->settings.capture_a;
-            bool want_b = s_b_present && s_extract_app->settings.capture_b;
-            int16_t *write_a = NULL;
-            int16_t *write_b = NULL;
-            bool attempted_ring_a = false;
-            bool attempted_ring_b = false;
-            bool drop_a = false;
-            bool drop_b = false;
-            char spill_error_a[256] = {0};
-            char spill_error_b[256] = {0};
-
-            if (want_a) {
-                if (!gui_record_spill_is_forced(0)) {
-                    attempted_ring_a = true;
-                    write_a = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                            BUF_RECORD_A,
-                                                            sample_bytes,
-                                                            &s_record_write_policy);
-                }
-                if (!write_a) {
-                    if (gui_record_spill_enqueue(s_extract_app, 0, mapped_a, sample_bytes,
-                                                 frame_count, spill_error_a, sizeof(spill_error_a))) {
-                        if (attempted_ring_a) {
-                            uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops);
-                            if (drops_now > 0) {
-                                atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_A].write_drops, 1);
-                            }
-                        }
-                    } else {
-                        drop_a = true;
-                    }
-                }
-            }
-
-            if (want_b) {
-                if (!gui_record_spill_is_forced(1)) {
-                    attempted_ring_b = true;
-                    write_b = (int16_t *)bufmgr_write_begin(&s_extract_app->buffers,
-                                                            BUF_RECORD_B,
-                                                            sample_bytes,
-                                                            &s_record_write_policy);
-                }
-                if (!write_b) {
-                    if (gui_record_spill_enqueue(s_extract_app, 1, mapped_b, sample_bytes,
-                                                 frame_count, spill_error_b, sizeof(spill_error_b))) {
-                        if (attempted_ring_b) {
-                            uint32_t drops_now = atomic_load(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops);
-                            if (drops_now > 0) {
-                                atomic_fetch_sub(&s_extract_app->buffers.stats[BUF_RECORD_B].write_drops, 1);
-                            }
-                        }
-                    } else {
-                        drop_b = true;
-                    }
-                }
-            }
-
-            if (want_a) {
-                if (write_a) {
-                    memcpy(write_a, mapped_a, sample_bytes);
-                    bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_A, sample_bytes);
-                } else if (drop_a) {
-                    char drop_msg[320];
-                    if (spill_error_a[0]) {
-                        snprintf(drop_msg, sizeof(drop_msg),
-                                 "Record data loss on channel A at extract_frame=%u (spill enqueue failed: %s)",
-                                 frame_count, spill_error_a);
-                    } else {
-                        snprintf(drop_msg, sizeof(drop_msg),
-                                 "Record data loss on channel A at extract_frame=%u (spill enqueue failed)",
-                                 frame_count);
-                    }
-                    gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
-                    if (misrc_debug_enabled()) {
-                        fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
-                    }
-                }
-            }
-
-            if (want_b) {
-                if (write_b) {
-                    memcpy(write_b, mapped_b, sample_bytes);
-                    bufmgr_write_end(&s_extract_app->buffers, BUF_RECORD_B, sample_bytes);
-                } else if (drop_b) {
-                    char drop_msg[320];
-                    if (spill_error_b[0]) {
-                        snprintf(drop_msg, sizeof(drop_msg),
-                                 "Record data loss on channel B at extract_frame=%u (spill enqueue failed: %s)",
-                                 frame_count, spill_error_b);
-                    } else {
-                        snprintf(drop_msg, sizeof(drop_msg),
-                                 "Record data loss on channel B at extract_frame=%u (spill enqueue failed)",
-                                 frame_count);
-                    }
-                    gui_record_log_capture_event(s_extract_app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, 1);
-                    if (misrc_debug_enabled()) {
-                        fprintf(stderr, "[EXTRACT] %s\n", drop_msg);
-                    }
-                }
-            }
-
-            if ((drop_a || drop_b) &&
-                s_extract_app->settings.stop_on_dropout &&
-                !atomic_load(&s_extract_app->dropout_stop_requested)) {
-                atomic_store(&s_extract_app->dropout_stop_reason, GUI_DROPOUT_BACKPRESSURE);
-                atomic_store(&s_extract_app->dropout_stop_requested, true);
-            }
-            if ((drop_a || drop_b) && atomic_load(&do_exit)) {
-                goto exit_thread;
-            }
-        }
     }
 
 exit_thread:

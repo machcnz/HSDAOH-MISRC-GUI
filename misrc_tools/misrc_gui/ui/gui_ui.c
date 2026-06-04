@@ -660,6 +660,11 @@ static void gui_ui_clear_text_edit(void)
     s_active_text_backspace_repeat_at = 0.0;
 }
 
+static bool gui_ui_settings_locked(const gui_app_t *app)
+{
+    return app && app->is_capturing;
+}
+
 static const char *gui_ui_build_text_with_caret(const char *src, int cursor)
 {
     static char caret_buf[512];
@@ -742,7 +747,7 @@ static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, 
 
 static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
 {
-    if (!app || !app->settings_panel_open) return false;
+    if (!app || !app->settings_panel_open || gui_ui_settings_locked(app)) return false;
     switch (field) {
         case UI_TEXT_FIELD_OUTPUT_BASE_NAME:
             return app->settings.auto_names_enabled;
@@ -985,6 +990,7 @@ static void render_settings_panel(gui_app_t *app) {
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             }
         }
+
 
         // Auto naming (moved to top segment, above Output folder)
         CLAY_TEXT(CLAY_STRING("Auto naming:"),
@@ -2860,7 +2866,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 TraceLog(LOG_INFO,
                          "MODE TRACE: source=CaptureModeToggle blocked current=%s recording=1",
                          gui_ui_capture_mode_name(s_capture_mode_state_misrc));
-                gui_app_set_status(app, "Capture mode is locked while recording");
+                gui_app_set_status(app, "Capture mode is locked while recording is active");
             } else {
                 gui_ui_set_capture_mode_state(app, !s_capture_mode_state_misrc);
                 gui_settings_save(&app->settings);
@@ -2868,6 +2874,26 @@ void gui_handle_interactions(gui_app_t *app) {
                     ? "Capture mode set to MISRC (A/B swapped)"
                     : "Capture mode set to HSDAOH (A/B normal)");
             }
+            gui_ui_set_click_consumed();
+            return;
+        }
+
+        if (app->settings_panel_open &&
+            (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton")))) {
+            app->settings_panel_open = false;
+            gui_ui_clear_text_edit();
+            gui_settings_save(&app->settings);
+            if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                gui_ui_clear_text_edit();
+            }
+            return;
+        }
+
+        if (app->settings_panel_open &&
+            gui_ui_settings_locked(app) &&
+            Clay_PointerOver(CLAY_ID("SettingsPanel"))) {
+            gui_ui_clear_text_edit();
+            gui_app_set_status(app, "Settings are locked while capture is active");
             gui_ui_set_click_consumed();
             return;
         }

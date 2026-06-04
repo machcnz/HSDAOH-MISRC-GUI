@@ -64,6 +64,11 @@
 
 // Buffer sizes
 #define BUFFER_READ_SIZE 65536
+// Use larger CLI-style writer chunks for record-path throughput stability.
+// CLI writer path uses 65536*32 byte blocks; GUI records int16 samples, so this
+// maps to 65536*32 bytes == 1048576 samples per channel per writer read.
+#define GUI_RECORD_WRITER_BLOCK_BYTES ((size_t)65536 * 32)
+#define GUI_RECORD_WRITER_BLOCK_SAMPLES (GUI_RECORD_WRITER_BLOCK_BYTES / sizeof(int16_t))
 
 // Format file size into human-readable string
 static void format_file_size_u64(uint64_t size, char *buf, size_t buf_size) {
@@ -954,8 +959,8 @@ static bool gui_record_get_next_block(writer_ctx_t *wctx, size_t block_bytes, in
 // FLAC file writer thread
 static int flac_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
-    size_t len = BUFFER_READ_SIZE * sizeof(int16_t);
-    size_t raw_bytes_per_block = BUFFER_READ_SIZE * sizeof(int16_t);
+    size_t len = GUI_RECORD_WRITER_BLOCK_BYTES;
+    size_t raw_bytes_per_block = GUI_RECORD_WRITER_BLOCK_BYTES;
     bool flac_encoder_error_logged = false;
 
     // Boost thread priority to avoid backpressure when window is minimized
@@ -968,14 +973,14 @@ static int flac_writer_thread(void *ctx) {
 
 #if LIBSOXR_ENABLED
     // Max output samples per block (downsampling, so <= input, but keep some slack)
-    size_t max_out = BUFFER_READ_SIZE;
+    size_t max_out = GUI_RECORD_WRITER_BLOCK_SAMPLES;
     tmp_i16 = (int16_t *)aligned_alloc(32, max_out * sizeof(int16_t));
     tmp_i32 = (int32_t *)aligned_alloc(32, max_out * sizeof(int32_t));
     tmp_cap = max_out;
 #else
     // No soxr: only need int32 conversion buffer
-    tmp_i32 = (int32_t *)aligned_alloc(32, BUFFER_READ_SIZE * sizeof(int32_t));
-    tmp_cap = BUFFER_READ_SIZE;
+    tmp_i32 = (int32_t *)aligned_alloc(32, GUI_RECORD_WRITER_BLOCK_SAMPLES * sizeof(int32_t));
+    tmp_cap = GUI_RECORD_WRITER_BLOCK_SAMPLES;
 #endif
 
     if (!tmp_i32) {
@@ -1022,14 +1027,14 @@ static int flac_writer_thread(void *ctx) {
             }
             continue;
         }
-        size_t out_n = BUFFER_READ_SIZE;
+        size_t out_n = GUI_RECORD_WRITER_BLOCK_SAMPLES;
 
 #if LIBSOXR_ENABLED
         if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
                 size_t in_done = 0, out_done = 0;
-                soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
+                soxr_error_t err = soxr_process(s, in, GUI_RECORD_WRITER_BLOCK_SAMPLES, &in_done,
                                                tmp_i16, tmp_cap, &out_done);
                 if (!err && out_done > 0) {
                     out_n = out_done;
@@ -1052,8 +1057,8 @@ static int flac_writer_thread(void *ctx) {
         } else
 #endif
         {
-            convert_i16_to_flac_i32(tmp_i32, in, BUFFER_READ_SIZE, wctx->flac_bits_per_sample);
-            int result = flac_writer_process(wctx->writer, tmp_i32, BUFFER_READ_SIZE);
+            convert_i16_to_flac_i32(tmp_i32, in, GUI_RECORD_WRITER_BLOCK_SAMPLES, wctx->flac_bits_per_sample);
+            int result = flac_writer_process(wctx->writer, tmp_i32, GUI_RECORD_WRITER_BLOCK_SAMPLES);
             if (result < 0 && !flac_encoder_error_logged) {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "FLAC encoder error on channel %c", wctx->channel == 0 ? 'A' : 'B');
@@ -1131,7 +1136,7 @@ static int raw_writer_thread(void *ctx) {
     writer_ctx_t *wctx = (writer_ctx_t *)ctx;
 
     // Input is always int16 blocks from BUF_RECORD
-    size_t in_len = BUFFER_READ_SIZE * sizeof(int16_t);
+    size_t in_len = GUI_RECORD_WRITER_BLOCK_BYTES;
 
     // Output bytes per sample (1=8-bit, 2=16-bit)
     size_t bps = (wctx->raw_bytes_per_sample == 1) ? 1 : 2;
@@ -1140,14 +1145,13 @@ static int raw_writer_thread(void *ctx) {
     thrd_set_priority(THRD_PRIORITY_CRITICAL);
 
 #if LIBSOXR_ENABLED
-    int16_t *tmp_i16 = (int16_t *)aligned_alloc(32, BUFFER_READ_SIZE * sizeof(int16_t));
+    int16_t *tmp_i16 = (int16_t *)aligned_alloc(32, GUI_RECORD_WRITER_BLOCK_SAMPLES * sizeof(int16_t));
     if (!tmp_i16) {
         fprintf(stderr, "[RAW] Failed to allocate resample buffer\n");
         return 0;
     }
 #endif
-
-    uint8_t *tmp_out = (uint8_t *)aligned_alloc(32, BUFFER_READ_SIZE * bps);
+    uint8_t *tmp_out = (uint8_t *)aligned_alloc(32, GUI_RECORD_WRITER_BLOCK_SAMPLES * bps);
     if (!tmp_out) {
         fprintf(stderr, "[RAW] Failed to allocate output buffer\n");
 #if LIBSOXR_ENABLED
@@ -1177,15 +1181,15 @@ static int raw_writer_thread(void *ctx) {
             }
             continue;
         }
-        size_t out_n = BUFFER_READ_SIZE;
+        size_t out_n = GUI_RECORD_WRITER_BLOCK_SAMPLES;
 
 #if LIBSOXR_ENABLED
         if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
                 size_t in_done = 0, out_done = 0;
-                soxr_error_t err = soxr_process(s, in, BUFFER_READ_SIZE, &in_done,
-                                               tmp_i16, BUFFER_READ_SIZE, &out_done);
+                soxr_error_t err = soxr_process(s, in, GUI_RECORD_WRITER_BLOCK_SAMPLES, &in_done,
+                                               tmp_i16, GUI_RECORD_WRITER_BLOCK_SAMPLES, &out_done);
                 if (!err && out_done > 0) {
                     out_n = out_done;
                     convert_i16_to_raw_bytes(tmp_out, tmp_i16, out_n, wctx->rf_bits);
@@ -1949,25 +1953,12 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         config_b.sample_rate = (app->settings.enable_resample_b && app->settings.resample_rate_b > 0.0f)
                                  ? (uint32_t)(app->settings.resample_rate_b)
                                  : 40000;
-        int effective_flac_level = app->settings.flac_level;
-        bool high_rate_capture = ((app->settings.capture_a &&
-                                   !app->settings.enable_resample_a &&
-                                   config_a.sample_rate >= 20000) ||
-                                  (app->settings.capture_b &&
-                                   !app->settings.enable_resample_b &&
-                                   config_b.sample_rate >= 20000));
-        if (high_rate_capture && effective_flac_level > 1) {
-            fprintf(stderr,
-                    "[REC] FLAC level %d reduced to 1 for realtime high-rate capture stability\\n",
-                    app->settings.flac_level);
-            effective_flac_level = 1;
-        }
 
         // bits_per_sample is set per-channel below
         config_a.bits_per_sample = 16;
         config_b.bits_per_sample = 16;
-        config_a.compression_level = effective_flac_level;
-        config_b.compression_level = effective_flac_level;
+        config_a.compression_level = app->settings.flac_level;
+        config_b.compression_level = app->settings.flac_level;
         config_a.verify = app->settings.flac_verification;
         config_b.verify = app->settings.flac_verification;
         config_a.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto

@@ -103,6 +103,7 @@ static const char* const _FLAC_StreamEncoderSetNumThreadsStatusString[] = {
 
 #include "../version.h"
 #include "../common/ringbuffer.h"
+#include "../common/hsdaoh_compat.h"
 #include "../common/flac_writer.h"
 #include "../common/frame_parser.h"
 #include "../common/device_enum.h"
@@ -1285,7 +1286,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Opened device #%d: %s %s, serial: %s\n", dev_index, dev_manufact, dev_product, dev_serial);
 
 		fprintf(stderr, "Reading samples...\n");
-		r = hsdaoh_start_stream(hs_dev, hsdaoh_callback, &cap_ctx, 0);
+		r = MISRC_HSDAOH_START_STREAM(hs_dev, hsdaoh_callback, &cap_ctx);
 		if (r < 0) {
 			fprintf(stderr, "Failed to start hsdaoh stream on device #%d.\\n", dev_index);
 			proc_set_priority(PROC_PRIORITY_NORMAL);

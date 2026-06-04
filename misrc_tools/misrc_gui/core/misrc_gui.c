@@ -457,45 +457,26 @@ int main(int argc, char **argv) {
     // Enable auto-reconnect by default
     app.auto_reconnect_enabled = true;
 
-    // Autoconnect hsdaoh if available
+    // Do not auto-start capture on launch.
+    // Keep mode controls toggleable until the user explicitly clicks Connect.
     if (app.device_count > 0) {
         int hs_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_HSDAOH);
         if (hs_idx >= 0) {
-            int connect_rc = 0;
             app.selected_device = hs_idx;
             gui_set_reconnect_target_from_selected(&app, &reconnect_target);
-            gui_app_set_status(&app, "Connecting...");
-            connect_rc = gui_app_start_capture(&app);
-            if (connect_rc == 0) {
-                gui_app_set_status(&app, "Connected");
-            } else {
-                if (connect_rc == -3 || gui_status_is_permission_denied(&app)) {
-                    app.reconnect_pending = false;
-                } else {
-                    gui_app_set_status(&app, "Failed to connect. Click Connect to retry.");
-                    app.reconnect_pending = true;
-                    app.reconnect_attempt_time = GetTime();
-                }
-            }
+            gui_app_set_status(&app, "Ready. Click Connect to start capture.");
         } else {
             int sc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_SIMPLE_CAPTURE);
             if (sc_idx >= 0) {
                 app.selected_device = sc_idx;
-                reconnect_target.valid = true;
-                reconnect_target.type = DEVICE_TYPE_HSDAOH;
-                reconnect_target.index = -1;
-                reconnect_target.name[0] = '\0';
-                reconnect_target.serial[0] = '\0';
-                app.reconnect_pending = true;
-                app.reconnect_attempt_time = GetTime();
-                app.reconnect_attempts = 0;
-                gui_app_set_status(&app, "MS2130 hsdaoh path not ready; waiting to reconnect.");
+                gui_set_reconnect_target_from_selected(&app, &reconnect_target);
+                gui_app_set_status(&app, "Ready. Click Connect to start capture.");
             } else {
                 gui_app_set_status(&app, "No hsdaoh devices found. Select device and click Connect.");
             }
         }
     } else {
-        gui_app_set_status(&app, "No devices found. Connect a device and restart.");
+        gui_app_set_status(&app, "No devices found. Connect a device and retry.");
     }
     int last_layout_width = -1;
     int last_layout_height = -1;
