@@ -662,7 +662,7 @@ static void gui_ui_clear_text_edit(void)
 
 static bool gui_ui_settings_locked(const gui_app_t *app)
 {
-    return app && app->is_capturing;
+    return app && app->is_recording;
 }
 
 static const char *gui_ui_build_text_with_caret(const char *src, int cursor)
@@ -2893,7 +2893,7 @@ void gui_handle_interactions(gui_app_t *app) {
             gui_ui_settings_locked(app) &&
             Clay_PointerOver(CLAY_ID("SettingsPanel"))) {
             gui_ui_clear_text_edit();
-            gui_app_set_status(app, "Settings are locked while capture is active");
+            gui_app_set_status(app, "Settings are locked while recording is active");
             gui_ui_set_click_consumed();
             return;
         }
