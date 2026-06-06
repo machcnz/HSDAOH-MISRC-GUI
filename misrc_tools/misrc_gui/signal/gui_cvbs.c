@@ -21,9 +21,28 @@ static double g_field_decode_avg_ms = 0.0;  // Last completed field's decode tim
 static inline double cvbs_nominal_line_period(const cvbs_decoder_t *decoder);
 static inline double cvbs_effective_line_period(const cvbs_decoder_t *decoder);
 static inline void cvbs_reset_fixed_sync_lock(cvbs_decoder_t *decoder);
+static const char *cvbs_decoder_mode_name(cvbs_decoder_mode_t mode);
+static const char *cvbs_tape_format_name(cvbs_tape_format_t format);
+static const char *cvbs_tape_mode_name(cvbs_tape_mode_t mode);
 static const char *cvbs_level_mode_name(cvbs_level_mode_t mode);
 static const char *cvbs_sync_mode_name(cvbs_sync_mode_t mode);
 static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source);
+
+typedef struct {
+    const int16_t *coeffs;
+    int taps;
+    int shift;
+} cvbs_luma_kernel_t;
+
+typedef struct {
+    double phase_gain;
+    double integral_gain;
+    double fixed_phase_gain;
+    double lock_threshold;
+} cvbs_pll_tuning_t;
+
+static cvbs_luma_kernel_t cvbs_select_luma_kernel(const cvbs_decoder_t *decoder);
+static cvbs_pll_tuning_t cvbs_select_pll_tuning(const cvbs_decoder_t *decoder);
 
 //-----------------------------------------------------------------------------
 // Internal Constants
@@ -45,6 +64,30 @@ static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source);
 //-----------------------------------------------------------------------------
 // Internal Helper Functions
 //-----------------------------------------------------------------------------
+static const char *cvbs_decoder_mode_name(cvbs_decoder_mode_t mode) {
+    return (mode == CVBS_DECODER_MODE_TAPE) ? "Tape" : "Mono";
+}
+
+static const char *cvbs_tape_format_name(cvbs_tape_format_t format) {
+    switch (format) {
+        case CVBS_TAPE_FORMAT_SVHS:    return "S-VHS";
+        case CVBS_TAPE_FORMAT_BETAMAX: return "Betamax";
+        case CVBS_TAPE_FORMAT_VIDEO8:  return "Video8";
+        case CVBS_TAPE_FORMAT_HI8:     return "Hi8";
+        case CVBS_TAPE_FORMAT_UMATIC:  return "U-matic";
+        case CVBS_TAPE_FORMAT_VHS:
+        default:                       return "VHS";
+    }
+}
+
+static const char *cvbs_tape_mode_name(cvbs_tape_mode_t mode) {
+    switch (mode) {
+        case CVBS_TAPE_MODE_LP:  return "LP";
+        case CVBS_TAPE_MODE_ELP: return "ELP";
+        case CVBS_TAPE_MODE_SP:
+        default:                 return "SP";
+    }
+}
 static const char *cvbs_level_mode_name(cvbs_level_mode_t mode) {
     return (mode == CVBS_LEVEL_MODE_FIXED) ? "Fixed" : "Auto";
 }
@@ -53,22 +96,140 @@ static const char *cvbs_sync_mode_name(cvbs_sync_mode_t mode) {
     return (mode == CVBS_SYNC_MODE_FIXED) ? "Fixed" : "Auto";
 }
 
+// Select luma smoothing preset.
+// CVBS mode keeps original behavior; Tape mode applies tape-family/speed bias.
+static cvbs_luma_kernel_t cvbs_select_luma_kernel(const cvbs_decoder_t *decoder) {
+    // Original balanced kernel (legacy default).
+    static const int16_t kernel_balanced[17] = {
+        1, 2, 5, 9, 14, 21, 28, 33, 35, 33, 28, 21, 14, 9, 5, 2, 1
+    };
+    // Slightly sharper kernel.
+    static const int16_t kernel_sharp[11] = {
+        2, 6, 14, 25, 35, 40, 35, 25, 14, 6, 2
+    };
+    // Slightly softer kernel.
+    static const int16_t kernel_soft[23] = {
+        1, 1, 2, 3, 5, 8, 12, 16, 20, 24, 26, 27,
+        26, 24, 20, 16, 12, 8, 5, 3, 2, 1, 1
+    };
+
+    int preset = 1;  // balanced
+    if (decoder && decoder->decoder_mode == CVBS_DECODER_MODE_TAPE) {
+        preset = (decoder->tape_mode == CVBS_TAPE_MODE_SP) ? 0
+               : (decoder->tape_mode == CVBS_TAPE_MODE_ELP) ? 2
+               : 1;
+
+        // Tape-family bias.
+        if (decoder->tape_format == CVBS_TAPE_FORMAT_SVHS ||
+            decoder->tape_format == CVBS_TAPE_FORMAT_HI8) {
+            preset -= 1;  // sharper
+        } else if (decoder->tape_format == CVBS_TAPE_FORMAT_UMATIC) {
+            preset += 1;  // slightly softer/noise-tolerant
+        }
+        if (preset < 0) preset = 0;
+        if (preset > 2) preset = 2;
+    }
+
+    switch (preset) {
+        case 0:  return (cvbs_luma_kernel_t){ kernel_sharp, 11, 8 };
+        case 2:  return (cvbs_luma_kernel_t){ kernel_soft, 23, 8 };
+        case 1:
+        default: return (cvbs_luma_kernel_t){ kernel_balanced, 17, 8 };
+    }
+}
+
+// Select PLL tuning profile.
+// CVBS mode stays at original constants.
+static cvbs_pll_tuning_t cvbs_select_pll_tuning(const cvbs_decoder_t *decoder) {
+    cvbs_pll_tuning_t t = {
+        .phase_gain = 0.15,
+        .integral_gain = 0.005,
+        .fixed_phase_gain = 0.03,
+        .lock_threshold = 100.0,
+    };
+
+    if (!decoder || decoder->decoder_mode != CVBS_DECODER_MODE_TAPE) {
+        return t;
+    }
+
+    switch (decoder->tape_mode) {
+        case CVBS_TAPE_MODE_SP:
+            t.phase_gain = 0.17;
+            t.integral_gain = 0.006;
+            t.fixed_phase_gain = 0.035;
+            t.lock_threshold = 90.0;
+            break;
+        case CVBS_TAPE_MODE_LP:
+            t.phase_gain = 0.14;
+            t.integral_gain = 0.0045;
+            t.fixed_phase_gain = 0.028;
+            t.lock_threshold = 110.0;
+            break;
+        case CVBS_TAPE_MODE_ELP:
+            t.phase_gain = 0.11;
+            t.integral_gain = 0.003;
+            t.fixed_phase_gain = 0.020;
+            t.lock_threshold = 140.0;
+            break;
+        default:
+            break;
+    }
+
+    if (decoder->tape_format == CVBS_TAPE_FORMAT_SVHS ||
+        decoder->tape_format == CVBS_TAPE_FORMAT_HI8) {
+        t.lock_threshold -= 10.0;
+    } else if (decoder->tape_format == CVBS_TAPE_FORMAT_UMATIC) {
+        t.lock_threshold += 10.0;
+    }
+
+    if (t.lock_threshold < 70.0) t.lock_threshold = 70.0;
+    if (t.lock_threshold > 180.0) t.lock_threshold = 180.0;
+    return t;
+}
+
 static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source) {
     if (!decoder) return;
     if (!decoder->debug.mode_trace_initialized) {
         decoder->debug.mode_trace_initialized = true;
+        decoder->debug.last_decoder_mode = (int)decoder->decoder_mode;
+        decoder->debug.last_tape_format = (int)decoder->tape_format;
+        decoder->debug.last_tape_mode = (int)decoder->tape_mode;
         decoder->debug.last_level_mode = (int)decoder->level_mode;
         decoder->debug.last_sync_mode = (int)decoder->sync_mode;
         decoder->debug.last_fixed_sync_locked = decoder->fixed_sync_locked;
         decoder->debug.last_fixed_levels_valid = decoder->fixed_levels_valid;
         TraceLog(LOG_INFO,
-                 "CVBS MODE TRACE: source=%s init level=%s sync=%s lock=%d fixed_levels_valid=%d",
+                 "CVBS MODE TRACE: source=%s init decoder=%s tape=%s mode=%s level=%s sync=%s fixed_sync_locked=%d fixed_levels_valid=%d",
                  (source && source[0]) ? source : "unknown",
+                 cvbs_decoder_mode_name(decoder->decoder_mode),
+                 cvbs_tape_format_name(decoder->tape_format),
+                 cvbs_tape_mode_name(decoder->tape_mode),
                  cvbs_level_mode_name(decoder->level_mode),
                  cvbs_sync_mode_name(decoder->sync_mode),
                  decoder->fixed_sync_locked ? 1 : 0,
                  decoder->fixed_levels_valid ? 1 : 0);
         return;
+    }
+    if (decoder->debug.last_decoder_mode != (int)decoder->decoder_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=decoder_mode old=%s new=%s",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_decoder_mode_name((cvbs_decoder_mode_t)decoder->debug.last_decoder_mode),
+                 cvbs_decoder_mode_name(decoder->decoder_mode));
+    }
+    if (decoder->debug.last_tape_format != (int)decoder->tape_format) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=tape_format old=%s new=%s",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_tape_format_name((cvbs_tape_format_t)decoder->debug.last_tape_format),
+                 cvbs_tape_format_name(decoder->tape_format));
+    }
+    if (decoder->debug.last_tape_mode != (int)decoder->tape_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=tape_mode old=%s new=%s",
+                 (source && source[0]) ? source : "unknown",
+                 cvbs_tape_mode_name((cvbs_tape_mode_t)decoder->debug.last_tape_mode),
+                 cvbs_tape_mode_name(decoder->tape_mode));
     }
 
     if (decoder->debug.last_level_mode != (int)decoder->level_mode) {
@@ -101,6 +262,9 @@ static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source) {
                  decoder->fixed_levels_valid ? 1 : 0,
                  cvbs_level_mode_name(decoder->level_mode));
     }
+    decoder->debug.last_decoder_mode = (int)decoder->decoder_mode;
+    decoder->debug.last_tape_format = (int)decoder->tape_format;
+    decoder->debug.last_tape_mode = (int)decoder->tape_mode;
 
     decoder->debug.last_level_mode = (int)decoder->level_mode;
     decoder->debug.last_sync_mode = (int)decoder->sync_mode;
@@ -108,19 +272,6 @@ static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source) {
     decoder->debug.last_fixed_levels_valid = decoder->fixed_levels_valid;
 }
 
-// Luma lowpass filter to remove chroma subcarrier
-// 17-tap stronger Gaussian lowpass (sigma≈3.0) for true monochrome.
-// Kills PAL/NTSC chroma subcarrier at 40 MSPS.
-#define LUMA_LPF_TAPS  17
-#define LUMA_LPF_HALF  8   // Half the taps (for centering)
-
-// Pre-computed Gaussian kernel coefficients (sigma ~= 3.0)
-// Sum = 261, division via right-shift by 8 (÷256) gives slight gain ~1.02
-static const int16_t luma_kernel[LUMA_LPF_TAPS] = {
-    1, 2, 5, 9, 14, 21, 28, 33, 35, 33, 28, 21, 14, 9, 5, 2, 1
-};
-#define LUMA_KERNEL_SUM 261
-#define LUMA_KERNEL_SHIFT 8  // Divide by 256 ≈ shift right 8
 
 // Pre-filtered line buffer (avoids per-pixel convolution)
 // Must cover full PAL line period at 40 MSPS when full-frame mode is enabled.
@@ -134,8 +285,6 @@ static void decode_line_to_pixels(const cvbs_decoder_t *decoder,
                                   const cvbs_levels_t *levels,
                                   uint8_t *pixels, int pixel_width) {
     if (!decoder || !samples || !levels || !pixels || pixel_width <= 0) return;
-
-    (void)decoder; // kept for API consistency
 
     // Always decode the full line (sync + blanking + active).
     // Active vs Full is decided at render time by cropping the src rectangle.
@@ -155,43 +304,45 @@ static void decode_line_to_pixels(const cvbs_decoder_t *decoder,
     int32_t black = levels->black_level;
     int32_t range = levels->white_level - black;
     if (range < 1) range = 1;
+    cvbs_luma_kernel_t kernel = cvbs_select_luma_kernel(decoder);
+    const int half_taps = kernel.taps / 2;
 
     // =========================================================================
     // Pass 1: Apply kernel filter to entire line (one convolution per sample)
     // This is O(n * taps) but we only do it once, not per output pixel
     // =========================================================================
 
-    // Handle left edge (first LUMA_LPF_HALF samples) - clamp to edge
-    for (int i = 0; i < LUMA_LPF_HALF && i < n; i++) {
+    // Handle left edge (first half_taps samples) - clamp to edge
+    for (int i = 0; i < half_taps && i < n; i++) {
         int32_t sum = 0;
-        for (int k = 0; k < LUMA_LPF_TAPS; k++) {
-            int idx = i - LUMA_LPF_HALF + k;
+        for (int k = 0; k < kernel.taps; k++) {
+            int idx = i - half_taps + k;
             if (idx < 0) idx = 0;
-            sum += src[idx] * luma_kernel[k];
+            sum += src[idx] * kernel.coeffs[k];
         }
-        g_filtered_line[i] = (int16_t)(sum >> LUMA_KERNEL_SHIFT);
+        g_filtered_line[i] = (int16_t)(sum >> kernel.shift);
     }
 
     // Main body - compiler will unroll the small fixed-size loop
-    int end = n - LUMA_LPF_HALF;
-    for (int i = LUMA_LPF_HALF; i < end; i++) {
-        const int16_t *p = src + i - LUMA_LPF_HALF;
+    int end = n - half_taps;
+    for (int i = half_taps; i < end; i++) {
+        const int16_t *p = src + i - half_taps;
         int32_t sum = 0;
-        for (int k = 0; k < LUMA_LPF_TAPS; k++) {
-            sum += p[k] * luma_kernel[k];
+        for (int k = 0; k < kernel.taps; k++) {
+            sum += p[k] * kernel.coeffs[k];
         }
-        g_filtered_line[i] = (int16_t)(sum >> LUMA_KERNEL_SHIFT);
+        g_filtered_line[i] = (int16_t)(sum >> kernel.shift);
     }
 
-    // Handle right edge (last LUMA_LPF_HALF samples) - clamp to edge
+    // Handle right edge (last half_taps samples) - clamp to edge
     for (int i = end; i < n; i++) {
         int32_t sum = 0;
-        for (int k = 0; k < LUMA_LPF_TAPS; k++) {
-            int idx = i - LUMA_LPF_HALF + k;
+        for (int k = 0; k < kernel.taps; k++) {
+            int idx = i - half_taps + k;
             if (idx >= n) idx = n - 1;
-            sum += src[idx] * luma_kernel[k];
+            sum += src[idx] * kernel.coeffs[k];
         }
-        g_filtered_line[i] = (int16_t)(sum >> LUMA_KERNEL_SHIFT);
+        g_filtered_line[i] = (int16_t)(sum >> kernel.shift);
     }
 
     // =========================================================================
@@ -661,12 +812,8 @@ static void commit_adaptive_levels(cvbs_decoder_t *decoder) {
 //-----------------------------------------------------------------------------
 
 // PLL tuning constants
-#define PLL_PHASE_GAIN      0.15    // Proportional gain for phase correction
-#define PLL_INTEGRAL_GAIN   0.005   // Integral gain for frequency drift
-#define PLL_LOCK_THRESHOLD  100     // Phase error below this = good sync
 #define PLL_LOCK_COUNT      10      // Good syncs needed to declare lock
 #define PLL_UNLOCK_COUNT    5       // Bad syncs to lose lock
-#define PLL_FIXED_PHASE_GAIN    0.03   // Small phase nudge in fixed mode (no frequency adaptation)
 #define PLL_FIXED_UNLOCK_COUNT  20     // Bad syncs before fixed lock drops back to acquisition
 #define PLL_FIXED_VSYNC_WINDOW  96     // Accept V-sync in fixed lock near expected line cadence
 #define PLL_FIXED_PERIOD_CLAMP  120.0  // Clamp fixed period to nominal ± this many samples
@@ -937,6 +1084,7 @@ static void start_new_field_pll(cvbs_decoder_t *decoder, bool is_odd_field) {
 // Process a detected H-sync edge - update PLL
 static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
     cvbs_pll_state_t *pll = &decoder->pll;
+    cvbs_pll_tuning_t tuning = cvbs_select_pll_tuning(decoder);
     bool fixed_mode = (decoder->sync_mode == CVBS_SYNC_MODE_FIXED);
     bool fixed_locked = fixed_mode && decoder->fixed_sync_locked && decoder->fixed_line_period > 0.0;
     double line_period = fixed_locked ? decoder->fixed_line_period : pll->line_period;
@@ -952,7 +1100,7 @@ static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
     }
 
     // Update PLL lock status based on phase error magnitude
-    if (fabs(phase_error) < PLL_LOCK_THRESHOLD) {
+    if (fabs(phase_error) < tuning.lock_threshold) {
         pll->good_sync_count++;
         pll->bad_sync_count = 0;
         if (pll->good_sync_count >= PLL_LOCK_COUNT) {
@@ -970,8 +1118,8 @@ static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
             // Acquisition phase for fixed mode: use AUTO-style PLL long enough to
             // find a stable cadence, then freeze line period.
             if (fabs(phase_error) <= line_period * 0.4) {
-                pll->phase -= phase_error * PLL_PHASE_GAIN;
-                pll->phase_integral += phase_error * PLL_INTEGRAL_GAIN;
+                pll->phase -= phase_error * tuning.phase_gain;
+                pll->phase_integral += phase_error * tuning.integral_gain;
                 if (pll->phase_integral > 50) pll->phase_integral = 50;
                 if (pll->phase_integral < -50) pll->phase_integral = -50;
                 pll->freq_adjust = pll->phase_integral;
@@ -1007,9 +1155,8 @@ static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
             bool near_field_boundary = (pll->current_line < 8) ||
                                        (pll->current_line > (expected_lines - 8));
             bool in_vsync_region = decoder->vsync.in_vsync;
-
-            if (fabs(phase_error) < PLL_LOCK_THRESHOLD) {
-                pll->phase -= phase_error * PLL_FIXED_PHASE_GAIN;
+            if (fabs(phase_error) < tuning.lock_threshold) {
+                pll->phase -= phase_error * tuning.fixed_phase_gain;
                 if (decoder->fixed_bad_syncs > 0) decoder->fixed_bad_syncs--;
             } else if (fabs(phase_error) > line_period * 0.30) {
                 if (!in_vsync_region && !near_field_boundary) {
@@ -1034,9 +1181,8 @@ static void pll_process_hsync(cvbs_decoder_t *decoder, double phase_at_sync) {
             decoder->debug.hsyncs_last_field++;
             return;
         }
-
-        pll->phase -= phase_error * PLL_PHASE_GAIN;
-        pll->phase_integral += phase_error * PLL_INTEGRAL_GAIN;
+        pll->phase -= phase_error * tuning.phase_gain;
+        pll->phase_integral += phase_error * tuning.integral_gain;
         if (pll->phase_integral > 50) pll->phase_integral = 50;
         if (pll->phase_integral < -50) pll->phase_integral = -50;
         pll->freq_adjust = pll->phase_integral;
@@ -1567,6 +1713,16 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     if (!decoder) return;
 
     decoder->overlay.is_visible = true;
+    bool show_tape_controls = (decoder->decoder_mode == CVBS_DECODER_MODE_TAPE);
+    if (!show_tape_controls) {
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
+    }
+
+    // Clear optional rects so hidden controls don't capture stale clicks.
+    decoder->overlay.tape_btn_rect = (Rectangle){0};
+    decoder->overlay.tape_format_btn_rect = (Rectangle){0};
+    decoder->overlay.tape_mode_btn_rect = (Rectangle){0};
 
     // Button dimensions
     float btn_h = 18.0f;
@@ -1577,6 +1733,19 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     int sys = decoder->overlay.selected_system; // 0=PAL/SECAM, 1=NTSC
     if (sys < 0 || sys > 1) sys = 0;
     const char *sys_name = system_labels[sys];
+    const char *tape_format_labels[] = {"PAL", "NTSC", "SECAM"};
+    int tape_fmt = decoder->overlay.selected_tape_format;
+    if (tape_fmt < 0 || tape_fmt > 2) tape_fmt = 0;
+    const char *tape_fmt_name = tape_format_labels[tape_fmt];
+
+    char dec_label[32];
+    snprintf(dec_label, sizeof(dec_label), "Decoder: %s", cvbs_decoder_mode_name(decoder->decoder_mode));
+    char tape_label[40];
+    snprintf(tape_label, sizeof(tape_label), "Tape: %s", cvbs_tape_format_name(decoder->tape_format));
+    char tape_format_label[32];
+    snprintf(tape_format_label, sizeof(tape_format_label), "Format: %s", tape_fmt_name);
+    char tape_mode_label[24];
+    snprintf(tape_mode_label, sizeof(tape_mode_label), "Mode: %s", cvbs_tape_mode_name(decoder->tape_mode));
     const char *frame_label = (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL)
                               ? "Frame: Full"
                               : "Frame: Active";
@@ -1611,10 +1780,19 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     float sync_btn_w = sync_text_w + 16.0f;
     if (sync_btn_w < 120.0f) sync_btn_w = 120.0f;
 
-    const char *dec_label = "Decoder: Mono";
     float dec_text_w = (float)gui_text_measure(dec_label, FONT_SIZE_DROPDOWN_OPT);
     float dec_btn_w = dec_text_w + 16.0f;
-    if (dec_btn_w < 110.0f) dec_btn_w = 110.0f;
+    if (dec_btn_w < 128.0f) dec_btn_w = 128.0f;
+
+    float tape_text_w = (float)gui_text_measure(tape_label, FONT_SIZE_DROPDOWN_OPT);
+    float tape_btn_w = tape_text_w + 28.0f;  // include dropdown arrow
+    if (tape_btn_w < 130.0f) tape_btn_w = 130.0f;
+    float tape_format_text_w = (float)gui_text_measure(tape_format_label, FONT_SIZE_DROPDOWN_OPT);
+    float tape_format_btn_w = tape_format_text_w + 28.0f;  // include dropdown arrow
+    if (tape_format_btn_w < 130.0f) tape_format_btn_w = 130.0f;
+    float tape_mode_text_w = (float)gui_text_measure(tape_mode_label, FONT_SIZE_DROPDOWN_OPT);
+    float tape_mode_btn_w = tape_mode_text_w + 16.0f;
+    if (tape_mode_btn_w < 100.0f) tape_mode_btn_w = 100.0f;
 
     // Position buttons in a right-aligned vertical stack.
     float x_right = panel_x + panel_w - 8.0f;
@@ -1622,6 +1800,9 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     float row_step = btn_h + gap;
 
     float col_btn_w = dec_btn_w;
+    if (show_tape_controls && tape_btn_w > col_btn_w) col_btn_w = tape_btn_w;
+    if (show_tape_controls && tape_format_btn_w > col_btn_w) col_btn_w = tape_format_btn_w;
+    if (show_tape_controls && tape_mode_btn_w > col_btn_w) col_btn_w = tape_mode_btn_w;
     if (osd_btn_w > col_btn_w) col_btn_w = osd_btn_w;
     if (frame_btn_w > col_btn_w) col_btn_w = frame_btn_w;
     if (level_btn_w > col_btn_w) col_btn_w = level_btn_w;
@@ -1630,34 +1811,112 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
 
     float col_x = x_right - col_btn_w;
 
+    int row = 0;
     float dec_btn_x = col_x + (col_btn_w - dec_btn_w);
-    float osd_btn_x = col_x + (col_btn_w - osd_btn_w);
-    float frame_btn_x = col_x + (col_btn_w - frame_btn_w);
-    float level_btn_x = col_x + (col_btn_w - level_btn_w);
-    float sync_btn_x = col_x + (col_btn_w - sync_btn_w);
-    float sys_btn_x = col_x + (col_btn_w - sys_btn_w);
+    float dec_btn_y = btn_y0 + row_step * row++;
 
-    float dec_btn_y = btn_y0;
-    float osd_btn_y = btn_y0 + row_step;
-    float frame_btn_y = btn_y0 + row_step * 2.0f;
-    float level_btn_y = btn_y0 + row_step * 3.0f;
-    float sync_btn_y = btn_y0 + row_step * 4.0f;
-    float sys_btn_y = btn_y0 + row_step * 5.0f;
+    float tape_btn_x = col_x + (col_btn_w - tape_btn_w);
+    float tape_btn_y = btn_y0 + row_step * row;
+    if (show_tape_controls) row++;
+
+    float tape_format_btn_x = col_x + (col_btn_w - tape_format_btn_w);
+    float tape_format_btn_y = btn_y0 + row_step * row;
+    if (show_tape_controls) row++;
+
+    float tape_mode_btn_x = col_x + (col_btn_w - tape_mode_btn_w);
+    float tape_mode_btn_y = btn_y0 + row_step * row;
+    if (show_tape_controls) row++;
+
+    float osd_btn_x = col_x + (col_btn_w - osd_btn_w);
+    float osd_btn_y = btn_y0 + row_step * row++;
+    float frame_btn_x = col_x + (col_btn_w - frame_btn_w);
+    float frame_btn_y = btn_y0 + row_step * row++;
+    float level_btn_x = col_x + (col_btn_w - level_btn_w);
+    float level_btn_y = btn_y0 + row_step * row++;
+    float sync_btn_x = col_x + (col_btn_w - sync_btn_w);
+    float sync_btn_y = btn_y0 + row_step * row++;
+    float sys_btn_x = col_x + (col_btn_w - sys_btn_w);
+    float sys_btn_y = btn_y0 + row_step * row++;
 
     // Store hit boxes for click detection
     decoder->overlay.decoder_btn_rect = (Rectangle){dec_btn_x, dec_btn_y, dec_btn_w, btn_h};
+    if (show_tape_controls) {
+        decoder->overlay.tape_btn_rect = (Rectangle){tape_btn_x, tape_btn_y, tape_btn_w, btn_h};
+        decoder->overlay.tape_format_btn_rect = (Rectangle){tape_format_btn_x, tape_format_btn_y, tape_format_btn_w, btn_h};
+        decoder->overlay.tape_mode_btn_rect = (Rectangle){tape_mode_btn_x, tape_mode_btn_y, tape_mode_btn_w, btn_h};
+    }
     decoder->overlay.osd_btn_rect     = (Rectangle){osd_btn_x, osd_btn_y, osd_btn_w, btn_h};
     decoder->overlay.frame_btn_rect   = (Rectangle){frame_btn_x, frame_btn_y, frame_btn_w, btn_h};
     decoder->overlay.level_btn_rect   = (Rectangle){level_btn_x, level_btn_y, level_btn_w, btn_h};
     decoder->overlay.sync_btn_rect    = (Rectangle){sync_btn_x, sync_btn_y, sync_btn_w, btn_h};
     decoder->overlay.system_btn_rect  = (Rectangle){sys_btn_x, sys_btn_y, sys_btn_w, btn_h};
-
-    // Decoder mode indicator (Mono only, no cycle)
-    Color dec_bg = COLOR_BUTTON;
+    // Decoder mode button (CVBS <-> Tape)
+    Color dec_bg = (decoder->decoder_mode == CVBS_DECODER_MODE_TAPE) ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
     DrawRectangleRounded(decoder->overlay.decoder_btn_rect, 0.15f, 4, dec_bg);
     float dec_text_x = dec_btn_x + (dec_btn_w - dec_text_w) / 2.0f;
     float dec_text_y = dec_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
     gui_text_draw(dec_label, dec_text_x, dec_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+    if (show_tape_controls) {
+        // Tape family selector (dropdown)
+        bool tape_open = decoder->overlay.tape_dropdown_open;
+        Rectangle tape_btn_rect = decoder->overlay.tape_btn_rect;
+        Color tape_bg = tape_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+        DrawRectangleRounded(tape_btn_rect, 0.15f, 4, tape_bg);
+
+        int tape_label_w = gui_text_measure(tape_label, FONT_SIZE_DROPDOWN_OPT);
+        float tape_arrow_w = 8.0f;
+        float tape_total_w = (float)tape_label_w + tape_arrow_w + 4.0f;
+        float tape_text_x = tape_btn_rect.x + (tape_btn_rect.width - tape_total_w) / 2.0f;
+        float tape_text_y = tape_btn_rect.y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+        gui_text_draw(tape_label, tape_text_x, tape_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+        float arrow_size = 5.0f;
+        float arrow_x = tape_text_x + tape_label_w + 6.0f;
+        float arrow_cy = tape_btn_rect.y + btn_h / 2.0f;
+        if (tape_open) {
+            Vector2 top = { arrow_x + arrow_size/2, arrow_cy - arrow_size/2 };
+            Vector2 left = { arrow_x, arrow_cy + arrow_size/2 };
+            Vector2 right = { arrow_x + arrow_size, arrow_cy + arrow_size/2 };
+            DrawTriangle(top, left, right, COLOR_TEXT);
+        } else {
+            Vector2 bottom = { arrow_x + arrow_size/2, arrow_cy + arrow_size/2 };
+            Vector2 left = { arrow_x, arrow_cy - arrow_size/2 };
+            Vector2 right = { arrow_x + arrow_size, arrow_cy - arrow_size/2 };
+            DrawTriangle(bottom, right, left, COLOR_TEXT);
+        }
+
+        // Format selector (PAL/NTSC/SECAM dropdown)
+        bool tape_fmt_open = decoder->overlay.tape_format_dropdown_open;
+        Rectangle tape_format_btn_rect = decoder->overlay.tape_format_btn_rect;
+        Color tape_fmt_bg = tape_fmt_open ? COLOR_BUTTON_HOVER : COLOR_BUTTON;
+        DrawRectangleRounded(tape_format_btn_rect, 0.15f, 4, tape_fmt_bg);
+
+        int tape_fmt_label_w = gui_text_measure(tape_format_label, FONT_SIZE_DROPDOWN_OPT);
+        float tape_fmt_total_w = (float)tape_fmt_label_w + tape_arrow_w + 4.0f;
+        float tape_fmt_text_x = tape_format_btn_rect.x + (tape_format_btn_rect.width - tape_fmt_total_w) / 2.0f;
+        float tape_fmt_text_y = tape_format_btn_rect.y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+        gui_text_draw(tape_format_label, tape_fmt_text_x, tape_fmt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+
+        float fmt_arrow_x = tape_fmt_text_x + tape_fmt_label_w + 6.0f;
+        float fmt_arrow_cy = tape_format_btn_rect.y + btn_h / 2.0f;
+        if (tape_fmt_open) {
+            Vector2 top = { fmt_arrow_x + arrow_size/2, fmt_arrow_cy - arrow_size/2 };
+            Vector2 left = { fmt_arrow_x, fmt_arrow_cy + arrow_size/2 };
+            Vector2 right = { fmt_arrow_x + arrow_size, fmt_arrow_cy + arrow_size/2 };
+            DrawTriangle(top, left, right, COLOR_TEXT);
+        } else {
+            Vector2 bottom = { fmt_arrow_x + arrow_size/2, fmt_arrow_cy + arrow_size/2 };
+            Vector2 left = { fmt_arrow_x, fmt_arrow_cy - arrow_size/2 };
+            Vector2 right = { fmt_arrow_x + arrow_size, fmt_arrow_cy - arrow_size/2 };
+            DrawTriangle(bottom, right, left, COLOR_TEXT);
+        }
+
+        // Tape speed mode button (SP/LP/ELP cycle)
+        DrawRectangleRounded(decoder->overlay.tape_mode_btn_rect, 0.15f, 4, COLOR_BUTTON);
+        float tape_mode_text_x = tape_mode_btn_x + (tape_mode_btn_w - tape_mode_text_w) / 2.0f;
+        float tape_mode_text_y = tape_mode_btn_y + (btn_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+        gui_text_draw(tape_mode_label, tape_mode_text_x, tape_mode_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+    }
 
     // OSD mode button (cycles Off/Minimal/Stats)
     Color osd_bg = COLOR_BUTTON;
@@ -1744,6 +2003,69 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
             gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
         }
     }
+
+    // Tape family dropdown options
+    if (show_tape_controls && decoder->overlay.tape_dropdown_open) {
+        Rectangle tape_btn_rect = decoder->overlay.tape_btn_rect;
+        float opt_y = tape_btn_rect.y + btn_h;
+        float opt_h = 20.0f;
+        const char *options[] = {"VHS", "S-VHS", "Betamax", "Video8", "Hi8", "U-matic"};
+        cvbs_tape_format_t values[] = {
+            CVBS_TAPE_FORMAT_VHS,
+            CVBS_TAPE_FORMAT_SVHS,
+            CVBS_TAPE_FORMAT_BETAMAX,
+            CVBS_TAPE_FORMAT_VIDEO8,
+            CVBS_TAPE_FORMAT_HI8,
+            CVBS_TAPE_FORMAT_UMATIC
+        };
+        DrawRectangleRounded((Rectangle){tape_btn_rect.x, opt_y, tape_btn_rect.width, opt_h * 6.0f},
+                             0.1f, 4, COLOR_PANEL_BG);
+
+        for (int i = 0; i < 6; i++) {
+            Rectangle opt_rect = {tape_btn_rect.x, opt_y + i * opt_h, tape_btn_rect.width, opt_h};
+            decoder->overlay.tape_options_rect[i] = opt_rect;
+
+            bool is_selected = (decoder->tape_format == values[i]);
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+
+            Color opt_bg = gui_dropdown_option_color(is_selected, hover);
+            DrawRectangleRec(opt_rect, opt_bg);
+
+            int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
+            float opt_text_x = tape_btn_rect.x + tape_btn_rect.width/2.0f - opt_text_w/2.0f;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+            gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
+
+    // Tape format dropdown options (PAL/NTSC/SECAM)
+    if (show_tape_controls && decoder->overlay.tape_format_dropdown_open) {
+        Rectangle fmt_btn_rect = decoder->overlay.tape_format_btn_rect;
+        float opt_y = fmt_btn_rect.y + btn_h;
+        float opt_h = 20.0f;
+        const char *options[] = {"PAL", "NTSC", "SECAM"};
+
+        DrawRectangleRounded((Rectangle){fmt_btn_rect.x, opt_y, fmt_btn_rect.width, opt_h * 3.0f},
+                             0.1f, 4, COLOR_PANEL_BG);
+
+        for (int i = 0; i < 3; i++) {
+            Rectangle opt_rect = {fmt_btn_rect.x, opt_y + i * opt_h, fmt_btn_rect.width, opt_h};
+            decoder->overlay.tape_format_options_rect[i] = opt_rect;
+
+            bool is_selected = (tape_fmt == i);
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, opt_rect);
+
+            Color opt_bg = gui_dropdown_option_color(is_selected, hover);
+            DrawRectangleRec(opt_rect, opt_bg);
+
+            int opt_text_w = gui_text_measure(options[i], FONT_SIZE_DROPDOWN_OPT);
+            float opt_text_x = fmt_btn_rect.x + fmt_btn_rect.width/2.0f - opt_text_w/2.0f;
+            float opt_text_y = opt_y + i * opt_h + (opt_h - FONT_SIZE_DROPDOWN_OPT) / 2.0f;
+            gui_text_draw(options[i], opt_text_x, opt_text_y, FONT_SIZE_DROPDOWN_OPT, COLOR_TEXT);
+        }
+    }
 }
 
 //=============================================================================
@@ -1770,6 +2092,9 @@ static void *cvbs_vtable_create(void) {
     // Default OSD mode
     decoder->osd_mode = CVBS_OSD_MINIMAL;
     decoder->frame_view_mode = CVBS_FRAME_VIEW_ACTIVE;
+    decoder->decoder_mode = CVBS_DECODER_MODE_CVBS;
+    decoder->tape_format = CVBS_TAPE_FORMAT_VHS;
+    decoder->tape_mode = CVBS_TAPE_MODE_SP;
     decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
     decoder->sync_mode = CVBS_SYNC_MODE_FIXED;
     decoder->fixed_levels_valid = false;
@@ -1777,7 +2102,10 @@ static void *cvbs_vtable_create(void) {
 
     // Default to 625-line PAL/SECAM for real-hardware testing.
     decoder->overlay.selected_system = 0;  // 0=625-line PAL/SECAM, 1=525-line NTSC
+    decoder->overlay.selected_tape_format = 0;  // 0=PAL, 1=NTSC, 2=SECAM
     decoder->overlay.system_dropdown_open = false;
+    decoder->overlay.tape_dropdown_open = false;
+    decoder->overlay.tape_format_dropdown_open = false;
     gui_cvbs_set_format(decoder, 0);
     cvbs_trace_mode_watch(decoder, "create");
 
@@ -1855,9 +2183,71 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
     if (!decoder) return false;
     if (!decoder->overlay.is_visible) return false;
+    bool tape_ui = (decoder->decoder_mode == CVBS_DECODER_MODE_TAPE);
+
+    // Decoder mode button: toggle CVBS <-> Tape
+    if (CheckCollisionPointRec(mouse_pos, decoder->overlay.decoder_btn_rect)) {
+        cvbs_decoder_mode_t old_mode = decoder->decoder_mode;
+        decoder->decoder_mode = (decoder->decoder_mode == CVBS_DECODER_MODE_CVBS)
+                                    ? CVBS_DECODER_MODE_TAPE
+                                    : CVBS_DECODER_MODE_CVBS;
+        decoder->overlay.system_dropdown_open = false;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
+        if (old_mode != decoder->decoder_mode) {
+            TraceLog(LOG_INFO,
+                     "CVBS MODE TRACE: source=overlay_click field=decoder_mode old=%s new=%s",
+                     cvbs_decoder_mode_name(old_mode),
+                     cvbs_decoder_mode_name(decoder->decoder_mode));
+        }
+        cvbs_trace_mode_watch(decoder, "overlay_decoder_click");
+        return true;
+    }
+
+    // Tape family dropdown button (Tape mode only)
+    if (tape_ui && CheckCollisionPointRec(mouse_pos, decoder->overlay.tape_btn_rect)) {
+        decoder->overlay.tape_dropdown_open = !decoder->overlay.tape_dropdown_open;
+        decoder->overlay.tape_format_dropdown_open = false;
+        decoder->overlay.system_dropdown_open = false;
+        return true;
+    }
+
+    // Tape format dropdown button (PAL/NTSC/SECAM, Tape mode only)
+    if (tape_ui && CheckCollisionPointRec(mouse_pos, decoder->overlay.tape_format_btn_rect)) {
+        decoder->overlay.tape_format_dropdown_open = !decoder->overlay.tape_format_dropdown_open;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.system_dropdown_open = false;
+        return true;
+    }
+
+    // Tape speed mode button (SP/LP/ELP, Tape mode only)
+    if (tape_ui && CheckCollisionPointRec(mouse_pos, decoder->overlay.tape_mode_btn_rect)) {
+        cvbs_tape_mode_t old_mode = decoder->tape_mode;
+        if (decoder->tape_mode == CVBS_TAPE_MODE_SP) {
+            decoder->tape_mode = CVBS_TAPE_MODE_LP;
+        } else if (decoder->tape_mode == CVBS_TAPE_MODE_LP) {
+            decoder->tape_mode = CVBS_TAPE_MODE_ELP;
+        } else {
+            decoder->tape_mode = CVBS_TAPE_MODE_SP;
+        }
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
+        decoder->overlay.system_dropdown_open = false;
+        if (old_mode != decoder->tape_mode) {
+            TraceLog(LOG_INFO,
+                     "CVBS MODE TRACE: source=overlay_click field=tape_mode old=%s new=%s",
+                     cvbs_tape_mode_name(old_mode),
+                     cvbs_tape_mode_name(decoder->tape_mode));
+        }
+        cvbs_trace_mode_watch(decoder, "overlay_tape_mode_click");
+        return true;
+    }
 
     // OSD mode button: cycle OFF -> MINIMAL -> STATS -> OFF
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.osd_btn_rect)) {
+        decoder->overlay.system_dropdown_open = false;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
         if (decoder->osd_mode == CVBS_OSD_OFF) {
             decoder->osd_mode = CVBS_OSD_MINIMAL;
         } else if (decoder->osd_mode == CVBS_OSD_MINIMAL) {
@@ -1868,12 +2258,68 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
         return true;
     }
 
+    // Tape family dropdown options
+    if (tape_ui && decoder->overlay.tape_dropdown_open) {
+        cvbs_tape_format_t values[] = {
+            CVBS_TAPE_FORMAT_VHS,
+            CVBS_TAPE_FORMAT_SVHS,
+            CVBS_TAPE_FORMAT_BETAMAX,
+            CVBS_TAPE_FORMAT_VIDEO8,
+            CVBS_TAPE_FORMAT_HI8,
+            CVBS_TAPE_FORMAT_UMATIC
+        };
+        for (int i = 0; i < 6; i++) {
+            if (CheckCollisionPointRec(mouse_pos, decoder->overlay.tape_options_rect[i])) {
+                cvbs_tape_format_t old_format = decoder->tape_format;
+                decoder->tape_format = values[i];
+                decoder->overlay.tape_dropdown_open = false;
+                if (old_format != decoder->tape_format) {
+                    TraceLog(LOG_INFO,
+                             "CVBS MODE TRACE: source=overlay_click field=tape_format old=%s new=%s",
+                             cvbs_tape_format_name(old_format),
+                             cvbs_tape_format_name(decoder->tape_format));
+                }
+                cvbs_trace_mode_watch(decoder, "overlay_tape_format_click");
+                return true;
+            }
+        }
+        // Click outside dropdown closes it
+        decoder->overlay.tape_dropdown_open = false;
+    }
+
+    // Tape format dropdown options (PAL/NTSC/SECAM)
+    if (tape_ui && decoder->overlay.tape_format_dropdown_open) {
+        for (int i = 0; i < 3; i++) {
+            if (CheckCollisionPointRec(mouse_pos, decoder->overlay.tape_format_options_rect[i])) {
+                decoder->overlay.selected_tape_format = i;
+                decoder->overlay.system_dropdown_open = false;
+                decoder->overlay.tape_format_dropdown_open = false;
+                if (i == 0) {
+                    decoder->overlay.selected_system = 0;
+                    gui_cvbs_set_format(decoder, 0);  // PAL
+                } else if (i == 1) {
+                    decoder->overlay.selected_system = 1;
+                    gui_cvbs_set_format(decoder, 1);  // NTSC
+                } else {
+                    decoder->overlay.selected_system = 0;
+                    gui_cvbs_set_format(decoder, 2);  // SECAM
+                }
+                cvbs_trace_mode_watch(decoder, "overlay_tape_system_click");
+                return true;
+            }
+        }
+        // Click outside dropdown closes it
+        decoder->overlay.tape_format_dropdown_open = false;
+    }
+
     // Frame mode button: toggle Active <-> Full
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.frame_btn_rect)) {
         cvbs_frame_view_t next_mode = (decoder->frame_view_mode == CVBS_FRAME_VIEW_ACTIVE)
                                       ? CVBS_FRAME_VIEW_FULL
                                       : CVBS_FRAME_VIEW_ACTIVE;
         decoder->overlay.system_dropdown_open = false;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
         gui_cvbs_set_frame_view_mode(decoder, next_mode);
         return true;
     }
@@ -1882,6 +2328,8 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.level_btn_rect)) {
         cvbs_level_mode_t old_level_mode = decoder->level_mode;
         decoder->overlay.system_dropdown_open = false;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
         if (decoder->level_mode == CVBS_LEVEL_MODE_FIXED) {
             decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
             decoder->fixed_levels_valid = false;
@@ -1923,6 +2371,8 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
         cvbs_sync_mode_t old_sync_mode = decoder->sync_mode;
         bool old_fixed_lock = decoder->fixed_sync_locked;
         decoder->overlay.system_dropdown_open = false;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
         if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED) {
             decoder->sync_mode = CVBS_SYNC_MODE_AUTO;
         } else {
@@ -1954,6 +2404,8 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     // System button: toggle dropdown
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.system_btn_rect)) {
         decoder->overlay.system_dropdown_open = !decoder->overlay.system_dropdown_open;
+        decoder->overlay.tape_dropdown_open = false;
+        decoder->overlay.tape_format_dropdown_open = false;
         return true;
     }
 
@@ -1964,6 +2416,11 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
             if (CheckCollisionPointRec(mouse_pos, decoder->overlay.system_options_rect[i])) {
                 decoder->overlay.selected_system = sys_values[i];
                 gui_cvbs_set_format(decoder, sys_values[i]);
+                if (sys_values[i] == 1) {
+                    decoder->overlay.selected_tape_format = 1; // NTSC
+                } else if (decoder->overlay.selected_tape_format == 1) {
+                    decoder->overlay.selected_tape_format = 0; // PAL fallback
+                }
                 decoder->overlay.system_dropdown_open = false;
                 return true;
             }

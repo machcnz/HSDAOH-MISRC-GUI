@@ -100,6 +100,30 @@ typedef enum {
     CVBS_SYNC_MODE_FIXED = 1,
 } cvbs_sync_mode_t;
 
+// Decoder family used by preview path.
+// CVBS preserves existing behavior; TAPE enables tape-oriented preview tuning.
+typedef enum {
+    CVBS_DECODER_MODE_CVBS = 0,
+    CVBS_DECODER_MODE_TAPE = 1,
+} cvbs_decoder_mode_t;
+
+// Tape family selector (aligned with tape-decode-rs family naming where practical).
+typedef enum {
+    CVBS_TAPE_FORMAT_VHS = 0,
+    CVBS_TAPE_FORMAT_SVHS,
+    CVBS_TAPE_FORMAT_BETAMAX,
+    CVBS_TAPE_FORMAT_VIDEO8,
+    CVBS_TAPE_FORMAT_HI8,
+    CVBS_TAPE_FORMAT_UMATIC,
+} cvbs_tape_format_t;
+
+// Tape speed mode selector.
+typedef enum {
+    CVBS_TAPE_MODE_SP = 0,
+    CVBS_TAPE_MODE_LP,
+    CVBS_TAPE_MODE_ELP,
+} cvbs_tape_mode_t;
+
 // Software PLL state for H-sync tracking
 typedef struct {
     // Core PLL state
@@ -159,6 +183,9 @@ typedef struct cvbs_decoder {
     cvbs_frame_state_t state;
 
     // Decoder configuration
+    cvbs_decoder_mode_t decoder_mode;   // CVBS vs Tape decoder path
+    cvbs_tape_format_t tape_format;     // Tape family preset
+    cvbs_tape_mode_t tape_mode;         // SP/LP/ELP
     cvbs_osd_mode_t osd_mode;           // Off / Minimal / Stats
     cvbs_frame_view_t frame_view_mode;  // Active-only vs full-frame view
     cvbs_level_mode_t level_mode;       // Auto-adaptive vs fixed video levels
@@ -231,6 +258,9 @@ typedef struct cvbs_decoder {
         int last_half_line_count;      // Half-line count from last V-sync
         int log_counter;               // Per-instance debug log counter
         bool mode_trace_initialized;   // CVBS mode transition trace initialized
+        int last_decoder_mode;         // Last observed cvbs_decoder_mode_t value
+        int last_tape_format;          // Last observed cvbs_tape_format_t value
+        int last_tape_mode;            // Last observed cvbs_tape_mode_t value
         int last_level_mode;           // Last observed cvbs_level_mode_t value
         int last_sync_mode;            // Last observed cvbs_sync_mode_t value
         bool last_fixed_sync_locked;   // Last observed fixed-sync lock state
@@ -246,13 +276,23 @@ typedef struct cvbs_decoder {
         Rectangle level_btn_rect;      // Hit box for levels mode button
         Rectangle sync_btn_rect;       // Hit box for sync mode button
         Rectangle system_btn_rect;     // Hit box for system selector button
+        Rectangle tape_btn_rect;       // Hit box for tape family selector button
+        Rectangle tape_format_btn_rect;// Hit box for tape format selector button
+        Rectangle tape_mode_btn_rect;  // Hit box for tape mode cycle button
 
         // Dropdown options for system selector (0=625-line PAL/SECAM, 1=525-line NTSC)
         Rectangle system_options_rect[2];
+        // Dropdown options for tape family selector.
+        Rectangle tape_options_rect[6];
+        // Dropdown options for tape format selector (PAL/NTSC/SECAM).
+        Rectangle tape_format_options_rect[3];
 
         bool is_visible;               // Whether overlay was rendered (for click detection)
         bool system_dropdown_open;     // Whether system dropdown is currently open
+        bool tape_dropdown_open;       // Whether tape family dropdown is currently open
+        bool tape_format_dropdown_open;// Whether tape format dropdown is currently open
         int selected_system;           // 0=625-line PAL/SECAM, 1=525-line NTSC
+        int selected_tape_format;      // 0=PAL, 1=NTSC, 2=SECAM
     } overlay;
 } cvbs_decoder_t;
 
