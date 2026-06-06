@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
+#include <ctype.h>
 #include <errno.h>
 #include "version.h"
 
@@ -125,6 +126,54 @@ static void gui_record_build_system_timestamp(char *dst, size_t dst_len) {
              tmv.tm_hour,
              tmv.tm_min,
              tmv.tm_sec);
+}
+
+static bool gui_record_extract_timestamp_token(const char *path, char *dst, size_t dst_len) {
+    if (!path || !path[0] || !dst || dst_len == 0) return false;
+    dst[0] = '\0';
+
+    const char *name = path;
+    const char *slash = strrchr(path, '/');
+#if defined(_WIN32) || defined(_WIN64)
+    const char *bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
+#endif
+    if (slash && slash[1]) {
+        name = slash + 1;
+    }
+
+    size_t len = strlen(name);
+    for (size_t i = 0; i + 19 <= len; i++) {
+        const char *p = name + i;
+        bool match =
+            isdigit((unsigned char)p[0]) &&
+            isdigit((unsigned char)p[1]) &&
+            isdigit((unsigned char)p[2]) &&
+            isdigit((unsigned char)p[3]) &&
+            p[4] == '.' &&
+            isdigit((unsigned char)p[5]) &&
+            isdigit((unsigned char)p[6]) &&
+            p[7] == '.' &&
+            isdigit((unsigned char)p[8]) &&
+            isdigit((unsigned char)p[9]) &&
+            p[10] == '_' &&
+            isdigit((unsigned char)p[11]) &&
+            isdigit((unsigned char)p[12]) &&
+            p[13] == '.' &&
+            isdigit((unsigned char)p[14]) &&
+            isdigit((unsigned char)p[15]) &&
+            p[16] == '.' &&
+            isdigit((unsigned char)p[17]) &&
+            isdigit((unsigned char)p[18]);
+        if (match) {
+            snprintf(dst, dst_len, "%.*s", 19, p);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static void gui_record_build_iso8601_timestamp(char *dst, size_t dst_len) {
@@ -1449,9 +1498,18 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     }
 
     char date_tag[32];
-    if (app->capture_timestamp[0]) {
+    date_tag[0] = '\0';
+    bool have_date_tag = false;
+    if (app->settings.capture_a && path_a && path_a[0]) {
+        have_date_tag = gui_record_extract_timestamp_token(path_a, date_tag, sizeof(date_tag));
+    }
+    if (!have_date_tag && app->settings.capture_b && path_b && path_b[0]) {
+        have_date_tag = gui_record_extract_timestamp_token(path_b, date_tag, sizeof(date_tag));
+    }
+    if (!have_date_tag && app->capture_timestamp[0]) {
         snprintf(date_tag, sizeof(date_tag), "%s", app->capture_timestamp);
-    } else {
+    }
+    if (!date_tag[0]) {
         gui_record_build_system_timestamp(date_tag, sizeof(date_tag));
     }
     if (!date_tag[0]) {
