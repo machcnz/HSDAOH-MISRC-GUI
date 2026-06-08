@@ -50,7 +50,7 @@ Possible capture examples:
 
 ## Hardware features
 
-- Duel ADC / Duel Input (BNC Connectors)
+- Dual ADC / Dual Input (BNC Connectors)
 - 6 Extra Aux inputs for audio ADC modules etc
 - Two 12-bit 40msps ADCs: [AD9235](https://www.analog.com/media/en/technical-documentation/data-sheets/AD9235.pdf)
 - Selectable input gain (8 steps) (using [AD8138](https://www.analog.com/media/en/technical-documentation/data-sheets/ad8138.pdf) op-amp)
@@ -171,7 +171,7 @@ The pre-build packages contains the script `install-udev-rules.sh`. On execution
 > [!TIP]  
 > Pre-built Binaries is available on the [releases tab](https://github.com/Stefan-Olt/MISRC/releases).
 
-`misrc_capture` is a simple command line interface program to capture from MISRC boards using [hsdaoh](https://github.com/Stefan-Olt/hsdaoh) to which leverages data capture over HDMI with [MS2130](https://s.click.aliexpress.com/e/_DBaBiOp) "U3" cheep HDMI capture cards that have YUV support and full-frame signal acesses. 
+`misrc_capture` is a simple command line interface program to capture from MISRC boards using [hsdaoh](https://github.com/Stefan-Olt/hsdaoh) to which leverages data capture over HDMI with [MS2130](https://s.click.aliexpress.com/e/_DBaBiOp) "U3" cheap HDMI capture cards that have YUV support and full-frame signal acesses. 
 
 Create a folder which you wish to capture inside, open it inside terminal and then run `misrc_capture`.
 
