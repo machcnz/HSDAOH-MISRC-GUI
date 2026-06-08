@@ -61,13 +61,14 @@ cmake --install .
 ```
 
 #### Build hsdaoh/libhsdaoh
+```console
 cd 'to your desired working top level directory'
-
 git clone https://github.com/machcnz/hsdaoh.git
 cd 
 mkdir hsdaoh/build && cd hsdaoh/build
 cmake ../
 cmake --build .
+```
 
 **Validate successful build with these directories**
 - Required for the gui build - note paths for step 2.
