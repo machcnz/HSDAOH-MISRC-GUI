@@ -60,13 +60,14 @@ cmake --build .
 cmake --install .
 ```
 
-#### Build libhsdaoh
+#### Build hsdaoh/libhsdaoh
 cd [to your desired working top level directory]
 git clone https://github.com/machcnz/hsdaoh.git
 cd 
 mkdir hsdaoh/build && cd hsdaoh/build
 cmake ../
 cmake --build .
+
 **Validate successful build with these directories**
 - Required for the gui build - note paths for step 2.
 - i. HSDOAH-for-MISRC/hsdaoh/include   <--- this is the [-DHSDAOH_INC=/path/to/hsdaoh/include]
@@ -80,7 +81,6 @@ cmake --build .
   mkdir HSDAOH-MISRC-GUI/build && cd HSDAOH-MISRC-GUI/build
   cd ..
 
-
 **Example build**
 cmake -S . -B build \
 -DHSDAOH_INC="/c/temp/HSDOAH-for-MISRC/hsdaoh/include"   
@@ -91,10 +91,12 @@ cmake -S . -B build \
 cmake -S . -B build \
   -DHSDAOH_INC=/path/to/hsdaoh/include \
   -DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.dll.a
-On successful build:
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+**On successful build:**
 cmake --build build -j
 
-Complete: the misrc_gui.exe should now be found in the **/build** folder
+**Complete:** the misrc_gui.exe should now be found in the **/build** folder
 
 **Note:**
 - HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h. (you build in step 1)
