@@ -77,7 +77,8 @@ cmake --build .
 
   
 **2) Build this GUI**
-- cd to your desired working top level directory
+```console
+cd to your desired working top level directory
 git clone https://github.com/machcnz/HSDAOH-MISRC-GUI.git
 cd
 mkdir HSDAOH-MISRC-GUI/build && cd HSDAOH-MISRC-GUI/build
@@ -97,6 +98,7 @@ cmake -S . -B build \
 
 **On successful build:**
 cmake --build build -j
+```
 
 **Complete:** the misrc_gui.exe should now be found in the **/build** folder
 
