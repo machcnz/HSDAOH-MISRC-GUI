@@ -76,11 +76,11 @@ cmake --build .
 
   
 **2) Build this GUI**
-- cd [to your desired working top level directory]
-  git clone https://github.com/machcnz/HSDAOH-MISRC-GUI.git
-  cd
-  mkdir HSDAOH-MISRC-GUI/build && cd HSDAOH-MISRC-GUI/build
-  cd ..
+- cd to your desired working top level directory
+git clone https://github.com/machcnz/HSDAOH-MISRC-GUI.git
+cd
+mkdir HSDAOH-MISRC-GUI/build && cd HSDAOH-MISRC-GUI/build
+cd ..
 
 **Example build**
 cmake -S . -B build \
@@ -90,9 +90,9 @@ cmake -S . -B build \
 
 **Build**
 cmake -S . -B build \
-  -DHSDAOH_INC=/path/to/hsdaoh/include \
-  -DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.dll.a
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+-DHSDAOH_INC=/path/to/hsdaoh/include \
+-DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.dll.a
+-DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
 **On successful build:**
 cmake --build build -j
