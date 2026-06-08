@@ -61,7 +61,8 @@ cmake --install .
 ```
 
 #### Build hsdaoh/libhsdaoh
-cd [to your desired working top level directory]
+cd 'to your desired working top level directory'
+
 git clone https://github.com/machcnz/hsdaoh.git
 cd 
 mkdir hsdaoh/build && cd hsdaoh/build
