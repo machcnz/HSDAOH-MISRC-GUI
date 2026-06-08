@@ -100,7 +100,11 @@ static FLAC__StreamEncoderSeekStatus stream_seek_callback(
     (void)encoder;
     flac_writer_t *writer = (flac_writer_t *)client_data;
 
-    if (fseek(writer->output_file, (long)absolute_byte_offset, SEEK_SET) < 0) {
+#ifdef _WIN32
+    if (_fseeki64(writer->output_file, (__int64)absolute_byte_offset, SEEK_SET) < 0) {
+#else
+    if (fseeko(writer->output_file, (off_t)absolute_byte_offset, SEEK_SET) < 0) {
+#endif
         return FLAC__STREAM_ENCODER_SEEK_STATUS_ERROR;
     }
     return FLAC__STREAM_ENCODER_SEEK_STATUS_OK;
@@ -115,7 +119,11 @@ static FLAC__StreamEncoderTellStatus stream_tell_callback(
     (void)encoder;
     flac_writer_t *writer = (flac_writer_t *)client_data;
 
-    long pos = ftell(writer->output_file);
+#ifdef _WIN32
+    __int64 pos = _ftelli64(writer->output_file);
+#else
+    off_t pos = ftello(writer->output_file);
+#endif
     if (pos < 0) {
         return FLAC__STREAM_ENCODER_TELL_STATUS_ERROR;
     }
