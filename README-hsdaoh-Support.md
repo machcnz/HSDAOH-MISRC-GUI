@@ -3,7 +3,8 @@
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
 
-- 16/02/25  - Fix Windows settings saving and minor path issues. Release portable exe - refer Releases
+- 07/06/2026 - Fix Windows FLAC 2GB issue.
+             - Cmake update includes required windows DLLs
   
 - 13/02/26  - Support hsdaoh/rp2350 status/warning/error messages in GUI
             - enables GUI-side error counting / status display (in addition to stderr logging)
@@ -11,7 +12,7 @@ This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS c
                  GUI-side error counting / status display (in addition to stderr logging)
                 [https://github.com/machcnz/hsdaoh]
 
-- 08/06/26  - Edit capture path fix
+- 01/02/26  - Edit capture path fix
             - Initial support targets the **single AD9226/PCM1802 variant** 
             (Sev5000 Pico2_12bitADC_PCMAudio): https://github.com/Sev5000/Pico2_12bitADC_PCMAudio
 
@@ -19,7 +20,7 @@ This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS c
 
 ## Building hsdaoh-rp2350 MISRC GUI
 ### Prerequisites
-Steve-M's libhsdaoh must be installed or built locally - refer below for detail.
+Requires a 'modified-to-support-GUI hsdaoh' build & installed, which is also found in my repo - refer below instructions.  
 
 ### Porting notes:
 1. Implements Steve Markgraf's hsdaoh API in upstream mode via a compile-time switch
@@ -34,39 +35,78 @@ Steve-M's libhsdaoh must be installed or built locally - refer below for detail.
 - host code extract metadata and payload out of these frames
 
 
+**1) Build and install hsdaoh for MISRC_GUI_Support**
+Refer Steve's instructions for building on other platforms, per the main readme
 
-**1) Build and install upstream hsdaoh (steve-m)**
-Example: build from source in your desired path
-https://github.com/steve-m/hsdaoh
+### Build on Windows
+#### Install dependencies
+- Install MSYS2 (https://www.msys2.org/)
+- Start MSYS2 MINGW64 from the application menu
 
-git clone https://github.com/steve-m/hsdaoh.git
-cd hsdaoh
-mkdir -p build
-cd build
-cmake .. -DINSTALL_UDEV_RULES=ON
-make -j 4
-sudo make install
-sudo ldconfig
+```console
+# Update all packages
+pacman -Suy
 
-If you prefer an isolated install:
-git clone https://github.com/steve-m/hsdaoh.git
-cmake -S hsdaoh -B hsdaoh/build -DINSTALL_UDEV_RULES=ON -DCMAKE_INSTALL_PREFIX=$HOME/opt/hsdaoh-rp2350
-cmake --build hsdaoh/build -j
-cmake --install hsdaoh/build
+# Install the required dependencies:
+pacman -S git zip mingw-w64-x86_64-libusb mingw-w64-x86_64-libwinpthread mingw-w64-x86_64-cc \
+mingw-w64-x86_64-gcc-libs mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-flac
+```
 
+#### Build libuvc
+```console
+# Clone the repository:
+git clone https://github.com/steve-m/libuvc.git
+mkdir libuvc/build && cd libuvc/build
+cmake ../ -DCMAKE_POLICY_VERSION_MINIMUM=3.10 -DCMAKE_INSTALL_PREFIX:PATH=/mingw64
+cmake --build .
+cmake --install .
+```
+
+#### Build hsdaoh/libhsdaoh
+```console
+cd 'to your desired working top level directory'
+git clone https://github.com/machcnz/hsdaoh.git
+cd 
+mkdir hsdaoh/build && cd hsdaoh/build
+cmake ../
+cmake --build .
+```
+
+**Validate successful build with these directories**
+- Required for the gui build - note paths for step 2.
+- i. HSDOAH-for-MISRC/hsdaoh/include   <--- this is the [-DHSDAOH_INC=/path/to/hsdaoh/include]
+- ii.HSDOAH-for-MISRC/hsdaoh/build/src   <--- this is the [-DHSDAOH_INC=/path/to/hsdaoh/include]
+
+  
 **2) Build this GUI**
-Recommended build (from repo root)
-cd /path/to/HSDAOH-MISRC-GUI-misrc_gui_dev
+```console
+cd to your desired working top level directory
+git clone https://github.com/machcnz/HSDAOH-MISRC-GUI.git
+cd
+mkdir HSDAOH-MISRC-GUI/build && cd HSDAOH-MISRC-GUI/build
+cd ..
 
+**Example build**
 cmake -S . -B build \
-  -DHSDAOH_INC=/path/to/hsdaoh/include \
-  -DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.so
+-DHSDAOH_INC="/c/temp/HSDOAH-for-MISRC/hsdaoh/include"   
+-DHSDAOH_LIB="/c/temp/HSDOAH-for-MISRC/hsdaoh/build/src/libhsdaoh.dll.a"   
+-DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
+**Build**
+cmake -S . -B build \
+-DHSDAOH_INC=/path/to/hsdaoh/include \
+-DHSDAOH_LIB=/path/to/hsdaoh/lib/libhsdaoh.dll.a
+-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+**On successful build:**
 cmake --build build -j
+```
+
+**Complete:** the misrc_gui.exe should now be found in the **/build** folder
 
 **Note:**
 - HSDAOH_INC must point to the directory that contains hsdaoh.h or hsdaoh/hsdaoh.h. (you build in step 1)
-- HSDAOH_LIB must point to the actual library file you want to link against (e.g. libhsdaoh.so or libhsdaoh.so.0).
+- HSDAOH_LIB must point to the actual library file libhsdaoh.dll.a (On linux this is libhsdaoh.xx)
 
 ----------------------------------------------------------------------------------------------------------------------------------------
 
