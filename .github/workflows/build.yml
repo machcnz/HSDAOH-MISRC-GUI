@@ -12,6 +12,12 @@ on:
         description: "Tag to release when manually dispatched (example: v0.6.0)"
         required: false
         type: string
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   push:
     tags:
       - 'v*'
