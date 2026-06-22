@@ -16,6 +16,7 @@
 
 #ifdef HSDAOH_UPSTREAM
 /* Frame parser is not available in upstream hsdaoh mode (requires Stefan-Olt's forked hsdaoh_raw.h) */
+#else
 
 #include <stdint.h>
 #include <stdbool.h>
