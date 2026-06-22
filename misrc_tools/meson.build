@@ -16,6 +16,8 @@ cflags = warnings + [
   '-D_POSIX_C_SOURCE=200809L',
   # glibc default feature set (needed for endian helpers like le16toh)
   '-D_DEFAULT_SOURCE',
+  # Upstream hsdaoh mode (RP2350) - raw data callback, no frame parser
+  '-DHSDAOH_UPSTREAM=1',
 ]
 
 ldflags = [
