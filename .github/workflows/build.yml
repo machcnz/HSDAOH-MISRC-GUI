@@ -420,10 +420,7 @@ jobs:
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
           mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
-          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/*.h "$DEPS_PREFIX/include/"
           if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
             cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
           elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
