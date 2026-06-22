@@ -6,6 +6,9 @@
  */
 
 #include "frame_parser.h"
+
+#ifndef HSDAOH_UPSTREAM
+
 #include <hsdaoh_crc.h>
 #include "misrc_debug.h"
 
@@ -568,3 +571,5 @@ bool capture_handler_audio_filter(void *ctx, int stream_id,
     /* Unknown stream ID */
     return false;
 }
+
+#endif /* !HSDAOH_UPSTREAM */
