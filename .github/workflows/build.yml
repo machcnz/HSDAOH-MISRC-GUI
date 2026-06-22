@@ -608,7 +608,8 @@ jobs:
           fi
           cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           UVC_PREFIX="$(brew --prefix libuvc)"
-          sed -i '' "s|^Libs:.*|Libs: -L\${libdir} -lhsdaoh -L${UVC_PREFIX}/lib -luvc -lusb-1.0|" "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          USB_PREFIX="$(brew --prefix libusb)"
+          sed -i '' "s|^Libs:.*|Libs: -L\${libdir} -lhsdaoh -L${UVC_PREFIX}/lib -luvc -L${USB_PREFIX}/lib -lusb-1.0|" "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
