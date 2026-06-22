@@ -131,9 +131,7 @@ jobs:
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -406,15 +404,14 @@ jobs:
           cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_EXAMPLE=OFF \
             -DBUILD_TEST=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
           cmake --build .deps/libuvc/build --parallel
           cmake --install .deps/libuvc/build
 
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -579,9 +576,7 @@ jobs:
           export CXXFLAGS="-arch ${MACOS_ARCH} ${CXXFLAGS:-}"
           export LDFLAGS="-arch ${MACOS_ARCH} ${LDFLAGS:-}"
 
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
