@@ -927,3 +927,5 @@ jobs:
             release-assets/**/linux_MISRC_*_arm64.zip
             release-assets/**/windows_MISRC_*_x86.zip
             release-assets/**/macos_MISRC_*_universal.dmg
+
+            
