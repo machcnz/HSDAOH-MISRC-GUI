@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: "Create a GitHub release of MISRC GUI and upload build assets"
+        description: "Create a GitHub release and upload build assets"
         required: false
         type: boolean
         default: false
@@ -149,6 +149,7 @@ jobs:
             echo "hsdaoh static library not found" >&2; exit 1
           fi
           cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          sed -i 's|^Libs:.*|Libs: -L${libdir} -lhsdaoh -luvc -lusb-1.0|' "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
@@ -948,4 +949,5 @@ jobs:
             release-assets/**/linux_MISRC_*_arm64.zip
             release-assets/**/windows_MISRC_*_x86.zip
             release-assets/**/macos_MISRC_*_universal.dmg
+
             
