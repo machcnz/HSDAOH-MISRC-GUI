@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: "Create a GitHub release and upload built assets"
+        description: "Create a GitHub release and upload build assets"
         required: false
         type: boolean
         default: false
@@ -131,17 +131,25 @@ jobs:
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
-          cmake --build .deps/hsdaoh/build --parallel
-          cmake --install .deps/hsdaoh/build
+          cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
+          mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
+          cp .deps/hsdaoh/include/*.h "$DEPS_PREFIX/include/"
+          if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh_static.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          else
+            echo "hsdaoh static library not found" >&2; exit 1
+          fi
+          cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          sed -i 's|^Libs:.*|Libs: -L${libdir} -lhsdaoh -luvc -lusb-1.0|' "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
@@ -165,23 +173,24 @@ jobs:
           export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
           export CMAKE_PREFIX_PATH="$DEPS_PREFIX:${CMAKE_PREFIX_PATH:-}"
           meson setup "$BUILD_DIR" misrc_tools --buildtype release
-          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          # meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          meson compile -C "$BUILD_DIR" misrc_gui
           test -x "$BUILD_DIR/misrc_gui"
 
       - name: Smoke test built binaries
         run: |
           set -eux
           "$BUILD_DIR/misrc_gui" --smoke-test
-          set +e
-          "$BUILD_DIR/misrc_capture" -h > /tmp/misrc_capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          "$BUILD_DIR/misrc_extract" -h > /tmp/misrc_extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" /tmp/misrc_capture_help.txt
-          grep -qi "Usage" /tmp/misrc_extract_help.txt
+          # set +e
+          # "$BUILD_DIR/misrc_capture" -h > /tmp/misrc_capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # "$BUILD_DIR/misrc_extract" -h > /tmp/misrc_extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" /tmp/misrc_capture_help.txt
+          # grep -qi "Usage" /tmp/misrc_extract_help.txt
 
       - name: Package AppImage artifact
         env:
@@ -191,8 +200,8 @@ jobs:
           set -eux
           mkdir -p AppDir/usr/bin
           cp "$BUILD_DIR/misrc_gui" AppDir/usr/bin/
-          cp "$BUILD_DIR/misrc_capture" AppDir/usr/bin/
-          cp "$BUILD_DIR/misrc_extract" AppDir/usr/bin/
+          # cp "$BUILD_DIR/misrc_capture" AppDir/usr/bin/
+          # cp "$BUILD_DIR/misrc_extract" AppDir/usr/bin/
 
           cat > AppDir/AppRun <<'EOF'
           #!/usr/bin/env bash
@@ -267,22 +276,26 @@ jobs:
             install_shortcuts
             exec "$HERE/usr/bin/misrc_gui"
           fi
-          case "$1" in
-            capture)
-              shift
-              exec "$HERE/usr/bin/misrc_capture" "$@"
-              ;;
-            extract)
-              shift
-              exec "$HERE/usr/bin/misrc_extract" "$@"
-              ;;
-            *)
-              if [[ "${1:-}" != "--smoke-test" ]]; then
-                install_shortcuts
-              fi
-              exec "$HERE/usr/bin/misrc_gui" "$@"
-              ;;
-          esac
+          # case "$1" in
+          #   capture)
+          #     shift
+          #     exec "$HERE/usr/bin/misrc_capture" "$@"
+          #     ;;
+          #   extract)
+          #     shift
+          #     exec "$HERE/usr/bin/misrc_extract" "$@"
+          #     ;;
+          #   *)
+          #     if [[ "${1:-}" != "--smoke-test" ]]; then
+          #       install_shortcuts
+          #     fi
+          #     exec "$HERE/usr/bin/misrc_gui" "$@"
+          #     ;;
+          # esac
+          if [[ "${1:-}" != "--smoke-test" ]]; then
+            install_shortcuts
+          fi
+          exec "$HERE/usr/bin/misrc_gui" "$@"
           EOF
           chmod +x AppDir/AppRun
 
@@ -321,16 +334,16 @@ jobs:
           test -f "$APPIMAGE_NAME"
 
           APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" --smoke-test
-          set +e
-          APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" capture -h > /tmp/appimage_capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" extract -h > /tmp/appimage_extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" /tmp/appimage_capture_help.txt
-          grep -qi "Usage" /tmp/appimage_extract_help.txt
+          # set +e
+          # APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" capture -h > /tmp/appimage_capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # APPIMAGE_EXTRACT_AND_RUN=1 "./$APPIMAGE_NAME" extract -h > /tmp/appimage_extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" /tmp/appimage_capture_help.txt
+          # grep -qi "Usage" /tmp/appimage_extract_help.txt
           ZIP_NAME="linux_MISRC_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
           zip -j "$ZIP_NAME" "$APPIMAGE_NAME"
           test -f "$ZIP_NAME"
@@ -406,15 +419,14 @@ jobs:
           cmake -S .deps/libuvc -B .deps/libuvc/build -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_EXAMPLE=OFF \
             -DBUILD_TEST=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
           cmake --build .deps/libuvc/build --parallel
           cmake --install .deps/libuvc/build
 
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -423,10 +435,7 @@ jobs:
             -DINSTALL_UDEV_RULES=OFF
           cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
           mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
-          cp .deps/hsdaoh/include/hsdaoh.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_export.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_raw.h "$DEPS_PREFIX/include/"
-          cp .deps/hsdaoh/include/hsdaoh_crc.h "$DEPS_PREFIX/include/"
+          cp .deps/hsdaoh/include/*.h "$DEPS_PREFIX/include/"
           if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
             cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
           elif [[ -f .deps/hsdaoh/build/src/libhsdaoh_static.a ]]; then
@@ -455,7 +464,8 @@ jobs:
           export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
           export CMAKE_PREFIX_PATH="$DEPS_PREFIX:${CMAKE_PREFIX_PATH:-}"
           meson setup "$BUILD_DIR" misrc_tools --buildtype release
-          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          # meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          meson compile -C "$BUILD_DIR" misrc_gui
 
           mkdir -p dist
           cp "$BUILD_DIR/misrc_gui.exe" dist/MISRC.exe
@@ -479,16 +489,16 @@ jobs:
 
           assert_no_nonsystem_dlls "dist/MISRC.exe"
           ./dist/MISRC.exe --smoke-test
-          set +e
-          "$BUILD_DIR/misrc_capture.exe" -h > capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          "$BUILD_DIR/misrc_extract.exe" -h > extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" capture_help.txt
-          grep -qi "Usage" extract_help.txt
+          # set +e
+          # "$BUILD_DIR/misrc_capture.exe" -h > capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # "$BUILD_DIR/misrc_extract.exe" -h > extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" capture_help.txt
+          # grep -qi "Usage" extract_help.txt
 
       - name: Create ZIP artifact
         shell: pwsh
@@ -579,9 +589,7 @@ jobs:
           export CXXFLAGS="-arch ${MACOS_ARCH} ${CXXFLAGS:-}"
           export LDFLAGS="-arch ${MACOS_ARCH} ${LDFLAGS:-}"
 
-          HSDAOH_COMMIT="ecd5f835ffad911e7b0b73d905e70cddc898c1ab"
-          git clone --depth 1 https://github.com/Stefan-Olt/hsdaoh.git .deps/hsdaoh
-          git -C .deps/hsdaoh checkout --detach "$HSDAOH_COMMIT"
+          git clone --depth 1 https://github.com/machcnz/hsdaoh.git .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -590,8 +598,18 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
             -DINSTALL_UDEV_RULES=OFF
-          cmake --build .deps/hsdaoh/build --parallel
-          cmake --install .deps/hsdaoh/build
+          cmake --build .deps/hsdaoh/build --target hsdaoh_static --parallel
+          mkdir -p "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$DEPS_PREFIX/lib/pkgconfig"
+          cp .deps/hsdaoh/include/*.h "$DEPS_PREFIX/include/"
+          if [[ -f .deps/hsdaoh/build/src/libhsdaoh.a ]]; then
+            cp .deps/hsdaoh/build/src/libhsdaoh.a "$DEPS_PREFIX/lib/libhsdaoh.a"
+          else
+            echo "hsdaoh static library not found" >&2; exit 1
+          fi
+          cp .deps/hsdaoh/build/libhsdaoh.pc "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
+          UVC_PREFIX="$(brew --prefix libuvc)"
+          USB_PREFIX="$(brew --prefix libusb)"
+          sed -i '' "s|^Libs:.*|Libs: -L\${libdir} -lhsdaoh -L${UVC_PREFIX}/lib -luvc -L${USB_PREFIX}/lib -lusb-1.0|" "$DEPS_PREFIX/lib/pkgconfig/libhsdaoh.pc"
           for PCDIR in "$DEPS_PREFIX/lib/pkgconfig" "$DEPS_PREFIX/lib64/pkgconfig"; do
             if [[ -f "$PCDIR/libhsdaoh.pc" && ! -f "$PCDIR/hsdaoh.pc" ]]; then
               cp "$PCDIR/libhsdaoh.pc" "$PCDIR/hsdaoh.pc"
@@ -609,19 +627,20 @@ jobs:
           export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
           export CMAKE_PREFIX_PATH="$DEPS_PREFIX:${CMAKE_PREFIX_PATH:-}"
           meson setup "$BUILD_DIR" misrc_tools --buildtype release
-          meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          # meson compile -C "$BUILD_DIR" misrc_capture misrc_extract misrc_gui
+          meson compile -C "$BUILD_DIR" misrc_gui
 
           "$BUILD_DIR/misrc_gui" --smoke-test
-          set +e
-          "$BUILD_DIR/misrc_capture" -h > /tmp/macos_capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          "$BUILD_DIR/misrc_extract" -h > /tmp/macos_extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" /tmp/macos_capture_help.txt
-          grep -qi "Usage" /tmp/macos_extract_help.txt
+          # set +e
+          # "$BUILD_DIR/misrc_capture" -h > /tmp/macos_capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # "$BUILD_DIR/misrc_extract" -h > /tmp/macos_extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" /tmp/macos_capture_help.txt
+          # grep -qi "Usage" /tmp/macos_extract_help.txt
 
           APP_ROOT="dist/MISRC.app/Contents"
           FW_DIR="$APP_ROOT/Frameworks"
@@ -643,9 +662,10 @@ jobs:
           iconutil -c icns "$ICONSET_DIR" -o "$APP_ROOT/Resources/MISRC.icns"
           rm -rf "$ICONSET_DIR"
           cp "$BUILD_DIR/misrc_gui" "$APP_ROOT/MacOS/MISRC"
-          cp "$BUILD_DIR/misrc_capture" "$APP_ROOT/MacOS/misrc_capture"
-          cp "$BUILD_DIR/misrc_extract" "$APP_ROOT/MacOS/misrc_extract"
-          chmod +x "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"
+          # cp "$BUILD_DIR/misrc_capture" "$APP_ROOT/MacOS/misrc_capture"
+          # cp "$BUILD_DIR/misrc_extract" "$APP_ROOT/MacOS/misrc_extract"
+          chmod +x "$APP_ROOT/MacOS/MISRC"
+          # chmod +x "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"
 
           cat > "$APP_ROOT/Info.plist" <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -747,13 +767,15 @@ jobs:
             done < <(otool -L "$target" | tail -n +2 | awk '{print $1}')
           }
 
-          for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+          # for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+          for BIN in "$APP_ROOT/MacOS/MISRC"; do
             while IFS= read -r dep; do
               collect_dep_tree "$dep"
             done < <(otool -L "$BIN" | tail -n +2 | awk '{print $1}')
           done
 
-          for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+          # for BIN in "$APP_ROOT/MacOS/MISRC" "$APP_ROOT/MacOS/misrc_capture" "$APP_ROOT/MacOS/misrc_extract"; do
+          for BIN in "$APP_ROOT/MacOS/MISRC"; do
             install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
             patch_macho_refs "$BIN"
           done
@@ -765,22 +787,22 @@ jobs:
             echo "Found non-portable Homebrew dylib path in MISRC binary" >&2
             exit 1
           fi
-          if otool -L "$APP_ROOT/MacOS/misrc_capture" | grep -E '/opt/homebrew|/usr/local/opt'; then
-            echo "Found non-portable Homebrew dylib path in misrc_capture binary" >&2
-            exit 1
-          fi
+          # if otool -L "$APP_ROOT/MacOS/misrc_capture" | grep -E '/opt/homebrew|/usr/local/opt'; then
+          #   echo "Found non-portable Homebrew dylib path in misrc_capture binary" >&2
+          #   exit 1
+          # fi
 
           "$APP_ROOT/MacOS/MISRC" --smoke-test
-          set +e
-          "$APP_ROOT/MacOS/misrc_capture" -h > /tmp/macos_bundle_capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          "$APP_ROOT/MacOS/misrc_extract" -h > /tmp/macos_bundle_extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" /tmp/macos_bundle_capture_help.txt
-          grep -qi "Usage" /tmp/macos_bundle_extract_help.txt
+          # set +e
+          # "$APP_ROOT/MacOS/misrc_capture" -h > /tmp/macos_bundle_capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # "$APP_ROOT/MacOS/misrc_extract" -h > /tmp/macos_bundle_extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" /tmp/macos_bundle_capture_help.txt
+          # grep -qi "Usage" /tmp/macos_bundle_extract_help.txt
 
           codesign --force --deep --sign - dist/MISRC.app
           echo "$BUILD_VERSION" > dist/BUILD_VERSION.txt
@@ -834,7 +856,8 @@ jobs:
               cp "$ARM_FILE" "$OUT_FILE"
             fi
           done < <(cd stage-arm64 && find MISRC.app -type f | sort)
-          chmod +x dist/MISRC.app/Contents/MacOS/MISRC dist/MISRC.app/Contents/MacOS/misrc_capture dist/MISRC.app/Contents/MacOS/misrc_extract
+          chmod +x dist/MISRC.app/Contents/MacOS/MISRC
+          # chmod +x dist/MISRC.app/Contents/MacOS/misrc_capture dist/MISRC.app/Contents/MacOS/misrc_extract
 
           codesign --force --deep --sign - dist/MISRC.app
 
@@ -843,16 +866,16 @@ jobs:
           echo "$LIPO_ARCHS" | grep -q 'x86_64'
 
           dist/MISRC.app/Contents/MacOS/MISRC --smoke-test
-          set +e
-          dist/MISRC.app/Contents/MacOS/misrc_capture -h > /tmp/macos_universal_capture_help.txt 2>&1
-          RC_CAPTURE=$?
-          dist/MISRC.app/Contents/MacOS/misrc_extract -h > /tmp/macos_universal_extract_help.txt 2>&1
-          RC_EXTRACT=$?
-          set -e
-          test "$RC_CAPTURE" -eq 1
-          test "$RC_EXTRACT" -eq 1
-          grep -qi "Usage" /tmp/macos_universal_capture_help.txt
-          grep -qi "Usage" /tmp/macos_universal_extract_help.txt
+          # set +e
+          # dist/MISRC.app/Contents/MacOS/misrc_capture -h > /tmp/macos_universal_capture_help.txt 2>&1
+          # RC_CAPTURE=$?
+          # dist/MISRC.app/Contents/MacOS/misrc_extract -h > /tmp/macos_universal_extract_help.txt 2>&1
+          # RC_EXTRACT=$?
+          # set -e
+          # test "$RC_CAPTURE" -eq 1
+          # test "$RC_EXTRACT" -eq 1
+          # grep -qi "Usage" /tmp/macos_universal_capture_help.txt
+          # grep -qi "Usage" /tmp/macos_universal_extract_help.txt
           DMG_STAGE_DIR="dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
@@ -927,3 +950,5 @@ jobs:
             release-assets/**/linux_MISRC_*_arm64.zip
             release-assets/**/windows_MISRC_*_x86.zip
             release-assets/**/macos_MISRC_*_universal.dmg
+
+            

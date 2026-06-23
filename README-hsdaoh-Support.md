@@ -2,6 +2,7 @@
 
 **What is new in this fork:**
 This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture. Changes are scoped to my fork for integration/testing.
+-Workflow test
 
 - 07/06/2026 - Fix Windows FLAC 2GB issue.
              - Cmake update includes required windows DLLs
