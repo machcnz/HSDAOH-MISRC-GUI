@@ -387,7 +387,8 @@ void gui_fft_process_raw(fft_state_t *state, const int16_t *samples,
 
     // Apply Hanning window to actual sample data and place in center
     // Normalize int16 samples to -1.0 to +1.0 range
-    const float scale = 1.0f / 32768.0f;
+    // const float scale = 1.0f / 32768.0f; --- Results in low FFT scale ~30db
+    const float scale = 1.0f / 2048.0f;
     for (size_t i = 0; i < samples_to_use; i++) {
         float window_val = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)(samples_to_use - 1)));
         float sample_val = ((float)samples[i] - dc_offset) * scale;
@@ -415,6 +416,9 @@ void gui_fft_process_raw(fft_state_t *state, const int16_t *samples,
         // Normalize by actual sample count (not padded size) for correct amplitude
         mag /= (float)samples_to_use;
 
+        // Hanning window coherent gain correction (window gain = 0.5, correction = x2) MA - correct FFT window Scaling
+        mag *= 2.0f;
+        
         // Convert to dB (with small epsilon to avoid log(0))
         float db = 20.0f * log10f(mag + 1e-10f);
 
