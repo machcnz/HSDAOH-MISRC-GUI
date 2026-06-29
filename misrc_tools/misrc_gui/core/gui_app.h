@@ -240,6 +240,7 @@ typedef struct {
     char playback_file_b[MAX_FILENAME_LEN];   // FLAC file for channel B playback
 } gui_settings_t;
 
+// MA - GUI_DROPOUT_LOW_SIGNAL = 6, - signal based dropout detection
 typedef enum {
     GUI_DROPOUT_NONE = 0,
     GUI_DROPOUT_MISSED_FRAME = 1,
@@ -247,6 +248,7 @@ typedef enum {
     GUI_DROPOUT_ERROR_BURST = 3,
     GUI_DROPOUT_CALLBACK_GAP = 4,
     GUI_DROPOUT_DEVICE_ERROR = 5,
+    GUI_DROPOUT_LOW_SIGNAL = 6,
 } gui_dropout_reason_t;
 
 // Main application state
@@ -363,6 +365,11 @@ typedef struct gui_app {
     // Stop-on-dropout request path (set from capture thread, consumed on main thread)
     atomic_bool dropout_stop_requested;
     atomic_uint_fast32_t dropout_stop_reason;
+    
+    // Upstream mode: sustained low-signal tape-end detection (main thread only)
+    float low_signal_time;
+    bool low_signal_armed;
+    
 
     // Device disconnect detection (timestamp of last successful callback)
     atomic_uint_fast64_t last_callback_time_ms;
