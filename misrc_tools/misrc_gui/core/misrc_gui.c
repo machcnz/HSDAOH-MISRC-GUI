@@ -120,6 +120,8 @@ static const char *gui_dropout_reason_status(gui_dropout_reason_t reason) {
             return "Capture stopped: dropout (callback gap)";
         case GUI_DROPOUT_DEVICE_ERROR:
             return "Capture stopped: dropout (device error)";
+        case GUI_DROPOUT_LOW_SIGNAL:
+            return "Capture stopped: sustained low/no signal (tape end)";
         case GUI_DROPOUT_NONE:
         default:
             return "Capture stopped: dropout detected";
@@ -563,6 +565,57 @@ int main(int argc, char **argv) {
             continue;
         }
 
+
+#ifdef HSDAOH_UPSTREAM
+        // Upstream mode: detect tape end by sustained low signal level.
+        // The frame counter always advances in upstream mode so it cannot be used;
+        // instead we watch peak amplitude.
+        //
+        // Observed: blank tape (no video) peaks at ~28% (572 counts).
+        // Observed: video content peaks at ~75% (1536 counts).
+        // Threshold: 33% (675 counts) - well above blank tape noise, well below real signal.
+        // Armed flag prevents false trigger at capture start before signal arrives.
+        // Blank tape (28%) never exceeds arm level so never arms - correct behaviour.
+        if (app.is_capturing && app.is_recording && app.settings.stop_on_dropout) {
+            // Peak is stored as 0–2047 unsigned. Use the larger of pos/neg.
+            uint16_t peak_pos = (uint16_t)atomic_load(&app.peak_a_pos);
+            uint16_t peak_neg = (uint16_t)atomic_load(&app.peak_a_neg);
+            uint16_t peak = (peak_pos > peak_neg) ? peak_pos : peak_neg;
+
+#define LOW_SIGNAL_THRESHOLD  675u   // 33% of 2048 - blank tape noise sits at ~28% (572 counts)
+#define LOW_SIGNAL_ARM_LEVEL  675u   // 33% - arm once real signal seen above blank tape noise floor
+#define LOW_SIGNAL_SUSTAIN_S  5.0f   // seconds below threshold before stopping
+
+            if (!app.low_signal_armed) {
+                // Wait until a real signal level is seen before starting to watch for dropout.
+                if (peak >= LOW_SIGNAL_ARM_LEVEL) {
+                    app.low_signal_armed = true;
+                    app.low_signal_time = 0.0f;
+                }
+            } else {
+                if (peak < LOW_SIGNAL_THRESHOLD) {
+                    app.low_signal_time += dt;
+                    if (app.low_signal_time >= LOW_SIGNAL_SUSTAIN_S) {
+                        gui_app_stop_capture(&app);
+                        app.reconnect_pending = false;
+                        app.reconnect_attempts = 0;
+                        app.low_signal_time = 0.0f;
+                        app.low_signal_armed = false;
+                        gui_app_set_status(&app, gui_dropout_reason_status(GUI_DROPOUT_LOW_SIGNAL));
+                        continue;
+                    }
+                } else {
+                    // Signal recovered — reset timer but stay armed.
+                    app.low_signal_time = 0.0f;
+                }
+            }
+
+#undef LOW_SIGNAL_THRESHOLD
+#undef LOW_SIGNAL_ARM_LEVEL
+#undef LOW_SIGNAL_SUSTAIN_S
+        }
+#endif /* HSDAOH_UPSTREAM */
+        
         // Auto-reconnect logic
         if (app.auto_reconnect_enabled) {
             double now = GetTime();
