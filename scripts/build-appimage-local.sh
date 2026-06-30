@@ -157,6 +157,10 @@ build_native() {
 
   export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
   export CMAKE_PREFIX_PATH="$DEPS_PREFIX:${CMAKE_PREFIX_PATH:-}"
+  if ! pkg-config --exists fftw3f; then
+    fail "Missing fftw3f pkg-config module. Install FFTW3 development files (e.g. libfftw3-dev) and retry."
+  fi
+  pkg-config --modversion fftw3f
 
   if [[ -f "$REPO_ROOT/$BUILD_DIR/meson-private/coredata.dat" ]]; then
     meson setup "$REPO_ROOT/$BUILD_DIR" "$REPO_ROOT/misrc_tools" --buildtype release --wipe

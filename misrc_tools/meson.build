@@ -139,13 +139,27 @@ else
   message('libsoxr not found, building without resample support')
 endif
 
+if host_system == 'linux'
+  alsa_dep = dependency('alsa', required : false)
+  if alsa_dep.found()
+    deps += [ alsa_dep ]
+    cflags += ['-DLIBASOUND_ENABLED=1']
+    message('ALSA found, building with CXADC ALSA audio capture support')
+  else
+    cflags += ['-DLIBASOUND_ENABLED=0']
+    message('ALSA not found, building without CXADC ALSA audio capture support')
+  endif
+else
+  cflags += ['-DLIBASOUND_ENABLED=0']
+endif
+
 fftw3f_dep = dependency('fftw3f', required : false, static: windows_static_deps)
 if fftw3f_dep.found()
   cflags += ['-DLIBFFTW_ENABLED=1']
   message('FFTW3 (single precision) found, building with FFT support')
 else
   cflags += ['-DLIBFFTW_ENABLED=0']
-  message('FFTW3 not found, building without FFT support')
+  message('FFTW3 not found; misrc_gui requires fftw3f and will fail to configure until it is installed')
 endif
 
 # FX3 support (optional, Linux uses cyusb, others use libusb)
@@ -217,12 +231,16 @@ executable('misrc_capture',
 raylib_dep = dependency('raylib', required: false, static: windows_static_deps)
 
 if raylib_dep.found()
+  if not fftw3f_dep.found()
+    error('FFTW3 (fftw3f) is required for misrc_gui. Install fftw3f and reconfigure (use --wipe if reusing an existing build directory).')
+  endif
   sources_gui = [
     # Core
     'misrc_gui/core/misrc_gui.c',
     'misrc_gui/core/gui_settings.c',
     # Input
     'misrc_gui/input/gui_capture.c',
+    'misrc_gui/input/gui_cxadc.c',
     'misrc_gui/input/gui_simulated.c',
     'misrc_gui/input/gui_playback.c',
     # Processing
@@ -270,10 +288,7 @@ if raylib_dep.found()
     sources_gui += 'misrc_gui/input/gui_fx3.c'
   endif
 
-  gui_deps = deps + [ raylib_dep ]
-  if fftw3f_dep.found()
-    gui_deps += [ fftw3f_dep ]
-  endif
+  gui_deps = deps + [ raylib_dep, fftw3f_dep ]
 
   gui_cflags = cflags + [
     '-O3',                    # Maximum optimization (should already be set by buildtype=release)

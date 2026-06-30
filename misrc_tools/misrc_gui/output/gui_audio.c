@@ -20,6 +20,8 @@
 extern atomic_int do_exit;
 
 #define BUFFER_AUDIO_READ_SIZE  (65536 * 3)
+#define AUDIO_DEFAULT_SAMPLE_RATE_HZ 78125U
+#define AUDIO_CXADC_DEFAULT_SAMPLE_RATE_HZ 46875U
 
 typedef struct {
     buffer_manager_t *bufmgr;
@@ -49,9 +51,10 @@ static AudioStream s_play_stream;
 static bool s_play_stream_inited = false;
 static bool s_audio_device_inited = false;
 
-// Resampler for 78.125kHz -> 48kHz conversion
+// Resampler for source audio rate -> 48kHz conversion
 #if LIBSOXR_ENABLED
 static soxr_t s_resampler = NULL;
+static uint32_t s_resampler_input_rate_hz = 0;
 #endif
 
 // Simple lock-free SPSC ring for stereo int16 samples (interleaved) at 48kHz
@@ -126,6 +129,26 @@ static size_t play_q_pop_samples(int16_t *out, size_t max_count) {
 static inline int16_t pcm24_to_i16(int32_t s24) {
     // s24 is signed 24-bit in int32; convert to 16-bit by dropping LSBs
     return (int16_t)(s24 >> 8);
+}
+
+static bool gui_audio_selected_device_is_cxadc(const gui_app_t *app)
+{
+    if (!app) return false;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return false;
+    return app->devices[app->selected_device].type == DEVICE_TYPE_CXADC;
+}
+
+static uint32_t gui_audio_capture_rate_hz(const gui_app_t *app)
+{
+    if (!gui_audio_selected_device_is_cxadc(app)) {
+        return AUDIO_DEFAULT_SAMPLE_RATE_HZ;
+    }
+
+    uint32_t rate = atomic_load(&app->audio_sample_rate);
+    if (rate < 8000 || rate > 384000) {
+        rate = AUDIO_CXADC_DEFAULT_SAMPLE_RATE_HZ;
+    }
+    return rate;
 }
 
 static void audio_update_peaks(gui_app_t *app, const uint8_t *buf, size_t len)
@@ -232,27 +255,28 @@ static int audio_thread_main(void *ctx)
         }
         iter_count++;
 
-        // Playback monitoring: downmix 4ch 24-bit to stereo 16-bit, resample 78.125kHz -> 48kHz
+        // Playback monitoring: downmix 4ch 24-bit to stereo 16-bit, resample source rate -> 48kHz
 #if LIBSOXR_ENABLED
         if (a->app && atomic_load(&s_playback_enabled) && a->app->settings.audio_monitor_playback && s_resampler) {
+            const uint32_t monitor_input_rate_hz = gui_audio_capture_rate_hz(a->app);
             const uint8_t *b = (const uint8_t *)buf;
-            const size_t frames_78khz = len / 12; // 4ch * 3 bytes per frame
+            const size_t frames_in = len / 12; // 4ch * 3 bytes per frame
             
             // Use static buffers to avoid alloca issues
-            static int16_t tmp_78khz[65536];
+            static int16_t tmp_in[65536];
             static int16_t tmp_48khz[65536];
             
-            if (frames_78khz * 2 > 65536) {
-                fprintf(stderr, "[AUDIO] Buffer too large for monitoring: %zu frames\n", frames_78khz);
+            if (frames_in * 2 > 65536) {
+                fprintf(stderr, "[AUDIO] Buffer too large for monitoring: %zu frames\n", frames_in);
                 goto skip_monitoring;
             }
             
-            // Downmix 4ch 24-bit to stereo 16-bit at 78.125kHz
+            // Downmix 4ch 24-bit to stereo 16-bit at source sample rate.
             // Select CH1/2 or CH3/4 based on user setting
             const bool use_ch34 = a->app->settings.audio_monitor_ch34;
             const size_t ch_offset = use_ch34 ? 6 : 0; // CH3/4 starts at byte 6, CH1/2 at byte 0
             
-            for (size_t i = 0; i < frames_78khz; i++) {
+            for (size_t i = 0; i < frames_in; i++) {
                 size_t base = i * 12 + ch_offset;
                 uint32_t r1 = (uint32_t)b[base] | ((uint32_t)b[base + 1] << 8) | ((uint32_t)b[base + 2] << 16);
                 uint32_t r2 = (uint32_t)b[base + 3] | ((uint32_t)b[base + 4] << 8) | ((uint32_t)b[base + 5] << 16);
@@ -260,12 +284,12 @@ static int audio_thread_main(void *ctx)
                 int32_t s2 = signext24(r2);
                 int32_t mix = (s1 / 2) + (s2 / 2);
                 int16_t s16 = pcm24_to_i16(mix);
-                tmp_78khz[i * 2 + 0] = s16;
-                tmp_78khz[i * 2 + 1] = s16;
+                tmp_in[i * 2 + 0] = s16;
+                tmp_in[i * 2 + 1] = s16;
             }
             
-            // Resample 78.125kHz -> 48kHz
-            size_t frames_48khz_max = (size_t)((double)frames_78khz * 48000.0 / 78125.0) + 32;
+            // Resample source-rate -> 48kHz.
+            size_t frames_48khz_max = (size_t)((double)frames_in * 48000.0 / (double)monitor_input_rate_hz) + 64;
             if (frames_48khz_max * 2 > 65536) {
                 fprintf(stderr, "[AUDIO] Output buffer too large: %zu frames\n", frames_48khz_max);
                 goto skip_monitoring;
@@ -273,7 +297,7 @@ static int audio_thread_main(void *ctx)
             
             size_t idone = 0, odone = 0;
             soxr_error_t err = soxr_process(s_resampler,
-                tmp_78khz, frames_78khz, &idone,
+                tmp_in, frames_in, &idone,
                 tmp_48khz, frames_48khz_max, &odone);
             
             if (!err && odone > 0) {
@@ -367,9 +391,10 @@ skip_file_ops:
         // RECORDING JUST STOPPED - close files and write headers
         if (was_recording && !is_recording) {
             wave_header_t h;
+            uint32_t capture_rate_hz = gui_audio_capture_rate_hz(a->app);
             if (a->f_4ch && a->f_4ch != stdout) {
                 fseek(a->f_4ch, 0, SEEK_SET);
-                create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
+                create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 4, 24);
                 fwrite(&h, 1, sizeof(h), a->f_4ch);
                 fclose(a->f_4ch);
                 a->f_4ch = NULL;
@@ -377,7 +402,7 @@ skip_file_ops:
             for (int i = 0; i < 2; i++) {
                 if (a->f_2ch[i] && a->f_2ch[i] != stdout) {
                     fseek(a->f_2ch[i], 0, SEEK_SET);
-                    create_wave_header(&h, a->total_bytes / 12, 78125, 2, 24);
+                    create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 2, 24);
                     fwrite(&h, 1, sizeof(h), a->f_2ch[i]);
                     fclose(a->f_2ch[i]);
                     a->f_2ch[i] = NULL;
@@ -386,7 +411,7 @@ skip_file_ops:
             for (int i = 0; i < 4; i++) {
                 if (a->f_1ch[i] && a->f_1ch[i] != stdout) {
                     fseek(a->f_1ch[i], 0, SEEK_SET);
-                    create_wave_header(&h, a->total_bytes / 12, 78125, 1, 24);
+                    create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 1, 24);
                     fwrite(&h, 1, sizeof(h), a->f_1ch[i]);
                     fclose(a->f_1ch[i]);
                     a->f_1ch[i] = NULL;
@@ -415,16 +440,17 @@ skip_file_ops:
     }
 
     // Cleanup at thread exit
+    uint32_t capture_rate_hz = gui_audio_capture_rate_hz(a->app);
     if (a->f_4ch && a->f_4ch != stdout) {
         fseek(a->f_4ch, 0, SEEK_SET);
-        create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
+        create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 4, 24);
         fwrite(&h, 1, sizeof(h), a->f_4ch);
         fclose(a->f_4ch);
     }
     for (int i = 0; i < 2; i++) {
         if (a->f_2ch[i] && a->f_2ch[i] != stdout) {
             fseek(a->f_2ch[i], 0, SEEK_SET);
-            create_wave_header(&h, a->total_bytes / 12, 78125, 2, 24);
+            create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 2, 24);
             fwrite(&h, 1, sizeof(h), a->f_2ch[i]);
             fclose(a->f_2ch[i]);
         }
@@ -432,7 +458,7 @@ skip_file_ops:
     for (int i = 0; i < 4; i++) {
         if (a->f_1ch[i] && a->f_1ch[i] != stdout) {
             fseek(a->f_1ch[i], 0, SEEK_SET);
-            create_wave_header(&h, a->total_bytes / 12, 78125, 1, 24);
+            create_wave_header(&h, a->total_bytes / 12, capture_rate_hz, 1, 24);
             fwrite(&h, 1, sizeof(h), a->f_1ch[i]);
             fclose(a->f_1ch[i]);
         }
@@ -555,6 +581,7 @@ void gui_audio_stop(gui_app_t *app)
     if (s_resampler) {
         soxr_delete(s_resampler);
         s_resampler = NULL;
+        s_resampler_input_rate_hz = 0;
     }
 #endif
 }
@@ -603,17 +630,24 @@ void gui_audio_update_playback(gui_app_t *app)
     }
 
     if (!s_play_stream_inited) {
-        // Create resampler 78.125kHz -> 48kHz, stereo int16
-        if (!s_resampler) {
+        uint32_t monitor_input_rate_hz = gui_audio_capture_rate_hz(app);
+        // Create resampler source-rate -> 48kHz, stereo int16
+        if (!s_resampler || s_resampler_input_rate_hz != monitor_input_rate_hz) {
+            if (s_resampler) {
+                soxr_delete(s_resampler);
+                s_resampler = NULL;
+                s_resampler_input_rate_hz = 0;
+            }
             soxr_error_t err = NULL;
             soxr_io_spec_t io_spec = soxr_io_spec(SOXR_INT16_I, SOXR_INT16_I);
             soxr_quality_spec_t qual = soxr_quality_spec(SOXR_HQ, 0);
-            s_resampler = soxr_create(78125.0, 48000.0, 2, &err, &io_spec, &qual, NULL);
+            s_resampler = soxr_create((double)monitor_input_rate_hz, 48000.0, 2, &err, &io_spec, &qual, NULL);
             if (err) {
                 fprintf(stderr, "[AUDIO] Failed to create resampler: %s\n", soxr_strerror(err));
                 s_resampler = NULL;
             } else {
-                fprintf(stderr, "[AUDIO] Created resampler 78.125kHz -> 48kHz\n");
+                s_resampler_input_rate_hz = monitor_input_rate_hz;
+                fprintf(stderr, "[AUDIO] Created resampler %uHz -> 48kHz\n", monitor_input_rate_hz);
             }
         }
         

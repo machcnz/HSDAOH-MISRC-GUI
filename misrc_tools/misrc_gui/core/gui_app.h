@@ -127,6 +127,7 @@ typedef struct {
 typedef enum {
     DEVICE_TYPE_HSDAOH,         // Hardware device via hsdaoh
     DEVICE_TYPE_SIMPLE_CAPTURE, // OS video capture
+    DEVICE_TYPE_CXADC,          // CXADC RF capture card(s)
     DEVICE_TYPE_SIMULATED,      // Simulated device for testing
     DEVICE_TYPE_PLAYBACK,       // Playback from recorded FLAC files
 #ifdef ENABLE_FX3
@@ -317,6 +318,7 @@ typedef struct gui_app {
     atomic_uint_fast32_t clip_count_b_neg;
     atomic_bool stream_synced;
     atomic_uint_fast32_t sample_rate;
+    atomic_uint_fast32_t audio_sample_rate;
 
     // Audio monitoring peaks (24-bit audio magnitude, per channel 1..4)
     atomic_uint_fast32_t audio_peak[4];

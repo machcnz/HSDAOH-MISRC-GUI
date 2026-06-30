@@ -128,6 +128,42 @@ def check_macos_brew_install_policy(workflow_path: Path) -> int:
         if snippet not in workflow_text:
             return fail(f"Workflow is missing macOS conditional brew install snippet: {snippet}")
     return 0
+def check_workflow_fft_dependency_policy(workflow_path: Path) -> int:
+    workflow_text = read_text(workflow_path)
+    required_snippets = [
+        "libfftw3-dev",
+        "mingw-w64-x86_64-fftw",
+        "mingw-w64-clang-aarch64-fftw",
+        "for formula in cmake fftw flac libusb libuvc meson nasm ninja pkgconf libsoxr; do",
+    ]
+    for snippet in required_snippets:
+        if snippet not in workflow_text:
+            return fail(f"Workflow is missing required FFT dependency snippet: {snippet}")
+
+    fft_probe = "pkg-config --modversion fftw3f"
+    fft_probe_count = workflow_text.count(fft_probe)
+    if fft_probe_count != 4:
+        return fail(f"Workflow must probe fftw3f exactly 4 times (linux/windows x86/windows arm64/macos), found {fft_probe_count}")
+    return 0
+
+
+def check_meson_fft_policy(meson_path: Path) -> int:
+    meson_text = read_text(meson_path)
+    required_snippets = [
+        "error('FFTW3 (fftw3f) is required for misrc_gui.",
+        "gui_deps = deps + [ raylib_dep, fftw3f_dep ]",
+    ]
+    for snippet in required_snippets:
+        if snippet not in meson_text:
+            return fail(f"meson.build is missing required FFT policy snippet: {snippet}")
+
+    forbidden_snippets = [
+        "message('FFTW3 not found, building without FFT support')",
+    ]
+    for snippet in forbidden_snippets:
+        if snippet in meson_text:
+            return fail(f"meson.build still contains forbidden optional-FFT fallback snippet: {snippet}")
+    return 0
 
 
 def check_linux_desktop_metadata(workflow_path: Path) -> int:
@@ -573,6 +609,8 @@ def main() -> int:
         ("cross-platform workflow coverage", lambda: check_cross_platform_workflow_coverage(workflow_path)),
         ("actions runtime policy", lambda: check_actions_runtime_policy(workflow_path)),
         ("macOS brew install policy", lambda: check_macos_brew_install_policy(workflow_path)),
+        ("workflow FFT dependency policy", lambda: check_workflow_fft_dependency_policy(workflow_path)),
+        ("meson FFT policy", lambda: check_meson_fft_policy(meson_path)),
         ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
         ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),

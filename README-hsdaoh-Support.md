@@ -33,6 +33,7 @@ This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS c
 ## Building hsdaoh-rp2350 MISRC GUI
 ### Prerequisites
 Steve-M's libhsdaoh must be installed or built locally - refer below for detail.
+Install FFTW3 single-precision development files (`fftw3f`) before configuring this GUI build (`libfftw3-dev` on Debian/Ubuntu/Linux Mint, `fftw` via Homebrew, `mingw-w64-*-fftw` on MSYS2).
 
 ### Porting notes:
 1. Implements Steve Markgraf's hsdaoh API in upstream mode via a compile-time switch

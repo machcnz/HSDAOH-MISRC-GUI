@@ -451,6 +451,11 @@ int main(int argc, char **argv) {
         int hs_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_HSDAOH);
         if (hs_idx >= 0) {
             app.selected_device = hs_idx;
+        } else {
+            int cxadc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_CXADC);
+            if (cxadc_idx >= 0) {
+                app.selected_device = cxadc_idx;
+            }
         }
     }
 
@@ -466,13 +471,20 @@ int main(int argc, char **argv) {
             gui_set_reconnect_target_from_selected(&app, &reconnect_target);
             gui_app_set_status(&app, "Ready. Click Connect to start capture.");
         } else {
-            int sc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_SIMPLE_CAPTURE);
-            if (sc_idx >= 0) {
-                app.selected_device = sc_idx;
+            int cxadc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_CXADC);
+            if (cxadc_idx >= 0) {
+                app.selected_device = cxadc_idx;
                 gui_set_reconnect_target_from_selected(&app, &reconnect_target);
                 gui_app_set_status(&app, "Ready. Click Connect to start capture.");
             } else {
-                gui_app_set_status(&app, "No hsdaoh devices found. Select device and click Connect.");
+                int sc_idx = gui_find_first_device_of_type(&app, DEVICE_TYPE_SIMPLE_CAPTURE);
+                if (sc_idx >= 0) {
+                    app.selected_device = sc_idx;
+                    gui_set_reconnect_target_from_selected(&app, &reconnect_target);
+                    gui_app_set_status(&app, "Ready. Click Connect to start capture.");
+                } else {
+                    gui_app_set_status(&app, "No hsdaoh/CXADC devices found. Select device and click Connect.");
+                }
             }
         }
     } else {

@@ -55,6 +55,21 @@ static const char *gui_ui_capture_mode_name(bool misrc_mode) {
     return misrc_mode ? "MISRC" : "HSDAOH";
 }
 
+static bool gui_ui_selected_device_is_cxadc(const gui_app_t *app, bool *clockgen_mode)
+{
+    if (clockgen_mode) *clockgen_mode = false;
+    if (!app) return false;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return false;
+
+    const device_info_t *dev = &app->devices[app->selected_device];
+    if (dev->type != DEVICE_TYPE_CXADC) return false;
+
+    if (clockgen_mode) {
+        *clockgen_mode = (dev->index > 1);
+    }
+    return true;
+}
+
 static void gui_ui_trace_capture_mode_state(gui_app_t *app, const char *source, bool force) {
     if (!app) return;
     bool ui_mode = s_capture_mode_state_misrc;
@@ -323,9 +338,13 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
         s_capture_mode_state_initialized = true;
         gui_ui_trace_capture_mode_state(app, "ui_init_from_settings", true);
     }
+    bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
     bool expected_mode = s_capture_mode_state_misrc;
+    if (cxadc_mode) {
+        expected_mode = false;
+    }
     bool mismatch_user = (app->user_capture_mode_misrc != expected_mode);
-    bool mismatch_settings = (app->settings.misrc_mode != expected_mode);
+    bool mismatch_settings = (!cxadc_mode && app->settings.misrc_mode != expected_mode);
     bool mismatch_runtime = (!app->is_recording && app->capture_mode_runtime_misrc != expected_mode);
     if (mismatch_user || mismatch_settings || mismatch_runtime) {
         TraceLog(LOG_INFO,
@@ -337,9 +356,54 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
                  app->is_recording ? 1 : 0);
     }
     app->user_capture_mode_misrc = expected_mode;
-    app->settings.misrc_mode = expected_mode;
+    if (!cxadc_mode) {
+        app->settings.misrc_mode = expected_mode;
+    }
     if (!app->is_recording) {
         app->capture_mode_runtime_misrc = expected_mode;
+    }
+    if (cxadc_mode) {
+        bool cxadc_settings_changed = false;
+        bool want_capture_b = false;
+        if (app->selected_device >= 0 && app->selected_device < app->device_count) {
+            want_capture_b = (app->devices[app->selected_device].index > 1);
+        }
+
+        if (!app->settings.capture_a) {
+            app->settings.capture_a = true;
+            cxadc_settings_changed = true;
+        }
+        if (app->settings.capture_b != want_capture_b) {
+            app->settings.capture_b = want_capture_b;
+            cxadc_settings_changed = true;
+        }
+        if (app->settings.rf_bits_a != 8) {
+            app->settings.rf_bits_a = 8;
+            cxadc_settings_changed = true;
+        }
+        if (app->settings.rf_bits_b != 8) {
+            app->settings.rf_bits_b = 8;
+            cxadc_settings_changed = true;
+        }
+        if (app->settings.enable_resample_a) {
+            app->settings.enable_resample_a = false;
+            cxadc_settings_changed = true;
+        }
+        if (app->settings.enable_resample_b) {
+            app->settings.enable_resample_b = false;
+            cxadc_settings_changed = true;
+        }
+        if (fabsf(app->settings.resample_rate_a - 40000.0f) > 0.5f) {
+            app->settings.resample_rate_a = 40000.0f;
+            cxadc_settings_changed = true;
+        }
+        if (fabsf(app->settings.resample_rate_b - 40000.0f) > 0.5f) {
+            app->settings.resample_rate_b = 40000.0f;
+            cxadc_settings_changed = true;
+        }
+        if (cxadc_settings_changed) {
+            gui_settings_save(&app->settings);
+        }
     }
     gui_ui_trace_capture_mode_state(app, "gui_ui_sync_capture_mode_state", false);
 }
@@ -934,6 +998,7 @@ static int toolbar_title_font_size(void) {
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
     if (!app->settings_panel_open) return;
+    bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
 
     // Backdrop
     CLAY(CLAY_ID("SettingsBackdrop"), {
@@ -1140,8 +1205,10 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         // RF bit depth selector (moved up into Capture segment)
                         CLAY(CLAY_ID("CaptureRowSpacerA"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
                         snprintf(settings_rf_bits_a_display, sizeof(settings_rf_bits_a_display), "%s-bit", rf_bits_label(app->settings.rf_bits_a));
-                        CLAY(CLAY_ID("RfBitsABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(make_string(settings_rf_bits_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color rf_bits_a_bg = settings_cxadc_mode ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rf_bits_a_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY(CLAY_ID("RfBitsABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rf_bits_a_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_rf_bits_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rf_bits_a_fg) }));
                         }
                         Color rf_tag_a_bg = app->settings.auto_names_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
                         Color rf_tag_a_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
@@ -1164,8 +1231,10 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
 
                         CLAY(CLAY_ID("CaptureRowSpacerB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
                         snprintf(settings_rf_bits_b_display, sizeof(settings_rf_bits_b_display), "%s-bit", rf_bits_label(app->settings.rf_bits_b));
-                        CLAY(CLAY_ID("RfBitsBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(make_string(settings_rf_bits_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color rf_bits_b_bg = settings_cxadc_mode ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rf_bits_b_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY(CLAY_ID("RfBitsBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rf_bits_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(make_string(settings_rf_bits_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rf_bits_b_fg) }));
                         }
                         Color rf_tag_b_bg = app->settings.auto_names_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
                         Color rf_tag_b_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
@@ -1264,29 +1333,37 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
 
                     CLAY(CLAY_ID("ToggleRowResampleA"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleResampleA"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_resample_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.enable_resample_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color resample_a_toggle_bg = settings_cxadc_mode
+                            ? ui_disabled_color(COLOR_BUTTON)
+                            : (app->settings.enable_resample_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON);
+                        Color resample_a_toggle_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY(CLAY_ID("ToggleResampleA"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(resample_a_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(app->settings.enable_resample_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_a_toggle_fg) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("Resample A"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Resample A"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_a_toggle_fg) }));
 
                         // Rate selector (kHz stored; display MSPS)
                         format_msps_label(settings_resample_a_display, sizeof(settings_resample_a_display), app->settings.resample_rate_a);
-                        Color rate_bg = app->settings.enable_resample_a ? COLOR_BUTTON : ui_disabled_color(COLOR_BUTTON);
-                        Color rate_fg = app->settings.enable_resample_a ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        Color rate_bg = (settings_cxadc_mode || !app->settings.enable_resample_a) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rate_fg = (settings_cxadc_mode || !app->settings.enable_resample_a) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("ResampleRateABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_resample_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
                         }
                     }
 
                     CLAY(CLAY_ID("ToggleRowResampleB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleResampleB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.enable_resample_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.enable_resample_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color resample_b_toggle_bg = settings_cxadc_mode
+                            ? ui_disabled_color(COLOR_BUTTON)
+                            : (app->settings.enable_resample_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON);
+                        Color resample_b_toggle_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY(CLAY_ID("ToggleResampleB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(resample_b_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(app->settings.enable_resample_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_b_toggle_fg) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("Resample B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        CLAY_TEXT(CLAY_STRING("Resample B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_b_toggle_fg) }));
 
                         format_msps_label(settings_resample_b_display, sizeof(settings_resample_b_display), app->settings.resample_rate_b);
-                        Color rate_bg = app->settings.enable_resample_b ? COLOR_BUTTON : ui_disabled_color(COLOR_BUTTON);
-                        Color rate_fg = app->settings.enable_resample_b ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        Color rate_bg = (settings_cxadc_mode || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rate_fg = (settings_cxadc_mode || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("ResampleRateBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_resample_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
                         }
@@ -1708,11 +1785,16 @@ static void render_toolbar(gui_app_t *app) {
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
         // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B)
+        bool cxadc_clockgen_mode = false;
+        bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, &cxadc_clockgen_mode);
         bool mode_source_runtime = app->is_recording;
         bool mode_misrc = mode_source_runtime ? app->capture_mode_runtime_misrc
                                               : app->user_capture_mode_misrc;
+        if (cxadc_mode) {
+            mode_misrc = false;
+        }
         gui_ui_trace_capture_mode_render(app, mode_misrc, mode_source_runtime);
-        bool mode_change_allowed = !app->is_recording;
+        bool mode_change_allowed = !app->is_recording && !cxadc_mode;
         Color mode_bg = mode_misrc ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
         if (!mode_change_allowed) {
             mode_bg = ui_disabled_color(mode_bg);
@@ -1720,13 +1802,19 @@ static void render_toolbar(gui_app_t *app) {
         Color mode_fg = mode_change_allowed ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
         CLAY(CLAY_ID("CaptureModeToggle"), {
             .layout = {
-                .sizing = { CLAY_SIZING_FIXED(125), CLAY_SIZING_FIXED(32) },
+                .sizing = { CLAY_SIZING_FIXED(185), CLAY_SIZING_FIXED(32) },
                 .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
             },
             .backgroundColor = to_clay_color(mode_bg),
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
-            CLAY_TEXT(mode_misrc ? CLAY_STRING("Mode: MISRC") : CLAY_STRING("Mode: HSDAOH"),
+            const char *mode_label = NULL;
+            if (cxadc_mode) {
+                mode_label = cxadc_clockgen_mode ? "Mode: CXADC Clockgen" : "Mode: CXADC";
+            } else {
+                mode_label = mode_misrc ? "Mode: MISRC" : "Mode: HSDAOH";
+            }
+            CLAY_TEXT(make_string(mode_label),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(mode_fg) }));
         }
 
@@ -2838,6 +2926,8 @@ void gui_handle_interactions(gui_app_t *app) {
         }
         Vector2 click_pos = GetMousePosition();
         bool mode_toggle_hit = Clay_PointerOver(CLAY_ID("CaptureModeToggle"));
+        bool mode_toggle_cxadc_clockgen = false;
+        bool mode_toggle_is_cxadc = gui_ui_selected_device_is_cxadc(app, &mode_toggle_cxadc_clockgen);
         if (mode_toggle_hit) {
             TraceLog(LOG_INFO,
                      "MODE CLICK TRACE: x=%.1f y=%.1f recording=%d capturing=%d user=%s runtime=%s settings=%s",
@@ -2862,7 +2952,11 @@ void gui_handle_interactions(gui_app_t *app) {
             }
         }
         if (mode_toggle_hit) {
-            if (app->is_recording) {
+            if (mode_toggle_is_cxadc) {
+                gui_app_set_status(app, mode_toggle_cxadc_clockgen
+                    ? "CXADC Clockgen mode is fixed by detected card count"
+                    : "CXADC mode is fixed by detected card count");
+            } else if (app->is_recording) {
                 TraceLog(LOG_INFO,
                          "MODE TRACE: source=CaptureModeToggle blocked current=%s recording=1",
                          gui_ui_capture_mode_name(s_capture_mode_state_misrc));
@@ -2946,6 +3040,7 @@ void gui_handle_interactions(gui_app_t *app) {
 
         // Settings panel interactions
         if (app->settings_panel_open) {
+            bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
             if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
                 app->settings_panel_open = false;
                 gui_ui_clear_text_edit();
@@ -2957,15 +3052,23 @@ void gui_handle_interactions(gui_app_t *app) {
             }
 
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureA"))) {
-                app->settings.capture_a = !app->settings.capture_a;
-                gui_settings_save(&app->settings);
-                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
-                    gui_ui_clear_text_edit();
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC capture mapping is fixed by device mode");
+                } else {
+                    app->settings.capture_a = !app->settings.capture_a;
+                    gui_settings_save(&app->settings);
+                    if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                        gui_ui_clear_text_edit();
+                    }
                 }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
-                app->settings.capture_b = !app->settings.capture_b;
-                gui_settings_save(&app->settings);
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC capture mapping is fixed by detected card count");
+                } else {
+                    app->settings.capture_b = !app->settings.capture_b;
+                    gui_settings_save(&app->settings);
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleUseFlac"))) {
                 app->settings.use_flac = !app->settings.use_flac;
@@ -3013,20 +3116,36 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
-                app->settings.enable_resample_a = !app->settings.enable_resample_a;
-                gui_settings_save(&app->settings);
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else {
+                    app->settings.enable_resample_a = !app->settings.enable_resample_a;
+                    gui_settings_save(&app->settings);
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ResampleRateABox"))) {
-                app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
-                gui_settings_save(&app->settings);
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else {
+                    app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
+                    gui_settings_save(&app->settings);
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
-                app->settings.enable_resample_b = !app->settings.enable_resample_b;
-                gui_settings_save(&app->settings);
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else {
+                    app->settings.enable_resample_b = !app->settings.enable_resample_b;
+                    gui_settings_save(&app->settings);
+                }
             }
             if (Clay_PointerOver(CLAY_ID("ResampleRateBBox"))) {
-                app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
-                gui_settings_save(&app->settings);
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else {
+                    app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
+                    gui_settings_save(&app->settings);
+                }
             }
 
             // Auto naming controls
@@ -3073,26 +3192,34 @@ void gui_handle_interactions(gui_app_t *app) {
             }
 
             if (Clay_PointerOver(CLAY_ID("RfBitsABox"))) {
-                uint8_t b = app->settings.rf_bits_a;
-                if (app->settings.use_flac) {
-                    // 8 -> 12 -> 16 -> 8
-                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS");
                 } else {
-                    // RAW: 8 <-> 16
-                    b = (b == 8) ? 16 : 8;
+                    uint8_t b = app->settings.rf_bits_a;
+                    if (app->settings.use_flac) {
+                        // 8 -> 12 -> 16 -> 8
+                        b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                    } else {
+                        // RAW: 8 <-> 16
+                        b = (b == 8) ? 16 : 8;
+                    }
+                    app->settings.rf_bits_a = b;
+                    gui_settings_save(&app->settings);
                 }
-                app->settings.rf_bits_a = b;
-                gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("RfBitsBBox"))) {
-                uint8_t b = app->settings.rf_bits_b;
-                if (app->settings.use_flac) {
-                    b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                if (settings_cxadc_mode) {
+                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS");
                 } else {
-                    b = (b == 8) ? 16 : 8;
+                    uint8_t b = app->settings.rf_bits_b;
+                    if (app->settings.use_flac) {
+                        b = (b == 8) ? 12 : (b == 12) ? 16 : 8;
+                    } else {
+                        b = (b == 8) ? 16 : 8;
+                    }
+                    app->settings.rf_bits_b = b;
+                    gui_settings_save(&app->settings);
                 }
-                app->settings.rf_bits_b = b;
-                gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("RfTagAField")) && app->settings.auto_names_enabled) {
                 gui_ui_begin_text_edit(app, UI_TEXT_FIELD_RF_TAG_A, CLAY_ID("RfTagAField"), 6.0f, 6.0f);

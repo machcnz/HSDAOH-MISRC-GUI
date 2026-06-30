@@ -22,6 +22,7 @@
 #include "../visualization/gui_fft.h"
 #include "gui_simulated.h"
 #include "gui_playback.h"
+#include "gui_cxadc.h"
 #ifdef ENABLE_FX3
 #include "gui_fx3.h"
 #endif
@@ -81,6 +82,7 @@
 #define BUFFER_READ_SIZE 65536
 #define BUFFER_TOTAL_SIZE ((size_t)256 * 1024 * 1024)  // 256MB capture ringbuffer
 #define BUFFER_AUDIO_TOTAL_SIZE ((size_t)256 * 1024 * 1024)
+#define DEFAULT_AUDIO_SAMPLE_RATE 78125U
 
 // Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
 // Capture handler context (includes frame parser state)
@@ -452,6 +454,102 @@ void gui_capture_set_audio_capture(bool enabled)
 #endif
 }
 
+static void gui_capture_apply_cxadc_profile(gui_app_t *app, int card_count)
+{
+    if (!app) return;
+    if (card_count < 1) card_count = 1;
+    if (card_count > 2) card_count = 2;
+
+    bool changed = false;
+
+    // Fixed RF assumptions for CXADC mode.
+    if (app->settings.rf_bits_a != 8) {
+        app->settings.rf_bits_a = 8;
+        changed = true;
+    }
+    if (app->settings.rf_bits_b != 8) {
+        app->settings.rf_bits_b = 8;
+        changed = true;
+    }
+    if (app->settings.enable_resample_a) {
+        app->settings.enable_resample_a = false;
+        changed = true;
+    }
+    if (app->settings.enable_resample_b) {
+        app->settings.enable_resample_b = false;
+        changed = true;
+    }
+    if (fabsf(app->settings.resample_rate_a - 40000.0f) > 0.5f) {
+        app->settings.resample_rate_a = 40000.0f;
+        changed = true;
+    }
+    if (fabsf(app->settings.resample_rate_b - 40000.0f) > 0.5f) {
+        app->settings.resample_rate_b = 40000.0f;
+        changed = true;
+    }
+    if (!app->settings.capture_a) {
+        app->settings.capture_a = true;
+        changed = true;
+    }
+    bool want_capture_b = (card_count > 1);
+    if (app->settings.capture_b != want_capture_b) {
+        app->settings.capture_b = want_capture_b;
+        changed = true;
+    }
+
+    // Card mapping is fixed: card 0 -> Channel A, card 1 -> Channel B.
+    if (app->user_capture_mode_misrc) {
+        app->user_capture_mode_misrc = false;
+        changed = true;
+    }
+    if (!app->is_recording && app->capture_mode_runtime_misrc) {
+        app->capture_mode_runtime_misrc = false;
+        changed = true;
+    }
+
+    // 3-channel clockgen mapping defaults (CH1/CH2/CH3=headswitch).
+    static const char *audio_labels[4] = { "audio1", "audio2", "headswitch", "" };
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(app->settings.audio_1ch_labels[i], audio_labels[i]) != 0) {
+            snprintf(app->settings.audio_1ch_labels[i],
+                     sizeof(app->settings.audio_1ch_labels[i]),
+                     "%s",
+                     audio_labels[i]);
+            changed = true;
+        }
+    }
+
+    if (!app->settings.audio_output_tags[1][0]) {
+        snprintf(app->settings.audio_output_tags[1],
+                 sizeof(app->settings.audio_output_tags[1]),
+                 "%s",
+                 "audio12");
+        changed = true;
+    }
+    if (!app->settings.audio_output_tags[2][0]) {
+        snprintf(app->settings.audio_output_tags[2],
+                 sizeof(app->settings.audio_output_tags[2]),
+                 "%s",
+                 "headswitch");
+        changed = true;
+    }
+
+    if (card_count > 1) {
+        if (!app->settings.enable_audio_2ch_12) {
+            app->settings.enable_audio_2ch_12 = true;
+            changed = true;
+        }
+        if (!app->settings.enable_audio_1ch[2]) {
+            app->settings.enable_audio_1ch[2] = true;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        gui_settings_save(&app->settings);
+    }
+}
+
 /*-----------------------------------------------------------------------------
  * GUI-Specific Capture Handler Callbacks
  *-----------------------------------------------------------------------------*/
@@ -804,6 +902,7 @@ void gui_app_init(gui_app_t *app) {
 
     // Initialize sample rate to default (will be updated when device connects)
     atomic_store(&app->sample_rate, DEFAULT_SAMPLE_RATE);
+    atomic_store(&app->audio_sample_rate, DEFAULT_AUDIO_SAMPLE_RATE);
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
     TraceLog(LOG_INFO, "APP INIT: sample_rate set to %u", DEFAULT_SAMPLE_RATE);
@@ -988,6 +1087,22 @@ void gui_app_enumerate_devices(gui_app_t *app) {
 
     misrc_device_list_free(&devices);
 
+    // Add CXADC mode option if cards are detected on host.
+    int cxadc_cards = gui_cxadc_detect_cards();
+    if (cxadc_cards > 0 && app->device_count < MAX_DEVICES) {
+        device_info_t *dst = &app->devices[app->device_count];
+        if (cxadc_cards > 1) {
+            snprintf(dst->name, sizeof(dst->name), "[CXADC] CXADC Clockgen");
+            dst->index = 2;
+        } else {
+            snprintf(dst->name, sizeof(dst->name), "[CXADC] CXADC");
+            dst->index = 1;
+        }
+        snprintf(dst->serial, sizeof(dst->serial), "CXADC_%dCARD", dst->index);
+        dst->type = DEVICE_TYPE_CXADC;
+        app->device_count++;
+    }
+
     // Always add simulated device at the end
     if (app->device_count < MAX_DEVICES) {
         device_info_t *dst = &app->devices[app->device_count];
@@ -1168,6 +1283,44 @@ int gui_app_start_capture(gui_app_t *app) {
         return playback_rc;
     }
 
+    if (dev->type == DEVICE_TYPE_CXADC) {
+        int cxadc_cards = dev->index;
+        if (cxadc_cards < 1) cxadc_cards = 1;
+        if (cxadc_cards > 2) cxadc_cards = 2;
+        gui_capture_apply_cxadc_profile(app, cxadc_cards);
+        int cxadc_rc = gui_cxadc_start(app, cxadc_cards);
+        if (cxadc_rc == 0) {
+            bool prev_runtime_mode = app->capture_mode_runtime_misrc;
+            app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+            TraceLog(LOG_INFO,
+                     "MODE TRACE: source=gui_app_start_capture_cxadc latch_runtime old=%s new=%s user=%s",
+                     prev_runtime_mode ? "MISRC" : "HSDAOH",
+                     app->capture_mode_runtime_misrc ? "MISRC" : "HSDAOH",
+                     app->user_capture_mode_misrc ? "MISRC" : "HSDAOH");
+            app->capture_start_time = GetTime();
+            app->reconnect_pending = false;
+            app->reconnect_attempts = 0;
+            {
+                time_t t = time(NULL);
+                struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+                localtime_s(&tmv, &t);
+#else
+                localtime_r(&t, &tmv);
+#endif
+                snprintf(app->capture_timestamp, sizeof(app->capture_timestamp), "%04d.%02d.%02d_%02d.%02d.%02d",
+                         (tmv.tm_year + 1900),
+                         tmv.tm_mon + 1,
+                         tmv.tm_mday,
+                         tmv.tm_hour,
+                         tmv.tm_min,
+                         tmv.tm_sec);
+            }
+            gui_capture_hold_power_assertions();
+        }
+        return cxadc_rc;
+    }
+
 #ifdef ENABLE_FX3
     // Handle FX3 device
     if (dev->type == DEVICE_TYPE_FX3) {
@@ -1217,6 +1370,7 @@ int gui_app_start_capture(gui_app_t *app) {
     atomic_store(&app->rb_drop_count, 0);
     atomic_store(&app->stream_synced, false);
     atomic_store(&app->sample_rate, DEFAULT_SAMPLE_RATE);
+    atomic_store(&app->audio_sample_rate, DEFAULT_AUDIO_SAMPLE_RATE);
     atomic_store(&app->last_callback_time_ms, get_time_ms());
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
@@ -1436,6 +1590,12 @@ void gui_app_stop_capture(gui_app_t *app) {
     }
     if (dev->type == DEVICE_TYPE_PLAYBACK) {
         gui_playback_stop(app);
+        gui_app_clear_display(app);
+        return;
+    }
+    if (dev->type == DEVICE_TYPE_CXADC) {
+        gui_cxadc_stop(app);
+        app->capture_timestamp[0] = '\0';
         gui_app_clear_display(app);
         return;
     }

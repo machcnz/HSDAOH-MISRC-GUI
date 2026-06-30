@@ -308,6 +308,8 @@ static const char *gui_record_device_type_name(const gui_app_t *app) {
             return "hsdaoh";
         case DEVICE_TYPE_SIMPLE_CAPTURE:
             return "simple_capture";
+        case DEVICE_TYPE_CXADC:
+            return "cxadc";
         case DEVICE_TYPE_SIMULATED:
             return "simulated";
         case DEVICE_TYPE_PLAYBACK:
@@ -955,16 +957,26 @@ static void gui_flac_bytes_callback(void *user_data, size_t bytes_written) {
         atomic_fetch_add(wctx->compressed_bytes, bytes_written);
     }
 }
+static inline int8_t gui_record_sample_12bit_to_i8(int16_t sample) {
+    // BUF_RECORD samples are signed 12-bit values carried in int16_t.
+    // Downscale to signed 8-bit with nearest rounding.
+    int32_t v = sample;
+    if (v >= 0) {
+        v = (v + 8) >> 4;
+    } else {
+        v = -(((-v) + 8) >> 4);
+    }
+    if (v > 127) v = 127;
+    if (v < -128) v = -128;
+    return (int8_t)v;
+}
 
 static void convert_i16_to_flac_i32(int32_t *dst, const int16_t *src, size_t n, uint8_t bits) {
     if (!dst || !src || n == 0) return;
 
     if (bits == 8) {
         for (size_t i = 0; i < n; i++) {
-            int16_t v = src[i];
-            if (v > 127) v = 127;
-            if (v < -128) v = -128;
-            dst[i] = (int32_t)v;
+            dst[i] = (int32_t)gui_record_sample_12bit_to_i8(src[i]);
         }
         return;
     }
@@ -1168,10 +1180,7 @@ static void convert_i16_to_raw_bytes(uint8_t *dst, const int16_t *src, size_t n,
     if (bits == 8) {
         int8_t *d = (int8_t *)dst;
         for (size_t i = 0; i < n; i++) {
-            int16_t v = src[i];
-            if (v > 127) v = 127;
-            if (v < -128) v = -128;
-            d[i] = (int8_t)v;
+            d[i] = gui_record_sample_12bit_to_i8(src[i]);
         }
         return;
     }
