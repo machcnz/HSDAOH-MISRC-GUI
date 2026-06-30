@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include <inttypes.h>
 
 #include "../common/buffer.h"
@@ -48,11 +47,7 @@
 #endif
 
 #include "../version.h"
-<<<<<<<< HEAD:misrc_tools/misrc_capture/misrc_extract.c
 #include "../common/extract.h"
-========
-#include "extract.h"
->>>>>>>> origin/main:misrc_tools/misrc_extract/misrc_extract.c
 
 #define BUFFER_SIZE 65536*32
 
@@ -82,8 +77,7 @@ int main(int argc, char **argv)
 	_setmode(_fileno(stdin), O_BINARY);
 #endif
 
-	int opt;
-	bool pad=false, single=false;
+	int opt, pad=0, single=0;
 
 
 	//file adress
@@ -140,10 +134,10 @@ int main(int argc, char **argv)
 			output_name_aux = optarg;
 			break;
 		case 'p':
-			pad = true;
+			pad = 1;
 			break;
 		case 's':
-			single = true;
+			single = 1;
 			break;
 		case 'h':
 		default:
@@ -226,7 +220,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	conv_function = get_conv_function(single, pad, false, false, output_name_1, output_name_2);
+	conv_function = get_conv_function(single, pad, 0, 0, output_name_1, output_name_2);
 
 	if(input_name_1 != NULL && (output_name_1 != NULL || output_name_2 != NULL || output_name_aux != NULL))
 	{
