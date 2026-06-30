@@ -27,6 +27,12 @@ static const char *cvbs_tape_mode_name(cvbs_tape_mode_t mode);
 static const char *cvbs_level_mode_name(cvbs_level_mode_t mode);
 static const char *cvbs_sync_mode_name(cvbs_sync_mode_t mode);
 static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source);
+static void cvbs_decoder_set_level_mode(cvbs_decoder_t *decoder, cvbs_level_mode_t mode, const char *source);
+static void cvbs_decoder_cycle_level_mode(cvbs_decoder_t *decoder, const char *source);
+static void cvbs_decoder_set_sync_mode(cvbs_decoder_t *decoder, cvbs_sync_mode_t mode, const char *source);
+static void cvbs_decoder_cycle_sync_mode(cvbs_decoder_t *decoder, const char *source);
+static void cvbs_build_level_label(const cvbs_decoder_t *decoder, char *dst, size_t dst_len);
+static void cvbs_build_sync_label(const cvbs_decoder_t *decoder, char *dst, size_t dst_len);
 
 typedef struct {
     const int16_t *coeffs;
@@ -65,7 +71,7 @@ static cvbs_pll_tuning_t cvbs_select_pll_tuning(const cvbs_decoder_t *decoder);
 // Internal Helper Functions
 //-----------------------------------------------------------------------------
 static const char *cvbs_decoder_mode_name(cvbs_decoder_mode_t mode) {
-    return (mode == CVBS_DECODER_MODE_TAPE) ? "Tape" : "Mono";
+    return (mode == CVBS_DECODER_MODE_TAPE) ? "Tape Decode" : "CVBS";
 }
 
 static const char *cvbs_tape_format_name(cvbs_tape_format_t format) {
@@ -270,6 +276,128 @@ static void cvbs_trace_mode_watch(cvbs_decoder_t *decoder, const char *source) {
     decoder->debug.last_sync_mode = (int)decoder->sync_mode;
     decoder->debug.last_fixed_sync_locked = decoder->fixed_sync_locked;
     decoder->debug.last_fixed_levels_valid = decoder->fixed_levels_valid;
+}
+
+static void cvbs_build_level_label(const cvbs_decoder_t *decoder, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    if (decoder && decoder->decoder_mode == CVBS_DECODER_MODE_TAPE) {
+        bool ire0_adjust = (decoder->level_mode == CVBS_LEVEL_MODE_FIXED);
+        snprintf(dst, dst_len, "Level: --ire0-adjust %s", ire0_adjust ? "ON" : "OFF");
+        return;
+    }
+    cvbs_level_mode_t mode = decoder ? decoder->level_mode : CVBS_LEVEL_MODE_AUTO;
+    snprintf(dst, dst_len, "Levels: %s", cvbs_level_mode_name(mode));
+}
+
+static void cvbs_build_sync_label(const cvbs_decoder_t *decoder, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    const char *prefix = (decoder && decoder->decoder_mode == CVBS_DECODER_MODE_TAPE)
+                         ? "Tape Sync"
+                         : "Sync";
+    cvbs_sync_mode_t mode = decoder ? decoder->sync_mode : CVBS_SYNC_MODE_AUTO;
+    snprintf(dst, dst_len, "%s: %s", prefix, cvbs_sync_mode_name(mode));
+}
+
+static void cvbs_decoder_set_level_mode(cvbs_decoder_t *decoder, cvbs_level_mode_t mode, const char *source) {
+    if (!decoder) return;
+    if (mode != CVBS_LEVEL_MODE_AUTO && mode != CVBS_LEVEL_MODE_FIXED) {
+        mode = CVBS_LEVEL_MODE_AUTO;
+    }
+
+    cvbs_level_mode_t old_level_mode = decoder->level_mode;
+    if (old_level_mode == mode) {
+        return;
+    }
+
+    if (mode == CVBS_LEVEL_MODE_AUTO) {
+        decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
+        decoder->fixed_levels_valid = false;
+    } else {
+        decoder->level_mode = CVBS_LEVEL_MODE_FIXED;
+        bool have_current_levels =
+            (decoder->levels.range >= 100) ||
+            (decoder->adaptive.threshold != 0 &&
+             decoder->adaptive.white > decoder->adaptive.sync_tip);
+        if (have_current_levels) {
+            int16_t black = decoder->levels.black_level;
+            int16_t white = decoder->levels.white_level;
+            if (white <= black) {
+                black = decoder->adaptive.black;
+                white = decoder->adaptive.white;
+            }
+            if (white <= black) {
+                white = (int16_t)(black + 100);
+            }
+            decoder->fixed_black_level = black;
+            decoder->fixed_white_level = white;
+            decoder->fixed_levels_valid = true;
+        } else {
+            decoder->fixed_levels_valid = false;
+        }
+    }
+
+    if (old_level_mode != decoder->level_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=level_mode old=%s new=%s",
+                 (source && source[0]) ? source : "set_level_mode",
+                 cvbs_level_mode_name(old_level_mode),
+                 cvbs_level_mode_name(decoder->level_mode));
+    }
+    cvbs_trace_mode_watch(decoder, source ? source : "set_level_mode");
+}
+
+static void cvbs_decoder_cycle_level_mode(cvbs_decoder_t *decoder, const char *source) {
+    if (!decoder) return;
+    cvbs_level_mode_t next_mode = (decoder->level_mode == CVBS_LEVEL_MODE_FIXED)
+                                  ? CVBS_LEVEL_MODE_AUTO
+                                  : CVBS_LEVEL_MODE_FIXED;
+    cvbs_decoder_set_level_mode(decoder, next_mode, source);
+}
+
+static void cvbs_decoder_set_sync_mode(cvbs_decoder_t *decoder, cvbs_sync_mode_t mode, const char *source) {
+    if (!decoder) return;
+    if (mode != CVBS_SYNC_MODE_AUTO && mode != CVBS_SYNC_MODE_FIXED) {
+        mode = CVBS_SYNC_MODE_AUTO;
+    }
+
+    cvbs_sync_mode_t old_sync_mode = decoder->sync_mode;
+    bool old_fixed_lock = decoder->fixed_sync_locked;
+    if (old_sync_mode == mode) {
+        return;
+    }
+
+    decoder->sync_mode = mode;
+    cvbs_reset_fixed_sync_lock(decoder);
+    decoder->pll.locked = false;
+    decoder->pll.good_sync_count = 0;
+    decoder->pll.bad_sync_count = 0;
+    decoder->pll.line_period = cvbs_nominal_line_period(decoder);
+    decoder->pll.phase_integral = 0.0;
+    decoder->pll.freq_adjust = 0.0;
+
+    if (old_sync_mode != decoder->sync_mode) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=sync_mode old=%s new=%s",
+                 (source && source[0]) ? source : "set_sync_mode",
+                 cvbs_sync_mode_name(old_sync_mode),
+                 cvbs_sync_mode_name(decoder->sync_mode));
+    }
+    if (old_fixed_lock != decoder->fixed_sync_locked) {
+        TraceLog(LOG_INFO,
+                 "CVBS MODE TRACE: source=%s field=fixed_sync_locked old=%d new=%d",
+                 (source && source[0]) ? source : "set_sync_mode",
+                 old_fixed_lock ? 1 : 0,
+                 decoder->fixed_sync_locked ? 1 : 0);
+    }
+    cvbs_trace_mode_watch(decoder, source ? source : "set_sync_mode");
+}
+
+static void cvbs_decoder_cycle_sync_mode(cvbs_decoder_t *decoder, const char *source) {
+    if (!decoder) return;
+    cvbs_sync_mode_t next_mode = (decoder->sync_mode == CVBS_SYNC_MODE_FIXED)
+                                 ? CVBS_SYNC_MODE_AUTO
+                                 : CVBS_SYNC_MODE_FIXED;
+    cvbs_decoder_set_sync_mode(decoder, next_mode, source);
 }
 
 
@@ -1749,12 +1877,10 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
     const char *frame_label = (decoder->frame_view_mode == CVBS_FRAME_VIEW_FULL)
                               ? "Frame: Full"
                               : "Frame: Active";
-    const char *level_label = (decoder->level_mode == CVBS_LEVEL_MODE_FIXED)
-                              ? "Levels: Fixed"
-                              : "Levels: Auto";
-    const char *sync_label = (decoder->sync_mode == CVBS_SYNC_MODE_FIXED)
-                             ? "Sync: Fixed"
-                             : "Sync: Auto";
+    char level_label[40];
+    char sync_label[40];
+    cvbs_build_level_label(decoder, level_label, sizeof(level_label));
+    cvbs_build_sync_label(decoder, sync_label, sizeof(sync_label));
 
     // Compute button width large enough for both labels so the box
     // does not change size when switching between PAL and NTSC.
@@ -2071,28 +2197,52 @@ static void render_cvbs_system_overlay(cvbs_decoder_t *decoder,
 //=============================================================================
 // Panel Interface (vtable) Implementation
 //=============================================================================
+typedef enum {
+    VIDEO_PLUGIN_CVBS = 0,
+    VIDEO_PLUGIN_TAPE_DECODE = 1
+} video_plugin_kind_t;
 
-// Each CVBS panel owns its own cvbs_decoder_t instance via the panel's
-// left_state or right_state pointer. Processing happens in the display thread
-// via cvbs_vtable_process(), rendering in the main thread via cvbs_vtable_render().
+typedef struct {
+    cvbs_decoder_t decoder;
+} video_cvbs_plugin_t;
 
-//-----------------------------------------------------------------------------
-// Lifecycle Functions
-//-----------------------------------------------------------------------------
+typedef struct {
+    cvbs_decoder_t decoder;
+    char active_profile[32];
+    float active_frequency_mhz;
+} video_tape_plugin_t;
 
-static void *cvbs_vtable_create(void) {
-    cvbs_decoder_t *decoder = calloc(1, sizeof(cvbs_decoder_t));
-    if (!decoder) return NULL;
+typedef struct {
+    video_cvbs_plugin_t cvbs;
+    video_tape_plugin_t tape_decode;
+    video_plugin_kind_t active_plugin;
+} video_panel_state_t;
 
-    if (!gui_cvbs_init(decoder)) {
-        free(decoder);
-        return NULL;
-    }
+static const char *video_plugin_name(video_plugin_kind_t plugin) {
+    return (plugin == VIDEO_PLUGIN_TAPE_DECODE) ? "Tape Decode" : "CVBS";
+}
 
-    // Default OSD mode
+static inline cvbs_decoder_t *video_panel_decoder(video_panel_state_t *panel, video_plugin_kind_t plugin) {
+    if (!panel) return NULL;
+    return (plugin == VIDEO_PLUGIN_TAPE_DECODE)
+        ? &panel->tape_decode.decoder
+        : &panel->cvbs.decoder;
+}
+
+static inline cvbs_decoder_t *video_panel_active_decoder(video_panel_state_t *panel) {
+    if (!panel) return NULL;
+    return video_panel_decoder(panel, panel->active_plugin);
+}
+
+static bool video_panel_init_decoder_common(cvbs_decoder_t *decoder,
+                                            cvbs_decoder_mode_t mode,
+                                            const char *trace_source) {
+    if (!decoder) return false;
+    if (!gui_cvbs_init(decoder)) return false;
+
     decoder->osd_mode = CVBS_OSD_MINIMAL;
     decoder->frame_view_mode = CVBS_FRAME_VIEW_ACTIVE;
-    decoder->decoder_mode = CVBS_DECODER_MODE_CVBS;
+    decoder->decoder_mode = mode;
     decoder->tape_format = CVBS_TAPE_FORMAT_VHS;
     decoder->tape_mode = CVBS_TAPE_MODE_SP;
     decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
@@ -2100,42 +2250,225 @@ static void *cvbs_vtable_create(void) {
     decoder->fixed_levels_valid = false;
     cvbs_reset_fixed_sync_lock(decoder);
 
-    // Default to 625-line PAL/SECAM for real-hardware testing.
-    decoder->overlay.selected_system = 0;  // 0=625-line PAL/SECAM, 1=525-line NTSC
+    decoder->overlay.selected_system = 0;       // 0=PAL/SECAM
     decoder->overlay.selected_tape_format = 0;  // 0=PAL, 1=NTSC, 2=SECAM
     decoder->overlay.system_dropdown_open = false;
     decoder->overlay.tape_dropdown_open = false;
     decoder->overlay.tape_format_dropdown_open = false;
     gui_cvbs_set_format(decoder, 0);
-    cvbs_trace_mode_watch(decoder, "create");
+    cvbs_trace_mode_watch(decoder, trace_source);
+    return true;
+}
 
-    return decoder;
+static bool video_cvbs_plugin_init(video_cvbs_plugin_t *plugin) {
+    if (!plugin) return false;
+    return video_panel_init_decoder_common(&plugin->decoder, CVBS_DECODER_MODE_CVBS, "create_plugin_cvbs");
+}
+
+static const char *video_tape_profile_from_selection(const video_tape_plugin_t *plugin) {
+    if (!plugin) return "PAL_VHS";
+    const cvbs_decoder_t *decoder = &plugin->decoder;
+    int system = decoder->overlay.selected_tape_format;  // 0=PAL 1=NTSC 2=SECAM
+    cvbs_tape_format_t family = decoder->tape_format;
+    cvbs_tape_mode_t mode = decoder->tape_mode;
+
+    if (system == 1) { // NTSC
+        switch (family) {
+            case CVBS_TAPE_FORMAT_HI8:
+                if (mode == CVBS_TAPE_MODE_LP) return "NTSC_HI8_LP";
+                if (mode == CVBS_TAPE_MODE_ELP) return "NTSC_HI8_EP";
+                return "NTSC_HI8";
+            case CVBS_TAPE_FORMAT_VIDEO8:
+                return "NTSC_VIDEO8";
+            case CVBS_TAPE_FORMAT_SVHS:
+                return "NTSC_SVHS";
+            case CVBS_TAPE_FORMAT_BETAMAX:
+                return "NTSC_BETAMAX";
+            case CVBS_TAPE_FORMAT_UMATIC:
+                return "NTSC_UMATIC";
+            case CVBS_TAPE_FORMAT_VHS:
+            default:
+                if (mode == CVBS_TAPE_MODE_LP) return "NTSC_VHS_LP";
+                if (mode == CVBS_TAPE_MODE_ELP) return "NTSC_VHS_EP";
+                return "NTSC_VHS";
+        }
+    }
+
+    if (system == 2) { // SECAM / MESECAM fallbacks
+        if (family == CVBS_TAPE_FORMAT_VHS) {
+            if (mode == CVBS_TAPE_MODE_LP) return "MESECAM_VHS_LP";
+            if (mode == CVBS_TAPE_MODE_ELP) return "MESECAM_VHS_EP";
+            return "MESECAM_VHS";
+        }
+        return "MESECAM_VHS";
+    }
+
+    // PAL
+    switch (family) {
+        case CVBS_TAPE_FORMAT_HI8:
+            if (mode == CVBS_TAPE_MODE_LP) return "PAL_HI8_LP";
+            if (mode == CVBS_TAPE_MODE_ELP) return "PAL_HI8_EP";
+            return "PAL_HI8";
+        case CVBS_TAPE_FORMAT_VIDEO8:
+            return "PAL_VIDEO8";
+        case CVBS_TAPE_FORMAT_SVHS:
+            return "PAL_SVHS";
+        case CVBS_TAPE_FORMAT_BETAMAX:
+            return "PAL_BETAMAX";
+        case CVBS_TAPE_FORMAT_UMATIC:
+            return "PAL_UMATIC";
+        case CVBS_TAPE_FORMAT_VHS:
+        default:
+            if (mode == CVBS_TAPE_MODE_LP) return "PAL_VHS_LP";
+            if (mode == CVBS_TAPE_MODE_ELP) return "PAL_VHS_EP";
+            return "PAL_VHS";
+    }
+}
+
+static void video_tape_apply_runtime_args(video_tape_plugin_t *plugin, const char *source) {
+    if (!plugin) return;
+    cvbs_decoder_t *decoder = &plugin->decoder;
+    int selected_format = decoder->overlay.selected_tape_format;
+    if (selected_format < 0 || selected_format > 2) selected_format = 0;
+    decoder->overlay.selected_tape_format = selected_format;
+
+    if (selected_format == 1) {
+        decoder->overlay.selected_system = 1;
+        gui_cvbs_set_format(decoder, 1); // NTSC
+    } else if (selected_format == 2) {
+        decoder->overlay.selected_system = 0;
+        gui_cvbs_set_format(decoder, 2); // SECAM
+    } else {
+        decoder->overlay.selected_system = 0;
+        gui_cvbs_set_format(decoder, 0); // PAL
+    }
+
+    const char *profile = video_tape_profile_from_selection(plugin);
+    snprintf(plugin->active_profile, sizeof(plugin->active_profile), "%s", profile);
+    plugin->active_frequency_mhz = 40.0f;
+    bool ire0_adjust = (decoder->level_mode == CVBS_LEVEL_MODE_FIXED);
+    const char *arg_ire0_adjust = ire0_adjust ? "--ire0-adjust" : "(disabled)";
+    const char *system_name = (selected_format == 1) ? "NTSC"
+                             : (selected_format == 2) ? "SECAM"
+                             : "PAL";
+
+    TraceLog(LOG_INFO,
+             "TAPE DECODE ARGS: source=%s system=%s profile=%s frequency=%.1f input_format=s16le ire0_adjust=%d arg=%s",
+             (source && source[0]) ? source : "unknown",
+             system_name,
+             plugin->active_profile,
+             (double)plugin->active_frequency_mhz,
+             ire0_adjust ? 1 : 0,
+             arg_ire0_adjust);
+}
+
+static bool video_tape_plugin_init(video_tape_plugin_t *plugin) {
+    if (!plugin) return false;
+    if (!video_panel_init_decoder_common(&plugin->decoder, CVBS_DECODER_MODE_TAPE, "create_plugin_tape_decode")) {
+        return false;
+    }
+    plugin->active_profile[0] = '\0';
+    plugin->active_frequency_mhz = 40.0f;
+    video_tape_apply_runtime_args(plugin, "init");
+    return true;
+}
+
+static void video_panel_close_all_dropdowns(video_panel_state_t *panel) {
+    if (!panel) return;
+    cvbs_decoder_t *cvbs = &panel->cvbs.decoder;
+    cvbs_decoder_t *tape = &panel->tape_decode.decoder;
+    cvbs->overlay.system_dropdown_open = false;
+    cvbs->overlay.tape_dropdown_open = false;
+    cvbs->overlay.tape_format_dropdown_open = false;
+    tape->overlay.system_dropdown_open = false;
+    tape->overlay.tape_dropdown_open = false;
+    tape->overlay.tape_format_dropdown_open = false;
+}
+
+static void video_panel_activate_plugin(video_panel_state_t *panel, video_plugin_kind_t plugin) {
+    if (!panel) return;
+    if (panel->active_plugin == plugin) return;
+    video_plugin_kind_t old_plugin = panel->active_plugin;
+    video_panel_close_all_dropdowns(panel);
+    panel->active_plugin = plugin;
+    TraceLog(LOG_INFO,
+             "VIDEO DECODER SWITCH: old=%s new=%s",
+             video_plugin_name(old_plugin),
+             video_plugin_name(panel->active_plugin));
+}
+
+//-----------------------------------------------------------------------------
+// Lifecycle Functions
+//-----------------------------------------------------------------------------
+
+static void *cvbs_vtable_create(void) {
+    video_panel_state_t *panel = calloc(1, sizeof(video_panel_state_t));
+    if (!panel) return NULL;
+
+    if (!video_cvbs_plugin_init(&panel->cvbs)) {
+        free(panel);
+        return NULL;
+    }
+    if (!video_tape_plugin_init(&panel->tape_decode)) {
+        gui_cvbs_cleanup(&panel->cvbs.decoder);
+        free(panel);
+        return NULL;
+    }
+
+    panel->active_plugin = VIDEO_PLUGIN_CVBS;
+    return panel;
 }
 
 static void cvbs_vtable_destroy(void *state) {
     if (!state) return;
-    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
-    gui_cvbs_cleanup(decoder);
-    free(decoder);
+    video_panel_state_t *panel = (video_panel_state_t *)state;
+    gui_cvbs_cleanup(&panel->cvbs.decoder);
+    gui_cvbs_cleanup(&panel->tape_decode.decoder);
+    free(panel);
 }
 
 static void cvbs_vtable_clear(void *state) {
     if (!state) return;
-    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
-    gui_cvbs_reset(decoder);
+    video_panel_state_t *panel = (video_panel_state_t *)state;
+    gui_cvbs_reset(&panel->cvbs.decoder);
+    gui_cvbs_reset(&panel->tape_decode.decoder);
+    video_tape_apply_runtime_args(&panel->tape_decode, "clear");
+    panel->active_plugin = VIDEO_PLUGIN_CVBS;
+    video_panel_close_all_dropdowns(panel);
 }
 
 //-----------------------------------------------------------------------------
 // Processing Function (called from display thread)
 //-----------------------------------------------------------------------------
+static void video_cvbs_plugin_process(video_cvbs_plugin_t *plugin,
+                                      const int16_t *samples,
+                                      size_t count) {
+    if (!plugin || !samples || count == 0) return;
+    cvbs_decoder_t *decoder = &plugin->decoder;
+    cvbs_trace_mode_watch(decoder, "process_enter_cvbs");
+    gui_cvbs_process_buffer(decoder, samples, count);
+    cvbs_trace_mode_watch(decoder, "process_exit_cvbs");
+}
+
+static void video_tape_plugin_process(video_tape_plugin_t *plugin,
+                                      const int16_t *samples,
+                                      size_t count) {
+    if (!plugin || !samples || count == 0) return;
+    cvbs_decoder_t *decoder = &plugin->decoder;
+    if (plugin->active_profile[0] == '\0') {
+        video_tape_apply_runtime_args(plugin, "process_bootstrap");
+    }
+    cvbs_trace_mode_watch(decoder, "process_enter_tape_decode");
+    gui_cvbs_process_buffer(decoder, samples, count);
+    cvbs_trace_mode_watch(decoder, "process_exit_tape_decode");
+}
 
 static void cvbs_vtable_process(void *state, const int16_t *samples, size_t count, uint32_t sample_rate) {
     (void)sample_rate;  // CVBS uses its own sample rate detection
     if (!state || !samples || count == 0) return;
-    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
-    cvbs_trace_mode_watch(decoder, "process_enter");
-    gui_cvbs_process_buffer(decoder, samples, count);
-    cvbs_trace_mode_watch(decoder, "process_exit");
+    video_panel_state_t *panel = (video_panel_state_t *)state;
+    video_cvbs_plugin_process(&panel->cvbs, samples, count);
+    video_tape_plugin_process(&panel->tape_decode, samples, count);
 }
 
 //-----------------------------------------------------------------------------
@@ -2148,11 +2481,12 @@ static void cvbs_vtable_render(void *state, gui_app_t *app, int channel,
     (void)channel;
     (void)channel_color;
 
-    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    video_panel_state_t *panel = (video_panel_state_t *)state;
+    cvbs_decoder_t *decoder = video_panel_active_decoder(panel);
 
     if (!decoder) {
         // No decoder state - show message
-        const char *msg = "CVBS Not Available";
+        const char *msg = "Video Decoder Not Available";
         int w = MeasureText(msg, 12);
         DrawRectangleRec(bounds, (Color){20, 20, 20, 255});
         DrawText(msg, (int)(bounds.x + bounds.width/2 - w/2),
@@ -2160,8 +2494,9 @@ static void cvbs_vtable_render(void *state, gui_app_t *app, int channel,
         return;
     }
 
-    // Swap buffers to get latest frame from display thread
-    gui_cvbs_swap_buffers(decoder);
+    // Swap buffers for both plugin decoders to keep independent feeds fresh.
+    gui_cvbs_swap_buffers(&panel->cvbs.decoder);
+    gui_cvbs_swap_buffers(&panel->tape_decode.decoder);
 
     // Render the decoded frame
     gui_cvbs_render_frame(decoder, bounds.x, bounds.y, bounds.width, bounds.height);
@@ -2179,28 +2514,23 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
     (void)app;
     (void)channel;
     (void)bounds;
-
-    cvbs_decoder_t *decoder = (cvbs_decoder_t *)state;
+    video_panel_state_t *panel = (video_panel_state_t *)state;
+    if (!panel) return false;
+    cvbs_decoder_t *decoder = video_panel_active_decoder(panel);
     if (!decoder) return false;
     if (!decoder->overlay.is_visible) return false;
-    bool tape_ui = (decoder->decoder_mode == CVBS_DECODER_MODE_TAPE);
-
-    // Decoder mode button: toggle CVBS <-> Tape
+    bool tape_ui = (panel->active_plugin == VIDEO_PLUGIN_TAPE_DECODE);
+    video_tape_plugin_t *tape_plugin = &panel->tape_decode;
+    // Decoder button: switch between independent plugin decoders (CVBS/Tape).
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.decoder_btn_rect)) {
-        cvbs_decoder_mode_t old_mode = decoder->decoder_mode;
-        decoder->decoder_mode = (decoder->decoder_mode == CVBS_DECODER_MODE_CVBS)
-                                    ? CVBS_DECODER_MODE_TAPE
-                                    : CVBS_DECODER_MODE_CVBS;
-        decoder->overlay.system_dropdown_open = false;
-        decoder->overlay.tape_dropdown_open = false;
-        decoder->overlay.tape_format_dropdown_open = false;
-        if (old_mode != decoder->decoder_mode) {
-            TraceLog(LOG_INFO,
-                     "CVBS MODE TRACE: source=overlay_click field=decoder_mode old=%s new=%s",
-                     cvbs_decoder_mode_name(old_mode),
-                     cvbs_decoder_mode_name(decoder->decoder_mode));
+        video_plugin_kind_t next = (panel->active_plugin == VIDEO_PLUGIN_CVBS)
+            ? VIDEO_PLUGIN_TAPE_DECODE
+            : VIDEO_PLUGIN_CVBS;
+        video_panel_activate_plugin(panel, next);
+        decoder = video_panel_active_decoder(panel);
+        if (decoder) {
+            cvbs_trace_mode_watch(decoder, "overlay_decoder_switch");
         }
-        cvbs_trace_mode_watch(decoder, "overlay_decoder_click");
         return true;
     }
 
@@ -2239,6 +2569,7 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
                      cvbs_tape_mode_name(old_mode),
                      cvbs_tape_mode_name(decoder->tape_mode));
         }
+        video_tape_apply_runtime_args(tape_plugin, "overlay_tape_mode_click");
         cvbs_trace_mode_watch(decoder, "overlay_tape_mode_click");
         return true;
     }
@@ -2279,6 +2610,7 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
                              cvbs_tape_format_name(old_format),
                              cvbs_tape_format_name(decoder->tape_format));
                 }
+                video_tape_apply_runtime_args(tape_plugin, "overlay_tape_format_click");
                 cvbs_trace_mode_watch(decoder, "overlay_tape_format_click");
                 return true;
             }
@@ -2294,16 +2626,7 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
                 decoder->overlay.selected_tape_format = i;
                 decoder->overlay.system_dropdown_open = false;
                 decoder->overlay.tape_format_dropdown_open = false;
-                if (i == 0) {
-                    decoder->overlay.selected_system = 0;
-                    gui_cvbs_set_format(decoder, 0);  // PAL
-                } else if (i == 1) {
-                    decoder->overlay.selected_system = 1;
-                    gui_cvbs_set_format(decoder, 1);  // NTSC
-                } else {
-                    decoder->overlay.selected_system = 0;
-                    gui_cvbs_set_format(decoder, 2);  // SECAM
-                }
+                video_tape_apply_runtime_args(tape_plugin, "overlay_tape_system_click");
                 cvbs_trace_mode_watch(decoder, "overlay_tape_system_click");
                 return true;
             }
@@ -2326,78 +2649,28 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
 
     // Levels mode button: toggle Auto <-> Fixed
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.level_btn_rect)) {
-        cvbs_level_mode_t old_level_mode = decoder->level_mode;
         decoder->overlay.system_dropdown_open = false;
         decoder->overlay.tape_dropdown_open = false;
         decoder->overlay.tape_format_dropdown_open = false;
-        if (decoder->level_mode == CVBS_LEVEL_MODE_FIXED) {
-            decoder->level_mode = CVBS_LEVEL_MODE_AUTO;
-            decoder->fixed_levels_valid = false;
-        } else {
-            decoder->level_mode = CVBS_LEVEL_MODE_FIXED;
-            bool have_current_levels =
-                (decoder->levels.range >= 100) ||
-                (decoder->adaptive.threshold != 0 &&
-                 decoder->adaptive.white > decoder->adaptive.sync_tip);
-            if (have_current_levels) {
-                int16_t black = decoder->levels.black_level;
-                int16_t white = decoder->levels.white_level;
-                if (white <= black) {
-                    black = decoder->adaptive.black;
-                    white = decoder->adaptive.white;
-                }
-                if (white <= black) {
-                    white = (int16_t)(black + 100);
-                }
-                decoder->fixed_black_level = black;
-                decoder->fixed_white_level = white;
-                decoder->fixed_levels_valid = true;
-            } else {
-                decoder->fixed_levels_valid = false;
-            }
+        const char *source = tape_ui
+                             ? "overlay_tape_level_click"
+                             : "overlay_level_click";
+        cvbs_decoder_cycle_level_mode(decoder, source);
+        if (tape_ui) {
+            video_tape_apply_runtime_args(tape_plugin, source);
         }
-        if (old_level_mode != decoder->level_mode) {
-            TraceLog(LOG_INFO,
-                     "CVBS MODE TRACE: source=overlay_click field=level_mode old=%s new=%s",
-                     cvbs_level_mode_name(old_level_mode),
-                     cvbs_level_mode_name(decoder->level_mode));
-        }
-        cvbs_trace_mode_watch(decoder, "overlay_level_click");
         return true;
     }
 
     // Sync mode button: toggle Auto <-> Fixed
     if (CheckCollisionPointRec(mouse_pos, decoder->overlay.sync_btn_rect)) {
-        cvbs_sync_mode_t old_sync_mode = decoder->sync_mode;
-        bool old_fixed_lock = decoder->fixed_sync_locked;
         decoder->overlay.system_dropdown_open = false;
         decoder->overlay.tape_dropdown_open = false;
         decoder->overlay.tape_format_dropdown_open = false;
-        if (decoder->sync_mode == CVBS_SYNC_MODE_FIXED) {
-            decoder->sync_mode = CVBS_SYNC_MODE_AUTO;
-        } else {
-            decoder->sync_mode = CVBS_SYNC_MODE_FIXED;
-        }
-        cvbs_reset_fixed_sync_lock(decoder);
-        decoder->pll.locked = false;
-        decoder->pll.good_sync_count = 0;
-        decoder->pll.bad_sync_count = 0;
-        decoder->pll.line_period = cvbs_nominal_line_period(decoder);
-        decoder->pll.phase_integral = 0.0;
-        decoder->pll.freq_adjust = 0.0;
-        if (old_sync_mode != decoder->sync_mode) {
-            TraceLog(LOG_INFO,
-                     "CVBS MODE TRACE: source=overlay_click field=sync_mode old=%s new=%s",
-                     cvbs_sync_mode_name(old_sync_mode),
-                     cvbs_sync_mode_name(decoder->sync_mode));
-        }
-        if (old_fixed_lock != decoder->fixed_sync_locked) {
-            TraceLog(LOG_INFO,
-                     "CVBS MODE TRACE: source=overlay_click field=fixed_sync_locked old=%d new=%d",
-                     old_fixed_lock ? 1 : 0,
-                     decoder->fixed_sync_locked ? 1 : 0);
-        }
-        cvbs_trace_mode_watch(decoder, "overlay_sync_click");
+        const char *source = tape_ui
+                             ? "overlay_tape_sync_click"
+                             : "overlay_sync_click";
+        cvbs_decoder_cycle_sync_mode(decoder, source);
         return true;
     }
 
@@ -2415,11 +2688,15 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
         for (int i = 0; i < 2; i++) {
             if (CheckCollisionPointRec(mouse_pos, decoder->overlay.system_options_rect[i])) {
                 decoder->overlay.selected_system = sys_values[i];
-                gui_cvbs_set_format(decoder, sys_values[i]);
-                if (sys_values[i] == 1) {
-                    decoder->overlay.selected_tape_format = 1; // NTSC
-                } else if (decoder->overlay.selected_tape_format == 1) {
-                    decoder->overlay.selected_tape_format = 0; // PAL fallback
+                if (tape_ui) {
+                    if (sys_values[i] == 1) {
+                        decoder->overlay.selected_tape_format = 1; // NTSC
+                    } else if (decoder->overlay.selected_tape_format == 1) {
+                        decoder->overlay.selected_tape_format = 0; // PAL fallback from NTSC
+                    }
+                    video_tape_apply_runtime_args(tape_plugin, "overlay_system_click");
+                } else {
+                    gui_cvbs_set_format(decoder, sys_values[i]);
                 }
                 decoder->overlay.system_dropdown_open = false;
                 return true;
@@ -2437,7 +2714,7 @@ static bool cvbs_vtable_handle_click(void *state, gui_app_t *app, int channel,
 //-----------------------------------------------------------------------------
 
 static const panel_vtable_t s_cvbs_vtable = {
-    .name = "CVBS",
+    .name = "Video",
 
     // Lifecycle
     .create = cvbs_vtable_create,

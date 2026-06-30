@@ -21,7 +21,7 @@
 static const char* s_view_names[] = {
     [PANEL_VIEW_WAVEFORM] = "Waveform",
     [PANEL_VIEW_FFT] = "FFT",
-    [PANEL_VIEW_CVBS] = "CVBS",
+    [PANEL_VIEW_CVBS] = "Video",
     [PANEL_VIEW_HISTOGRAM] = "Histogram",
 };
 
