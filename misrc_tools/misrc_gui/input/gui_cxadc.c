@@ -33,6 +33,13 @@
 static const PROPERTYKEY s_PKEY_Device_FriendlyName = {
     { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14
 };
+// PKEY_Device_InstanceId: returns device instance path like USB\VID_1209&PID_0002&MI_00\...
+static const PROPERTYKEY s_PKEY_Device_InstanceId = {
+    { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0xfc } }, 42
+};
+// cxadc-win clockgen USB identifiers (Raspberry Pi Pico + Si5351 clockgen mod).
+#define CXADC_CLOCKGEN_USB_VID_W L"vid_1209"
+#define CXADC_CLOCKGEN_USB_PID_W L"pid_0002"
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -453,24 +460,46 @@ static int cxadc_wasapi_parse_format(const WAVEFORMATEX *wfx, cxadc_ctx_t *ctx)
     return 0;
 }
 
-static bool cxadc_wasapi_name_matches(const wchar_t *name)
+// Match a WASAPI capture endpoint against the cxadc-win clockgen.
+// Checks (a) explicit env override, (b) USB instance path VID/PID, (c) friendly name.
+static bool cxadc_wasapi_device_matches(const wchar_t *friendly_name,
+                                        const wchar_t *instance_id)
 {
-    if (!name || !name[0]) return false;
     const char *env_device = getenv("MISRC_CXADC_WASAPI_DEVICE");
     if (env_device && env_device[0]) {
-        // Convert env var to wide and compare case-insensitively
         wchar_t env_w[256];
         int len = MultiByteToWideChar(CP_UTF8, 0, env_device, -1, env_w, 256);
-        if (len > 0 && _wcsicmp(name, env_w) == 0) return true;
-        // Also check substring match
-        if (len > 0 && wcsstr(name, env_w) != NULL) return true;
+        if (len > 0) {
+            if (friendly_name && _wcsicmp(friendly_name, env_w) == 0) return true;
+            if (friendly_name && wcsstr(friendly_name, env_w) != NULL) return true;
+            if (instance_id && wcsstr(instance_id, env_w) != NULL) return true;
+        }
     }
-    // Check for clockgen identifiers in device name
-    const wchar_t *patterns[] = { L"CXADC", L"ClockGen", L"Clockgen", L"clockgen", NULL };
-    for (int i = 0; patterns[i]; i++) {
-        if (wcsstr(name, patterns[i]) != NULL) return true;
+    // Clockgen mod is USB VID 1209 PID 0002 (Raspberry Pi Pico + Si5351).
+    if (instance_id) {
+        wchar_t id_lower[512];
+        wcsncpy(id_lower, instance_id, 511);
+        id_lower[511] = L'\0';
+        _wcslwr(id_lower);
+        if (wcsstr(id_lower, CXADC_CLOCKGEN_USB_VID_W) &&
+            wcsstr(id_lower, CXADC_CLOCKGEN_USB_PID_W)) {
+            return true;
+        }
+    }
+    // Fallback: match clockgen identifiers in friendly name.
+    if (friendly_name) {
+        const wchar_t *patterns[] = { L"CXADC", L"ClockGen", L"Clockgen", L"clockgen", NULL };
+        for (int i = 0; patterns[i]; i++) {
+            if (wcsstr(friendly_name, patterns[i]) != NULL) return true;
+        }
     }
     return false;
+}
+
+// Clockgen ADC supports 48000 or 46875 Hz (configurable via CxadcClockGen module).
+static bool cxadc_wasapi_rate_supported(uint32_t rate_hz)
+{
+    return rate_hz == 48000U || rate_hz == 46875U;
 }
 
 static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
@@ -516,19 +545,31 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
             continue;
         }
 
-        PROPVARIANT pv;
-        memset(&pv, 0, sizeof(pv));
-        hr = pProps->lpVtbl->GetValue(pProps, &s_PKEY_Device_FriendlyName, &pv);
-        if (SUCCEEDED(hr) && pv.vt == VT_LPWSTR && pv.pwszVal) {
-            if (cxadc_wasapi_name_matches(pv.pwszVal)) {
-                found = true;
-                snprintf(ctx->audio_device_name, sizeof(ctx->audio_device_name),
-                         "WASAPI:%ls", pv.pwszVal);
-            }
+        wchar_t *friendly_name_w = NULL;
+        PROPVARIANT pv_name;
+        memset(&pv_name, 0, sizeof(pv_name));
+        hr = pProps->lpVtbl->GetValue(pProps, &s_PKEY_Device_FriendlyName, &pv_name);
+        if (SUCCEEDED(hr) && pv_name.vt == VT_LPWSTR && pv_name.pwszVal) {
+            friendly_name_w = pv_name.pwszVal;
         }
-        if (pv.vt == VT_LPWSTR && pv.pwszVal) {
-            CoTaskMemFree(pv.pwszVal);
+
+        wchar_t *instance_id_w = NULL;
+        PROPVARIANT pv_id;
+        memset(&pv_id, 0, sizeof(pv_id));
+        hr = pProps->lpVtbl->GetValue(pProps, &s_PKEY_Device_InstanceId, &pv_id);
+        if (SUCCEEDED(hr) && pv_id.vt == VT_LPWSTR && pv_id.pwszVal) {
+            instance_id_w = pv_id.pwszVal;
         }
+
+        if (cxadc_wasapi_device_matches(friendly_name_w, instance_id_w)) {
+            found = true;
+            const wchar_t *label = friendly_name_w ? friendly_name_w : instance_id_w;
+            snprintf(ctx->audio_device_name, sizeof(ctx->audio_device_name),
+                     "WASAPI:%ls", label ? label : L"clockgen");
+        }
+
+        if (pv_name.vt == VT_LPWSTR && pv_name.pwszVal) CoTaskMemFree(pv_name.pwszVal);
+        if (pv_id.vt == VT_LPWSTR && pv_id.pwszVal) CoTaskMemFree(pv_id.pwszVal);
         pProps->lpVtbl->Release(pProps);
         if (!found) {
             pDevice->lpVtbl->Release(pDevice);
@@ -570,6 +611,15 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
         pEnum->lpVtbl->Release(pEnum);
         if (com_initialized) CoUninitialize();
         return -1;
+    }
+
+    // Clockgen ADC supports 48000 or 46875 Hz. Warn (but continue) if the
+    // device reports a different rate — the user may need to configure the
+    // clockgen ADC rate via the CxadcClockGen PowerShell module first.
+    if (!cxadc_wasapi_rate_supported(ctx->audio_sample_rate_hz)) {
+        fprintf(stderr, "[CXADC] WASAPI: device rate %u Hz is not 48000/46875; "
+                "configure clockgen ADC rate via CxadcClockGen module\n",
+                ctx->audio_sample_rate_hz);
     }
 
     REFERENCE_TIME buffer_duration = 500000; // 50ms in 100ns units
