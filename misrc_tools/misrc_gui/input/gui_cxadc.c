@@ -26,6 +26,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <propidl.h>
+// Define PKEY_Device_FriendlyName locally to avoid initguid conflicts.
+static const PROPERTYKEY s_PKEY_Device_FriendlyName = {
+    { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14
+};
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -48,7 +55,8 @@ typedef enum {
     CXADC_AUDIO_FMT_NONE = 0,
     CXADC_AUDIO_FMT_S24_3LE,
     CXADC_AUDIO_FMT_S32_LE,
-    CXADC_AUDIO_FMT_S16_LE
+    CXADC_AUDIO_FMT_S16_LE,
+    CXADC_AUDIO_FMT_FLOAT32
 } cxadc_audio_format_t;
 
 typedef struct {
@@ -59,16 +67,23 @@ typedef struct {
     thrd_t audio_thread;
     bool audio_thread_started;
     int card_count;
-#if defined(_WIN32)
-    HANDLE card_handles[CXADC_MAX_CARDS];
-#else
-    int card_fds[CXADC_MAX_CARDS];
-#if LIBASOUND_ENABLED
-    snd_pcm_t *audio_pcm;
+    // Audio format (shared across platforms)
     cxadc_audio_format_t audio_format;
     size_t audio_sample_bytes;
     uint32_t audio_sample_rate_hz;
     char audio_device_name[64];
+    int audio_channels;
+#if defined(_WIN32)
+    HANDLE card_handles[CXADC_MAX_CARDS];
+    // WASAPI clockgen audio capture
+    IMMDevice *audio_endpoint;
+    IAudioClient *audio_client;
+    IAudioCaptureClient *audio_capture;
+    bool audio_com_initialized;
+#else
+    int card_fds[CXADC_MAX_CARDS];
+#if LIBASOUND_ENABLED
+    snd_pcm_t *audio_pcm;
 #endif
 #endif
 } cxadc_ctx_t;
@@ -373,6 +388,265 @@ static void cxadc_close_audio_capture(cxadc_ctx_t *ctx)
     ctx->audio_sample_rate_hz = 0;
     ctx->audio_device_name[0] = '\0';
 }
+#elif defined(_WIN32)
+// --- WASAPI clockgen audio capture (cxadc-win) ---
+
+static const GUID s_KSDATAFORMAT_SUBTYPE_PCM =
+    { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID s_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT =
+    { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+
+static bool cxadc_guid_equal(const GUID *a, const GUID *b)
+{
+    return a->Data1 == b->Data1 && a->Data2 == b->Data2 &&
+           a->Data3 == b->Data3 && memcmp(a->Data4, b->Data4, 8) == 0;
+}
+
+static int cxadc_wasapi_parse_format(const WAVEFORMATEX *wfx, cxadc_ctx_t *ctx)
+{
+    if (!wfx || !ctx) return -1;
+
+    WORD bits = wfx->wBitsPerSample;
+    WORD valid_bits = bits;
+    WORD format_tag = wfx->wFormatTag;
+    bool is_float = false;
+
+    if (format_tag == WAVE_FORMAT_EXTENSIBLE && wfx->cbSize >= 22) {
+        WAVEFORMATEXTENSIBLE *wfxe = (WAVEFORMATEXTENSIBLE *)wfx;
+        valid_bits = wfxe->Samples.wValidBitsPerSample;
+        if (cxadc_guid_equal(&wfxe->SubFormat, &s_KSDATAFORMAT_SUBTYPE_PCM)) {
+            format_tag = WAVE_FORMAT_PCM;
+        } else if (cxadc_guid_equal(&wfxe->SubFormat, &s_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
+            is_float = true;
+        } else {
+            return -1;
+        }
+    } else if (format_tag == WAVE_FORMAT_IEEE_FLOAT) {
+        is_float = true;
+    } else if (format_tag != WAVE_FORMAT_PCM) {
+        return -1;
+    }
+
+    if (is_float) {
+        if (bits != 32) return -1;
+        ctx->audio_format = CXADC_AUDIO_FMT_FLOAT32;
+        ctx->audio_sample_bytes = 4;
+    } else if (valid_bits <= 16 && bits <= 16) {
+        ctx->audio_format = CXADC_AUDIO_FMT_S16_LE;
+        ctx->audio_sample_bytes = 2;
+    } else if (valid_bits <= 24 && bits <= 24) {
+        ctx->audio_format = CXADC_AUDIO_FMT_S24_3LE;
+        ctx->audio_sample_bytes = 3;
+    } else if (valid_bits <= 24 && bits <= 32) {
+        ctx->audio_format = CXADC_AUDIO_FMT_S32_LE;
+        ctx->audio_sample_bytes = 4;
+    } else if (valid_bits <= 32 && bits <= 32) {
+        ctx->audio_format = CXADC_AUDIO_FMT_S32_LE;
+        ctx->audio_sample_bytes = 4;
+    } else {
+        return -1;
+    }
+
+    ctx->audio_channels = (int)wfx->nChannels;
+    if (ctx->audio_channels < 1) ctx->audio_channels = 1;
+    ctx->audio_sample_rate_hz = (uint32_t)wfx->nSamplesPerSec;
+    return 0;
+}
+
+static bool cxadc_wasapi_name_matches(const wchar_t *name)
+{
+    if (!name || !name[0]) return false;
+    const char *env_device = getenv("MISRC_CXADC_WASAPI_DEVICE");
+    if (env_device && env_device[0]) {
+        // Convert env var to wide and compare case-insensitively
+        wchar_t env_w[256];
+        int len = MultiByteToWideChar(CP_UTF8, 0, env_device, -1, env_w, 256);
+        if (len > 0 && _wcsicmp(name, env_w) == 0) return true;
+        // Also check substring match
+        if (len > 0 && wcsstr(name, env_w) != NULL) return true;
+    }
+    // Check for clockgen identifiers in device name
+    const wchar_t *patterns[] = { L"CXADC", L"ClockGen", L"Clockgen", L"clockgen", NULL };
+    for (int i = 0; patterns[i]; i++) {
+        if (wcsstr(name, patterns[i]) != NULL) return true;
+    }
+    return false;
+}
+
+static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
+{
+    if (!ctx) return -1;
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        return -1;
+    }
+    bool com_initialized = SUCCEEDED(hr);
+
+    IMMDeviceEnumerator *pEnum = NULL;
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+                          &IID_IMMDeviceEnumerator, (void **)&pEnum);
+    if (FAILED(hr)) {
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    IMMDeviceCollection *pCollection = NULL;
+    hr = pEnum->lpVtbl->EnumAudioEndpoints(pEnum, eCapture, DEVICE_STATE_ACTIVE, &pCollection);
+    if (FAILED(hr)) {
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    UINT count = 0;
+    pCollection->lpVtbl->GetCount(pCollection, &count);
+
+    IMMDevice *pDevice = NULL;
+    bool found = false;
+    for (UINT i = 0; i < count && !found; i++) {
+        hr = pCollection->lpVtbl->Item(pCollection, i, &pDevice);
+        if (FAILED(hr)) continue;
+
+        IPropertyStore *pProps = NULL;
+        hr = pDevice->lpVtbl->OpenPropertyStore(pDevice, STGM_READ, &pProps);
+        if (FAILED(hr)) {
+            pDevice->lpVtbl->Release(pDevice);
+            pDevice = NULL;
+            continue;
+        }
+
+        PROPVARIANT pv;
+        memset(&pv, 0, sizeof(pv));
+        hr = pProps->lpVtbl->GetValue(pProps, &s_PKEY_Device_FriendlyName, &pv);
+        if (SUCCEEDED(hr) && pv.vt == VT_LPWSTR && pv.pwszVal) {
+            if (cxadc_wasapi_name_matches(pv.pwszVal)) {
+                found = true;
+                snprintf(ctx->audio_device_name, sizeof(ctx->audio_device_name),
+                         "WASAPI:%ls", pv.pwszVal);
+            }
+        }
+        if (pv.vt == VT_LPWSTR && pv.pwszVal) {
+            CoTaskMemFree(pv.pwszVal);
+        }
+        pProps->lpVtbl->Release(pProps);
+        if (!found) {
+            pDevice->lpVtbl->Release(pDevice);
+            pDevice = NULL;
+        }
+    }
+    pCollection->lpVtbl->Release(pCollection);
+
+    if (!found || !pDevice) {
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    IAudioClient *pClient = NULL;
+    hr = pDevice->lpVtbl->Activate(pDevice, &IID_IAudioClient, CLSCTX_ALL,
+                                   NULL, (void **)&pClient);
+    if (FAILED(hr)) {
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    WAVEFORMATEX *pwfx = NULL;
+    hr = pClient->lpVtbl->GetMixFormat(pClient, &pwfx);
+    if (FAILED(hr) || !pwfx) {
+        pClient->lpVtbl->Release(pClient);
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    if (cxadc_wasapi_parse_format(pwfx, ctx) != 0) {
+        CoTaskMemFree(pwfx);
+        pClient->lpVtbl->Release(pClient);
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    REFERENCE_TIME buffer_duration = 500000; // 50ms in 100ns units
+    hr = pClient->lpVtbl->Initialize(pClient, AUDCLNT_SHAREMODE_SHARED, 0,
+                                     buffer_duration, 0, pwfx, NULL);
+    CoTaskMemFree(pwfx);
+    if (FAILED(hr)) {
+        pClient->lpVtbl->Release(pClient);
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    IAudioCaptureClient *pCapture = NULL;
+    hr = pClient->lpVtbl->GetService(pClient, &IID_IAudioCaptureClient,
+                                     (void **)&pCapture);
+    if (FAILED(hr)) {
+        pClient->lpVtbl->Release(pClient);
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    hr = pClient->lpVtbl->Start(pClient);
+    if (FAILED(hr)) {
+        pCapture->lpVtbl->Release(pCapture);
+        pClient->lpVtbl->Release(pClient);
+        pDevice->lpVtbl->Release(pDevice);
+        pEnum->lpVtbl->Release(pEnum);
+        if (com_initialized) CoUninitialize();
+        return -1;
+    }
+
+    ctx->audio_endpoint = pDevice;
+    ctx->audio_client = pClient;
+    ctx->audio_capture = pCapture;
+    ctx->audio_com_initialized = com_initialized;
+    pEnum->lpVtbl->Release(pEnum);
+    return 0;
+}
+
+static void cxadc_abort_audio_capture(cxadc_ctx_t *ctx)
+{
+    if (!ctx || !ctx->audio_client) return;
+    ctx->audio_client->lpVtbl->Stop(ctx->audio_client);
+}
+
+static void cxadc_close_audio_capture(cxadc_ctx_t *ctx)
+{
+    if (!ctx) return;
+    if (ctx->audio_client) {
+        ctx->audio_client->lpVtbl->Stop(ctx->audio_client);
+    }
+    if (ctx->audio_capture) {
+        ctx->audio_capture->lpVtbl->Release(ctx->audio_capture);
+        ctx->audio_capture = NULL;
+    }
+    if (ctx->audio_client) {
+        ctx->audio_client->lpVtbl->Release(ctx->audio_client);
+        ctx->audio_client = NULL;
+    }
+    if (ctx->audio_endpoint) {
+        ctx->audio_endpoint->lpVtbl->Release(ctx->audio_endpoint);
+        ctx->audio_endpoint = NULL;
+    }
+    ctx->audio_format = CXADC_AUDIO_FMT_NONE;
+    ctx->audio_sample_bytes = 0;
+    ctx->audio_sample_rate_hz = 0;
+    ctx->audio_channels = 0;
+    ctx->audio_device_name[0] = '\0';
+    if (ctx->audio_com_initialized) {
+        CoUninitialize();
+        ctx->audio_com_initialized = false;
+    }
+}
 #else
 static int cxadc_open_audio_capture(cxadc_ctx_t *ctx) { (void)ctx; return -1; }
 static void cxadc_abort_audio_capture(cxadc_ctx_t *ctx) { (void)ctx; }
@@ -385,7 +659,101 @@ static int cxadc_audio_capture_thread(void *ctx_ptr)
     if (!ctx || !ctx->app) return -1;
     gui_app_t *app = ctx->app;
 
-#if defined(_WIN32) || !LIBASOUND_ENABLED
+#if defined(_WIN32)
+    if (!ctx->audio_capture || !ctx->audio_client ||
+        ctx->audio_format == CXADC_AUDIO_FMT_NONE || ctx->audio_sample_bytes == 0) {
+        return 0;
+    }
+
+    thrd_set_priority(THRD_PRIORITY_ABOVE);
+    int dev_channels = ctx->audio_channels;
+    if (dev_channels < 1) dev_channels = 1;
+    size_t input_frame_bytes = (size_t)dev_channels * ctx->audio_sample_bytes;
+
+    while (atomic_load(&ctx->running) && app->is_capturing && !atomic_load(&do_exit)) {
+        UINT32 packet_frames = 0;
+        HRESULT hr = ctx->audio_capture->lpVtbl->GetNextPacketSize(ctx->audio_capture, &packet_frames);
+        if (FAILED(hr)) {
+            gui_app_set_status(app, "CXADC WASAPI audio read error");
+            break;
+        }
+        if (packet_frames == 0) {
+            thrd_sleep_ms(1);
+            continue;
+        }
+
+        while (packet_frames > 0) {
+            BYTE *data = NULL;
+            UINT32 frames_available = 0;
+            DWORD flags = 0;
+
+            hr = ctx->audio_capture->lpVtbl->GetBuffer(ctx->audio_capture, &data,
+                                                       &frames_available, &flags,
+                                                       NULL, NULL);
+            if (FAILED(hr)) {
+                gui_app_set_status(app, "CXADC WASAPI GetBuffer error");
+                goto cxadc_wasapi_done;
+            }
+
+            if (data && frames_available > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+                size_t output_bytes = (size_t)frames_available * CXADC_AUDIO_PACKED_FRAME_BYTES;
+                uint8_t *out = (uint8_t *)bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO,
+                                                             output_bytes, NULL);
+                if (out) {
+                    for (UINT32 i = 0; i < frames_available; i++) {
+                        const uint8_t *src_frame = data + ((size_t)i * input_frame_bytes);
+                        uint8_t *dst_frame = out + ((size_t)i * CXADC_AUDIO_PACKED_FRAME_BYTES);
+                        for (int ch = 0; ch < CXADC_AUDIO_CHANNEL_COUNT; ch++) {
+                            uint8_t *dst = dst_frame + ((size_t)ch * 3);
+                            if (ch < dev_channels) {
+                                const uint8_t *src = src_frame + ((size_t)ch * ctx->audio_sample_bytes);
+                                if (ctx->audio_format == CXADC_AUDIO_FMT_S24_3LE) {
+                                    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                                } else if (ctx->audio_format == CXADC_AUDIO_FMT_S32_LE) {
+                                    int32_t s32 = (int32_t)((uint32_t)src[0] |
+                                                            ((uint32_t)src[1] << 8) |
+                                                            ((uint32_t)src[2] << 16) |
+                                                            ((uint32_t)src[3] << 24));
+                                    cxadc_store_s24le(dst, s32 >> 8);
+                                } else if (ctx->audio_format == CXADC_AUDIO_FMT_S16_LE) {
+                                    int16_t s16 = (int16_t)((uint16_t)src[0] | ((uint16_t)src[1] << 8));
+                                    cxadc_store_s24le(dst, ((int32_t)s16) << 8);
+                                } else if (ctx->audio_format == CXADC_AUDIO_FMT_FLOAT32) {
+                                    float f;
+                                    memcpy(&f, src, 4);
+                                    int32_t s32 = (int32_t)(f * 8388607.0f);
+                                    cxadc_store_s24le(dst, s32);
+                                } else {
+                                    dst[0] = dst[1] = dst[2] = 0;
+                                }
+                            } else {
+                                dst[0] = dst[1] = dst[2] = 0;
+                            }
+                        }
+                        dst_frame[9] = 0;
+                        dst_frame[10] = 0;
+                        dst_frame[11] = 0;
+                    }
+                    bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, output_bytes);
+                    bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
+                    atomic_store(&app->audio_sample_rate, ctx->audio_sample_rate_hz);
+                    atomic_store(&app->last_callback_time_ms, get_time_ms());
+                } else {
+                    atomic_fetch_add(&app->rb_drop_count, 1);
+                }
+            }
+
+            ctx->audio_capture->lpVtbl->ReleaseBuffer(ctx->audio_capture, frames_available);
+            hr = ctx->audio_capture->lpVtbl->GetNextPacketSize(ctx->audio_capture, &packet_frames);
+            if (FAILED(hr)) {
+                packet_frames = 0;
+                break;
+            }
+        }
+    }
+cxadc_wasapi_done:
+    return 0;
+#elif !LIBASOUND_ENABLED
     (void)app;
     return 0;
 #else
@@ -571,18 +939,24 @@ int gui_cxadc_start(gui_app_t *app, int card_count)
     for (int i = 0; i < CXADC_MAX_CARDS; i++) {
         s_cxadc.card_handles[i] = INVALID_HANDLE_VALUE;
     }
+    s_cxadc.audio_endpoint = NULL;
+    s_cxadc.audio_client = NULL;
+    s_cxadc.audio_capture = NULL;
+    s_cxadc.audio_com_initialized = false;
 #else
     for (int i = 0; i < CXADC_MAX_CARDS; i++) {
         s_cxadc.card_fds[i] = -1;
     }
 #if LIBASOUND_ENABLED
     s_cxadc.audio_pcm = NULL;
+#endif
+#endif
+    // Shared audio format fields (zeroed by memset, set explicitly for clarity)
     s_cxadc.audio_format = CXADC_AUDIO_FMT_NONE;
     s_cxadc.audio_sample_bytes = 0;
     s_cxadc.audio_sample_rate_hz = 0;
+    s_cxadc.audio_channels = 0;
     s_cxadc.audio_device_name[0] = '\0';
-#endif
-#endif
 
     if (cxadc_open_cards(&s_cxadc, card_count) != 0) {
         gui_app_set_status(app, "CXADC: failed to open card device(s)");
@@ -608,14 +982,15 @@ int gui_cxadc_start(gui_app_t *app, int card_count)
         if (s_cxadc.audio_sample_rate_hz > 0) {
             atomic_store(&app->audio_sample_rate, s_cxadc.audio_sample_rate_hz);
         }
-#if !defined(_WIN32) && LIBASOUND_ENABLED
-        fprintf(stderr, "[CXADC] ALSA audio capture device: %s (%u Hz)\n",
+#if defined(_WIN32) || LIBASOUND_ENABLED
+        fprintf(stderr, "[CXADC] audio capture device: %s (%u Hz, %d ch)\n",
                 s_cxadc.audio_device_name,
-                s_cxadc.audio_sample_rate_hz);
+                s_cxadc.audio_sample_rate_hz,
+                s_cxadc.audio_channels);
 #endif
     } else {
-#if !defined(_WIN32) && LIBASOUND_ENABLED
-        fprintf(stderr, "[CXADC] ALSA clockgen audio device not available; continuing RF-only\n");
+#if defined(_WIN32) || LIBASOUND_ENABLED
+        fprintf(stderr, "[CXADC] clockgen audio device not available; continuing RF-only\n");
 #endif
     }
 
@@ -662,9 +1037,7 @@ int gui_cxadc_start(gui_app_t *app, int card_count)
                                       cxadc_audio_capture_thread,
                                       &s_cxadc,
                                       THRD_PRIORITY_ABOVE) != thrd_success) {
-#if !defined(_WIN32) && LIBASOUND_ENABLED
-            fprintf(stderr, "[CXADC] Failed to start ALSA audio capture thread; continuing RF-only\n");
-#endif
+            fprintf(stderr, "[CXADC] Failed to start audio capture thread; continuing RF-only\n");
             cxadc_close_audio_capture(&s_cxadc);
         } else {
             s_cxadc.audio_thread_started = true;
