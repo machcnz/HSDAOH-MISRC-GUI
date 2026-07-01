@@ -1,7 +1,9 @@
 # MISRC - Multi Input Simultaneous Raw RF Capture
 
 **What is new in this fork:**
-This fork adds hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture hardware.
+This fork adds: 
+1. hsdaoh support to misrc_gui for use with Steve-M 12-bit 40 MSPS capture hardware.
+2. Cxcard & Clockgen/PCM1802 Audio ADC support (requires: https://github.com/JuniorIsAJitterbug/cxadc-win/tree/master)
 
 [Hardware](#hardware-features) - [Firmware](#firmware-tang-nano-20k) - [Software](#software) - [Usage example](#capture--usage-example)
 
