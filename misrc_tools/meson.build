@@ -170,6 +170,29 @@ else
   endif
 endif
 
+# CXADC support (CX2388x raw ADC capture card)
+# Linux:   character device /dev/cxadcN + sysfs + ALSA for PCM1802 audio
+# Windows: \\.\cxadcN via cxadc-win driver + WASAPI for PCM1802 audio
+# No compile-time library dependency - device access is pure syscalls/IOCTL.
+# ALSA is needed on Linux for PCM1802 audio capture.
+cxadc_enabled = false
+if host_system == 'linux'
+  alsa_dep = dependency('alsa', required : false)
+  if alsa_dep.found()
+    deps += [ alsa_dep ]
+    cflags += ['-DENABLE_CXADC=1']
+    cxadc_enabled = true
+    message('ALSA found, building with CXADC support (including PCM1802 audio)')
+  else
+    message('ALSA not found, building without CXADC support')
+  endif
+elif host_system == 'windows' or host_system == 'cygwin'
+  # Windows: WASAPI is always available via Windows SDK, no external dep needed
+  cflags += ['-DENABLE_CXADC=1']
+  cxadc_enabled = true
+  message('Building with CXADC support (Windows, WASAPI for PCM1802 audio)')
+endif
+
 
 if host_system == 'windows' or host_system == 'cygwin'
   if meson.get_compiler('c').get_id() != 'gcc' and meson.get_compiler('c').get_id() != 'clang'
@@ -264,6 +287,12 @@ if raylib_dep.found()
     sources_gui += 'misrc_gui/input/gui_fx3.c'
   endif
 
+  # Add CXADC support to GUI if enabled
+  if cxadc_enabled
+    sources_gui += 'misrc_gui/input/gui_cxadc.c'
+    sources_gui += 'misrc_gui/input/gui_cxadc_pcm1802.c'
+  endif
+
   gui_deps = deps + [ raylib_dep ]
   if fftw3f_dep.found()
     gui_deps += [ fftw3f_dep ]
@@ -286,6 +315,10 @@ if raylib_dep.found()
     # simple_capture for device enumeration
     sources_gui += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
     gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32']
+    # avrt needed for AvSetMmThreadCharacteristics in PCM1802 WASAPI audio
+    if cxadc_enabled
+      gui_ldflags += ['-lavrt']
+    endif
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
     sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
@@ -295,7 +328,7 @@ if raylib_dep.found()
     sources_gui += 'misrc_capture/simple_capture/simple_capture_avfoundation.m'
   endif
 
-  gui_includes = include_directories('misrc_gui/ui')
+  gui_includes = include_directories('misrc_gui/ui', 'misrc_gui/input')
   gui_win_subsystem = 'console'
   if host_system == 'windows' or host_system == 'cygwin'
     gui_win_subsystem = 'windows'

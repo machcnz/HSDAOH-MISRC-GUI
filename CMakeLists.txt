@@ -176,6 +176,30 @@ set(GUI_INPUT_SOURCES
     misrc_tools/misrc_gui/input/gui_playback.c
 )
 
+# CXADC support (CX2388x raw ADC capture card)
+# Linux: gated on ALSA (for PCM1802 audio). Windows: always enabled (WASAPI built-in).
+if(IS_WINDOWS)
+    list(APPEND GUI_INPUT_SOURCES
+        misrc_tools/misrc_gui/input/gui_cxadc.c
+        misrc_tools/misrc_gui/input/gui_cxadc_pcm1802.c
+    )
+    set(ENABLE_CXADC TRUE)
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND OR PKG_CONFIG_FOUND)
+        pkg_check_modules(ALSA QUIET alsa)
+    endif()
+    if(ALSA_FOUND)
+        list(APPEND GUI_INPUT_SOURCES
+            misrc_tools/misrc_gui/input/gui_cxadc.c
+            misrc_tools/misrc_gui/input/gui_cxadc_pcm1802.c
+        )
+        set(ENABLE_CXADC TRUE)
+    else()
+        set(ENABLE_CXADC FALSE)
+    endif()
+endif()
+
 file(GLOB GUI_OUTPUT_SOURCES
     misrc_tools/misrc_gui/output/*.c
 )
@@ -249,6 +273,18 @@ if(FFTW3F_FOUND)
     target_include_directories(misrc_gui PRIVATE ${FFTW3F_INCLUDE_DIRS})
     target_link_libraries(misrc_gui PRIVATE ${FFTW3F_LIBRARIES})
     target_compile_definitions(misrc_gui PRIVATE HAVE_FFTW3F=1 LIBFFTW_ENABLED=1)
+endif()
+
+if(ENABLE_CXADC)
+    target_compile_definitions(misrc_gui PRIVATE ENABLE_CXADC=1)
+    if(NOT IS_WINDOWS AND ALSA_FOUND)
+        target_include_directories(misrc_gui PRIVATE ${ALSA_INCLUDE_DIRS})
+        target_link_libraries(misrc_gui PRIVATE ${ALSA_LIBRARIES})
+    endif()
+    if(IS_WINDOWS)
+        # avrt needed for AvSetMmThreadCharacteristics in PCM1802 WASAPI audio
+        target_link_libraries(misrc_gui PRIVATE avrt)
+    endif()
 endif()
 
 # ========================================

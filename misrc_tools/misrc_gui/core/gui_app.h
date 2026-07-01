@@ -130,7 +130,10 @@ typedef enum {
     DEVICE_TYPE_SIMULATED,      // Simulated device for testing
     DEVICE_TYPE_PLAYBACK,       // Playback from recorded FLAC files
 #ifdef ENABLE_FX3
-    DEVICE_TYPE_FX3             // Cypress FX3 USB device
+    DEVICE_TYPE_FX3,            // Cypress FX3 USB device
+#endif
+#ifdef ENABLE_CXADC
+    DEVICE_TYPE_CXADC           // CX2388x raw ADC capture card
 #endif
 } device_type_t;
 
@@ -271,6 +274,20 @@ typedef struct gui_app {
     atomic_bool fx3_running;       // Flag for FX3 capture mode
 #endif
 
+#ifdef ENABLE_CXADC
+    // CXADC device state
+    void *cxadc_dev;               // CXADC device handle (platform file/handle)
+    void *cxadc_thread;            // CXADC capture thread handle
+    atomic_bool cxadc_running;     // Flag for CXADC capture mode
+    int cxadc_device_index;        // Index of open device (0-3), used for sysfs path on Linux
+
+    // Paired PCM1802 clockgen audio device state (auto-opened alongside CX)
+    void *cxadc_audio_dev;         // Audio device handle (platform-specific)
+    void *cxadc_audio_thread;      // Audio capture thread handle
+    atomic_bool cxadc_audio_running; // Flag for audio capture mode
+    atomic_bool cxadc_audio_available; // True if clockgen audio device was found and opened
+#endif
+
     // Capture state
     bool is_capturing;
     bool is_recording;
@@ -311,6 +328,7 @@ typedef struct gui_app {
     atomic_uint_fast32_t clip_count_b_neg;
     atomic_bool stream_synced;
     atomic_uint_fast32_t sample_rate;
+    atomic_uint_fast32_t audio_sample_rate;  // PCM1802: 48000, HSDAOH: 78125 (or from stream)
 
     // Audio monitoring peaks (24-bit audio magnitude, per channel 1..4)
     atomic_uint_fast32_t audio_peak[4];

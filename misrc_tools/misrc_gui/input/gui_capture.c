@@ -25,6 +25,9 @@
 #ifdef ENABLE_FX3
 #include "gui_fx3.h"
 #endif
+#ifdef ENABLE_CXADC
+#include "gui_cxadc.h"
+#endif
 #include "../visualization/gui_panel.h"
 #include "../visualization/panel_interface.h"
 #include "../visualization/gui_histogram_panel.h"
@@ -812,6 +815,24 @@ void gui_app_enumerate_devices(gui_app_t *app) {
 
     misrc_device_list_free(&devices);
 
+#ifdef ENABLE_CXADC
+    // CXADC devices are self-contained (no dependency on the shared
+    // misrc_device_enum library) - enumerated separately and appended,
+    // same pattern as Simulated/Playback below.
+    {
+        cxadc_device_info_t cx_devices[CXADC_GUI_MAX_DEVICES];
+        int cx_count = gui_cxadc_enumerate(cx_devices, CXADC_GUI_MAX_DEVICES);
+        for (int i = 0; i < cx_count && app->device_count < MAX_DEVICES; i++) {
+            device_info_t *dst = &app->devices[app->device_count];
+            snprintf(dst->name, sizeof(dst->name), "[CXADC] %s", cx_devices[i].name);
+            dst->type = DEVICE_TYPE_CXADC;
+            dst->index = cx_devices[i].index;
+            dst->serial[0] = '\0';
+            app->device_count++;
+        }
+    }
+#endif
+
     // Always add simulated device at the end
     if (app->device_count < MAX_DEVICES) {
         device_info_t *dst = &app->devices[app->device_count];
@@ -921,6 +942,7 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
                 fprintf(stderr, "[AUDIO] Sample rate: %u Hz\n", data_info->srate);
                 rate_logged = 1;
             }
+            atomic_store(&app->audio_sample_rate, data_info->srate);
         }
         
         return;
@@ -986,6 +1008,50 @@ int gui_app_start_capture(gui_app_t *app) {
             gui_capture_hold_power_assertions();
         }
         return fx3_rc;
+    }
+#endif
+
+#ifdef ENABLE_CXADC
+    // Handle CXADC device
+    if (dev->type == DEVICE_TYPE_CXADC) {
+        // Open CX card first
+        int r = gui_cxadc_open(app, dev->index);
+        if (r < 0) {
+            gui_app_set_status(app, "Failed to open CXADC device");
+            return -1;
+        }
+        int cxadc_rc = gui_cxadc_start(app);
+        if (cxadc_rc != 0) {
+            gui_cxadc_close(app);
+            return cxadc_rc;
+        }
+        // Auto-pair clockgen PCM1802 audio device, per accepted design
+        // (Option A: one device-list entry, audio paired automatically,
+        // no second dropdown). Failure here is non-fatal - video capture
+        // proceeds, audio simply stays silent.
+        int pcm_rc = gui_cxadc_pcm1802_open(app);
+        fprintf(stderr, "[CXADC] PCM1802 open returned: %d\n", pcm_rc);
+        if (pcm_rc == 0) {
+            int start_rc = gui_cxadc_pcm1802_start(app);
+            fprintf(stderr, "[CXADC] PCM1802 start returned: %d\n", start_rc);
+            if (start_rc == 0) {
+                atomic_store(&app->cxadc_audio_available, true);
+            } else {
+                gui_cxadc_pcm1802_close(app);
+                atomic_store(&app->cxadc_audio_available, false);
+            }
+        } else {
+            fprintf(stderr, "[CXADC] PCM1802 not found (non-fatal, video continues)\n");
+            atomic_store(&app->cxadc_audio_available, false);
+        }
+
+        // Start audio monitoring thread - reads BUF_CAPTURE_AUDIO and plays
+        // through speakers. Resampler uses audio_sample_rate (set by PCM1802
+        // open to 48000) so ratio will be 48000->48000 (passthrough).
+        (void)gui_audio_start(app, &app->buffers);
+
+        gui_capture_hold_power_assertions();
+        return cxadc_rc;
     }
 #endif
 
@@ -1231,6 +1297,29 @@ void gui_app_stop_capture(gui_app_t *app) {
 #ifdef ENABLE_FX3
     if (dev->type == DEVICE_TYPE_FX3) {
         gui_fx3_stop(app);
+        gui_app_clear_display(app);
+        return;
+    }
+#endif
+#ifdef ENABLE_CXADC
+    if (dev->type == DEVICE_TYPE_CXADC) {
+        // Set is_capturing false FIRST so audio consumer thread sees it
+        // and exits on next timeout cycle
+        app->is_capturing = false;
+
+        // Stop producers before consumer:
+        // 1. RF producer (capture thread)
+        gui_cxadc_stop(app);
+        gui_cxadc_close(app);
+        // 2. Audio producer (PCM1802 thread)
+        if (atomic_load(&app->cxadc_audio_available)) {
+            gui_cxadc_pcm1802_stop(app);
+            gui_cxadc_pcm1802_close(app);
+            atomic_store(&app->cxadc_audio_available, false);
+        }
+        // 3. Audio consumer (drains finite residual buffer, then exits)
+        gui_audio_stop(app);
+
         gui_app_clear_display(app);
         return;
     }

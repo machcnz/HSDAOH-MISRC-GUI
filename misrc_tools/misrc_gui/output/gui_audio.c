@@ -47,8 +47,9 @@ static AudioStream s_play_stream;
 static bool s_play_stream_inited = false;
 static bool s_audio_device_inited = false;
 
-// Resampler for 78.125kHz -> 48kHz conversion
+// Resampler for source_rate -> 48kHz conversion
 static soxr_t s_resampler = NULL;
+static double s_resampler_source_rate = 0.0;  // rate the resampler was created for
 
 // Simple lock-free SPSC ring for stereo int16 samples (interleaved) at 48kHz
 #define PLAY_Q_FRAMES (96000) // ~2 seconds at 48kHz
@@ -151,7 +152,16 @@ static void audio_update_peaks(gui_app_t *app, const uint8_t *buf, size_t len)
 static int audio_thread_main(void *ctx)
 {
     audio_ctx_t *a = (audio_ctx_t *)ctx;
-    size_t len = BUFFER_AUDIO_READ_SIZE;
+    // Adaptive read size: HSDAOH at 78125Hz fills the buffer fast, so large
+    // reads are fine. PCM1802 at 48kHz delivers in ~10ms WASAPI events
+    // (~480 frames per event). Read in small chunks to avoid blocking.
+    uint32_t arate = (a->app) ? atomic_load(&a->app->audio_sample_rate) : 0;
+    size_t len;
+    if (arate > 0 && arate <= 48000) {
+        len = 480 * 12;  // ~10ms at 48kHz, 12 bytes/frame = 5760 bytes (one WASAPI event)
+    } else {
+        len = BUFFER_AUDIO_READ_SIZE;  // 196608 bytes (~167ms at 78125Hz)
+    }
     void *buf;
     thrd_set_priority(THRD_PRIORITY_CRITICAL);
     
@@ -259,8 +269,9 @@ static int audio_thread_main(void *ctx)
                 tmp_78khz[i * 2 + 1] = s16;
             }
             
-            // Resample 78.125kHz -> 48kHz
-            size_t frames_48khz_max = (size_t)((double)frames_78khz * 48000.0 / 78125.0) + 32;
+            // Resample source_rate -> 48kHz
+            double ratio = 48000.0 / s_resampler_source_rate;
+            size_t frames_48khz_max = (size_t)((double)frames_78khz * ratio) + 32;
             if (frames_48khz_max * 2 > 65536) {
                 fprintf(stderr, "[AUDIO] Output buffer too large: %zu frames\n", frames_48khz_max);
                 goto skip_monitoring;
@@ -361,9 +372,11 @@ skip_file_ops:
         // RECORDING JUST STOPPED - close files and write headers
         if (was_recording && !is_recording) {
             wave_header_t h;
+            uint32_t wav_rate = (a->app) ? atomic_load(&a->app->audio_sample_rate) : 0;
+            if (wav_rate == 0) wav_rate = 78125;
             if (a->f_4ch && a->f_4ch != stdout) {
                 fseek(a->f_4ch, 0, SEEK_SET);
-                create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
+                create_wave_header(&h, a->total_bytes / 12, wav_rate, 4, 24);
                 fwrite(&h, 1, sizeof(h), a->f_4ch);
                 fclose(a->f_4ch);
                 a->f_4ch = NULL;
@@ -371,7 +384,7 @@ skip_file_ops:
             for (int i = 0; i < 2; i++) {
                 if (a->f_2ch[i] && a->f_2ch[i] != stdout) {
                     fseek(a->f_2ch[i], 0, SEEK_SET);
-                    create_wave_header(&h, a->total_bytes / 12, 78125, 2, 24);
+                    create_wave_header(&h, a->total_bytes / 12, wav_rate, 2, 24);
                     fwrite(&h, 1, sizeof(h), a->f_2ch[i]);
                     fclose(a->f_2ch[i]);
                     a->f_2ch[i] = NULL;
@@ -380,7 +393,7 @@ skip_file_ops:
             for (int i = 0; i < 4; i++) {
                 if (a->f_1ch[i] && a->f_1ch[i] != stdout) {
                     fseek(a->f_1ch[i], 0, SEEK_SET);
-                    create_wave_header(&h, a->total_bytes / 12, 78125, 1, 24);
+                    create_wave_header(&h, a->total_bytes / 12, wav_rate, 1, 24);
                     fwrite(&h, 1, sizeof(h), a->f_1ch[i]);
                     fclose(a->f_1ch[i]);
                     a->f_1ch[i] = NULL;
@@ -410,23 +423,29 @@ skip_file_ops:
 
     // Cleanup at thread exit
     if (a->f_4ch && a->f_4ch != stdout) {
+        uint32_t exit_rate = (a->app) ? atomic_load(&a->app->audio_sample_rate) : 0;
+        if (exit_rate == 0) exit_rate = 78125;
         fseek(a->f_4ch, 0, SEEK_SET);
-        create_wave_header(&h, a->total_bytes / 12, 78125, 4, 24);
+        create_wave_header(&h, a->total_bytes / 12, exit_rate, 4, 24);
         fwrite(&h, 1, sizeof(h), a->f_4ch);
         fclose(a->f_4ch);
     }
     for (int i = 0; i < 2; i++) {
         if (a->f_2ch[i] && a->f_2ch[i] != stdout) {
+            uint32_t exit_rate = (a->app) ? atomic_load(&a->app->audio_sample_rate) : 0;
+            if (exit_rate == 0) exit_rate = 78125;
             fseek(a->f_2ch[i], 0, SEEK_SET);
-            create_wave_header(&h, a->total_bytes / 12, 78125, 2, 24);
+            create_wave_header(&h, a->total_bytes / 12, exit_rate, 2, 24);
             fwrite(&h, 1, sizeof(h), a->f_2ch[i]);
             fclose(a->f_2ch[i]);
         }
     }
     for (int i = 0; i < 4; i++) {
         if (a->f_1ch[i] && a->f_1ch[i] != stdout) {
+            uint32_t exit_rate = (a->app) ? atomic_load(&a->app->audio_sample_rate) : 0;
+            if (exit_rate == 0) exit_rate = 78125;
             fseek(a->f_1ch[i], 0, SEEK_SET);
-            create_wave_header(&h, a->total_bytes / 12, 78125, 1, 24);
+            create_wave_header(&h, a->total_bytes / 12, exit_rate, 1, 24);
             fwrite(&h, 1, sizeof(h), a->f_1ch[i]);
             fclose(a->f_1ch[i]);
         }
@@ -587,17 +606,29 @@ void gui_audio_update_playback(gui_app_t *app)
     }
 
     if (!s_play_stream_inited) {
-        // Create resampler 78.125kHz -> 48kHz, stereo int16
+        // Create resampler source_rate -> 48kHz, stereo int16
+        // Use audio_sample_rate from app (78125 for HSDAOH, 48000 for PCM1802)
+        uint32_t src_rate = app ? atomic_load(&app->audio_sample_rate) : 0;
+        if (src_rate == 0) src_rate = 78125;  // fallback to HSDAOH default
+        double source_rate = (double)src_rate;
+
+        // Recreate resampler if rate changed from previous session
+        if (s_resampler && s_resampler_source_rate != source_rate) {
+            soxr_delete(s_resampler);
+            s_resampler = NULL;
+        }
+
         if (!s_resampler) {
             soxr_error_t err = NULL;
             soxr_io_spec_t io_spec = soxr_io_spec(SOXR_INT16_I, SOXR_INT16_I);
             soxr_quality_spec_t qual = soxr_quality_spec(SOXR_HQ, 0);
-            s_resampler = soxr_create(78125.0, 48000.0, 2, &err, &io_spec, &qual, NULL);
+            s_resampler = soxr_create(source_rate, 48000.0, 2, &err, &io_spec, &qual, NULL);
             if (err) {
                 fprintf(stderr, "[AUDIO] Failed to create resampler: %s\n", soxr_strerror(err));
                 s_resampler = NULL;
             } else {
-                fprintf(stderr, "[AUDIO] Created resampler 78.125kHz -> 48kHz\n");
+                s_resampler_source_rate = source_rate;
+                fprintf(stderr, "[AUDIO] Created resampler %.3fkHz -> 48kHz\n", source_rate / 1000.0);
             }
         }
         
@@ -609,6 +640,30 @@ void gui_audio_update_playback(gui_app_t *app)
         PlayAudioStream(s_play_stream);
         s_play_stream_inited = true;
         fprintf(stderr, "[AUDIO] Initialized playback stream at 48kHz (buffer: 4096 frames)\n");
+    }
+
+    // Check if audio_sample_rate changed after initial setup (race: main loop
+    // may have created resampler at fallback 78125 before PCM1802 set 48000).
+    // Recreate resampler if the rate no longer matches.
+    {
+        uint32_t current_rate = app ? atomic_load(&app->audio_sample_rate) : 0;
+        if (current_rate > 0 && (double)current_rate != s_resampler_source_rate) {
+            if (s_resampler) {
+                soxr_delete(s_resampler);
+                s_resampler = NULL;
+            }
+            double source_rate = (double)current_rate;
+            soxr_error_t err = NULL;
+            soxr_io_spec_t io_spec = soxr_io_spec(SOXR_INT16_I, SOXR_INT16_I);
+            soxr_quality_spec_t qual = soxr_quality_spec(SOXR_HQ, 0);
+            s_resampler = soxr_create(source_rate, 48000.0, 2, &err, &io_spec, &qual, NULL);
+            if (!err) {
+                s_resampler_source_rate = source_rate;
+                fprintf(stderr, "[AUDIO] Resampler rate corrected to %.3fkHz -> 48kHz\n", source_rate / 1000.0);
+            } else {
+                fprintf(stderr, "[AUDIO] Failed to recreate resampler: %s\n", soxr_strerror(err));
+            }
+        }
     }
 
     if (!IsAudioStreamPlaying(s_play_stream)) {
