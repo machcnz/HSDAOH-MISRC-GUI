@@ -905,6 +905,8 @@ void gui_app_init(gui_app_t *app) {
     atomic_store(&app->audio_sample_rate, DEFAULT_AUDIO_SAMPLE_RATE);
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    app->low_signal_time = 0.0f;
+    app->low_signal_armed = false;
     TraceLog(LOG_INFO, "APP INIT: sample_rate set to %u", DEFAULT_SAMPLE_RATE);
 
     // Initialize trigger state for channel A
@@ -1374,6 +1376,8 @@ int gui_app_start_capture(gui_app_t *app) {
     atomic_store(&app->last_callback_time_ms, get_time_ms());
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    app->low_signal_time = 0.0f;
+    app->low_signal_armed = false;
     atomic_store(&app->recording_bytes, 0);
     atomic_store(&app->recording_raw_a, 0);
     atomic_store(&app->recording_raw_b, 0);
@@ -1636,6 +1640,8 @@ void gui_app_stop_capture(gui_app_t *app) {
     atomic_store(&app->stream_synced, false);
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    app->low_signal_time = 0.0f;
+    app->low_signal_armed = false;
     s_capture_missed_streak = 0;
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;

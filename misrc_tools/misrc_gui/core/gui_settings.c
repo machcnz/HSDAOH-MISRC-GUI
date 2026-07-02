@@ -406,6 +406,12 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->audio_monitor_ch34 = false;  // Default to CH1/2
     settings->misrc_mode = true;           // Default to MISRC mode (A/B swapped)
     settings->stop_on_dropout = false;
+
+    // Level autostop defaults (tape-end detection). Disabled by default.
+    // Defaults mirror PR #11: 33% threshold, 5.0s sustain.
+    settings->level_autostop_enabled = false;
+    strcpy(settings->level_autostop_level_str, "33");
+    strcpy(settings->level_autostop_duration_str, "5.0");
     
     // Display settings
     settings->show_grid = true;
@@ -473,6 +479,9 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"audio_monitor_ch34\": %s,\n", settings->audio_monitor_ch34 ? "true" : "false");
     fprintf(f, "  \"misrc_mode\": %s,\n", settings->misrc_mode ? "true" : "false");
     fprintf(f, "  \"stop_on_dropout\": %s,\n", settings->stop_on_dropout ? "true" : "false");
+    fprintf(f, "  \"level_autostop_enabled\": %s,\n", settings->level_autostop_enabled ? "true" : "false");
+    fprintf(f, "  \"level_autostop_level_str\": \"%s\",\n", settings->level_autostop_level_str);
+    fprintf(f, "  \"level_autostop_duration_str\": \"%s\",\n", settings->level_autostop_duration_str);
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -981,6 +990,17 @@ void gui_settings_load(gui_settings_t *settings) {
     }
     if ((value = find_value(content, "stop_on_dropout")) != NULL) {
         settings->stop_on_dropout = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "level_autostop_enabled")) != NULL) {
+        settings->level_autostop_enabled = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "level_autostop_level_str")) != NULL) {
+        strncpy(settings->level_autostop_level_str, value, sizeof(settings->level_autostop_level_str) - 1);
+        settings->level_autostop_level_str[sizeof(settings->level_autostop_level_str) - 1] = '\0';
+    }
+    if ((value = find_value(content, "level_autostop_duration_str")) != NULL) {
+        strncpy(settings->level_autostop_duration_str, value, sizeof(settings->level_autostop_duration_str) - 1);
+        settings->level_autostop_duration_str[sizeof(settings->level_autostop_duration_str) - 1] = '\0';
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

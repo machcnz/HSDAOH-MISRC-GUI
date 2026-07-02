@@ -228,6 +228,13 @@ typedef struct {
     bool misrc_mode;                           // If true, MISRC mode (default) with A/B channel swap
     bool stop_on_dropout;                      // If true, automatically stop capture when stream dropout is detected
 
+    // Level autostop: stop capture/recording when signal level stays below a
+    // configurable percentage for a configurable duration (tape-end detection).
+    // Independent from the digital dropout (frame error/missed frame) logic above.
+    bool level_autostop_enabled;               // Enable/disable the level-based autostop
+    char level_autostop_level_str[16];         // Signal level threshold as a percent string (e.g. "33")
+    char level_autostop_duration_str[16];      // Sustain duration as a seconds string (e.g. "5.0")
+
     // Per-channel audio labels (for auto naming, e.g. "linear", "baseband")
     char audio_1ch_labels[4][32];
     // Optional tags for non-mono audio outputs: [0]=4ch, [1]=stereo ch1/2, [2]=stereo ch3/4
@@ -252,6 +259,7 @@ typedef enum {
     GUI_DROPOUT_DEVICE_ERROR = 5,
     GUI_DROPOUT_BACKPRESSURE = 6,
     GUI_DROPOUT_DISK_SPACE = 7,
+    GUI_DROPOUT_LOW_SIGNAL = 8,   // Level autostop: sustained low/no signal (tape end)
 } gui_dropout_reason_t;
 
 // Main application state
@@ -373,6 +381,10 @@ typedef struct gui_app {
     // Stop-on-dropout request path (set from capture thread, consumed on main thread)
     atomic_bool dropout_stop_requested;
     atomic_uint_fast32_t dropout_stop_reason;
+
+    // Level autostop state (main thread only): tracks sustained low signal
+    float low_signal_time;     // Seconds signal has stayed below the level threshold
+    bool low_signal_armed;     // True once a real signal level has been seen above the threshold
 
     // Device disconnect detection (timestamp of last successful callback)
     atomic_uint_fast64_t last_callback_time_ms;

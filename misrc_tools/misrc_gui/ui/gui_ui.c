@@ -157,7 +157,9 @@ typedef enum {
     UI_TEXT_FIELD_AUDIO_LABEL_1,
     UI_TEXT_FIELD_AUDIO_LABEL_2,
     UI_TEXT_FIELD_AUDIO_LABEL_3,
-    UI_TEXT_FIELD_AUDIO_LABEL_4
+    UI_TEXT_FIELD_AUDIO_LABEL_4,
+    UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL,    // Level autostop threshold percent
+    UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION  // Level autostop sustain seconds
 } ui_text_field_t;
 
 // Unified cursor-based text editing state (settings panel)
@@ -313,6 +315,8 @@ static char settings_audio_tag_34_display[64];
 static char settings_flac_level_display[64];
 static char settings_flac_threads_display[64];
 static char settings_flac_affinity_display[96];
+static char settings_level_autostop_level_display[16];
+static char settings_level_autostop_duration_display[16];
 static char settings_resample_a_display[32];
 static char settings_resample_b_display[32];
 static char status_sample_rate_display[32];
@@ -808,6 +812,14 @@ static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, 
             *dst = app->settings.audio_1ch_labels[3];
             *cap = sizeof(app->settings.audio_1ch_labels[3]);
             return true;
+        case UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL:
+            *dst = app->settings.level_autostop_level_str;
+            *cap = sizeof(app->settings.level_autostop_level_str);
+            return true;
+        case UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION:
+            *dst = app->settings.level_autostop_duration_str;
+            *cap = sizeof(app->settings.level_autostop_duration_str);
+            return true;
         default:
             return false;
     }
@@ -815,7 +827,15 @@ static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, 
 
 static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
 {
-    if (!app || !app->settings_panel_open || gui_ui_settings_locked(app)) return false;
+    if (!app) return false;
+    // Level autostop fields live in the record-limit (timer) window, which allows
+    // live edits while recording (like the timecode), so they don't require the
+    // settings panel and bypass the recording lock.
+    if (field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL ||
+        field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION) {
+        return s_record_limit_window_open && app->settings.level_autostop_enabled;
+    }
+    if (!app->settings_panel_open || gui_ui_settings_locked(app)) return false;
     switch (field) {
         case UI_TEXT_FIELD_OUTPUT_BASE_NAME:
             return app->settings.auto_names_enabled;
@@ -844,6 +864,14 @@ static bool gui_ui_text_field_char_allowed(ui_text_field_t field, int ch)
 {
     if (field == UI_TEXT_FIELD_FLAC_AFFINITY) {
         return gui_ui_flac_affinity_char_allowed(ch);
+    }
+    if (field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL) {
+        // Integer percent only.
+        return (ch >= '0' && ch <= '9');
+    }
+    if (field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION) {
+        // Decimal seconds: digits and a single '.' (allow typing; parse clamps).
+        return (ch >= '0' && ch <= '9') || ch == '.';
     }
     if (ch < 32 || ch >= 127) {
         return false;
@@ -1571,7 +1599,7 @@ static void render_record_limit_window(gui_app_t *app)
 
     CLAY(CLAY_ID("RecordLimitWindow"), {
         .layout = {
-            .sizing = { CLAY_SIZING_FIT(.min = 420, .max = 420), CLAY_SIZING_FIT(.min = 235, .max = 280) },
+            .sizing = { CLAY_SIZING_FIT(.min = 420, .max = 420), CLAY_SIZING_FIT(.min = 235, .max = 440) },
             .layoutDirection = CLAY_TOP_TO_BOTTOM,
             .padding = { 16, 16, 16, 16 },
             .childGap = 12
@@ -1727,6 +1755,79 @@ static void render_record_limit_window(gui_app_t *app)
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
         CLAY_TEXT(CLAY_STRING("Shorter changes are ignored until the next recording."),
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+        // Level autostop (tape-end detection): enable/disable + level box + duration box.
+        // Lives in the timer window alongside the record time limit. Independent from
+        // the digital dropout (frame error/missed frame) logic in the main settings.
+        CLAY_TEXT(CLAY_STRING("Level autostop (tape end):"),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+        CLAY(CLAY_ID("LevelAutostopRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            Color las_bg = app->settings.level_autostop_enabled ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+            CLAY(CLAY_ID("LevelAutostopToggle"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(las_bg),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(app->settings.level_autostop_enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+
+            // Level percent box (click to edit)
+            Color lvl_box_bg = app->settings.level_autostop_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
+            Color lvl_box_fg = app->settings.level_autostop_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+            CLAY(CLAY_ID("LevelAutostopLevelField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(56), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 6, 6, 0, 0 }
+                },
+                .backgroundColor = to_clay_color(lvl_box_bg),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *lvl = app->settings.level_autostop_level_str[0] ? app->settings.level_autostop_level_str : "33";
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL) && app->settings.level_autostop_enabled) {
+                    snprintf(settings_level_autostop_level_display, sizeof(settings_level_autostop_level_display), "%s", gui_ui_build_text_with_caret(lvl, s_active_text_cursor));
+                    CLAY_TEXT(make_string(settings_level_autostop_level_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(lvl_box_fg) }));
+                } else {
+                    CLAY_TEXT(make_string(lvl), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(lvl_box_fg) }));
+                }
+            }
+            CLAY_TEXT(CLAY_STRING("% level"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+            CLAY(CLAY_ID("LevelAutostopSpacer"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
+
+            // Duration seconds box (click to edit)
+            Color dur_box_bg = app->settings.level_autostop_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
+            Color dur_box_fg = app->settings.level_autostop_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+            CLAY(CLAY_ID("LevelAutostopDurationField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(64), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 6, 6, 0, 0 }
+                },
+                .backgroundColor = to_clay_color(dur_box_bg),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *dur = app->settings.level_autostop_duration_str[0] ? app->settings.level_autostop_duration_str : "5.0";
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION) && app->settings.level_autostop_enabled) {
+                    snprintf(settings_level_autostop_duration_display, sizeof(settings_level_autostop_duration_display), "%s", gui_ui_build_text_with_caret(dur, s_active_text_cursor));
+                    CLAY_TEXT(make_string(settings_level_autostop_duration_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(dur_box_fg) }));
+                } else {
+                    CLAY_TEXT(make_string(dur), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(dur_box_fg) }));
+                }
+            }
+            CLAY_TEXT(CLAY_STRING("s below"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+        }
     }
 }
 
@@ -2953,7 +3054,13 @@ void gui_handle_interactions(gui_app_t *app) {
     }
 
 
-    if (!app->settings_panel_open || s_record_limit_window_open || s_version_info_window_open) {
+    // Level autostop fields are edited inside the record-limit (timer) window,
+    // so keep processing their keystrokes even while that window is open.
+    bool las_text_field_active = (s_active_text_field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL ||
+                                  s_active_text_field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION);
+    if (las_text_field_active && s_record_limit_window_open) {
+        gui_ui_handle_active_text_edit(app);
+    } else if (!app->settings_panel_open || s_record_limit_window_open || s_version_info_window_open) {
         gui_ui_clear_text_edit();
     } else {
         gui_ui_handle_active_text_edit(app);
@@ -3116,6 +3223,35 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_ui_set_click_consumed();
                 return;
             }
+            // Level autostop controls render inside this window, so they must be
+            // handled here (before the RecordLimitWindow catch-all below) or their
+            // clicks are swallowed. They stay editable while recording, like the
+            // timecode and the sibling Stop-on-Dropout toggle.
+            if (Clay_PointerOver(CLAY_ID("LevelAutostopToggle"))) {
+                s_record_limit_timecode_edit = false;
+                app->settings.level_autostop_enabled = !app->settings.level_autostop_enabled;
+                gui_settings_save(&app->settings);
+                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                    gui_ui_clear_text_edit();
+                }
+                gui_app_set_status(app, app->settings.level_autostop_enabled
+                    ? "Level autostop enabled"
+                    : "Level autostop disabled");
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("LevelAutostopLevelField"))) {
+                s_record_limit_timecode_edit = false;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL, CLAY_ID("LevelAutostopLevelField"), 6.0f, 6.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("LevelAutostopDurationField"))) {
+                s_record_limit_timecode_edit = false;
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION, CLAY_ID("LevelAutostopDurationField"), 6.0f, 6.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
             if (Clay_PointerOver(CLAY_ID("RecordLimitWindow"))) {
                 gui_ui_set_click_consumed();
                 return;
@@ -3215,7 +3351,6 @@ void gui_handle_interactions(gui_app_t *app) {
                 ? "Stop on dropout enabled"
                 : "Stop on dropout disabled");
         }
-
 
         // Audio playback monitoring toggle
         if (Clay_PointerOver(CLAY_ID("AudioPlaybackToggle"))) {
