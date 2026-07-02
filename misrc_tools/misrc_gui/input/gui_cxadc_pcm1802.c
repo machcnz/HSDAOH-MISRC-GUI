@@ -52,8 +52,6 @@
 #include <avrt.h>
 #include <devicetopology.h>
 
-#pragma comment(lib, "avrt")
-#pragma comment(lib, "ksuser")
 
 #define REFTIMES_PER_SEC    10000000
 #define PCM1802_DEVICE_NAME L"usb#vid_1209&pid_0002"
@@ -118,7 +116,7 @@ static pcm1802_ctx_t s_pcm1802_ctx;
 
 static bool pcm1802_win_is_device_match(IMMDevice *device, PCWSTR id_str) {
     /* Direct port of audio_is_device_match from audio_wasapi.c */
-    HRESULT hr;
+
     IDeviceTopology *topology = NULL;
     bool is_match = false;
 
@@ -244,7 +242,6 @@ static int pcm1802_win_open(pcm1802_ctx_t *ctx) {
 
 static int pcm1802_win_start(pcm1802_ctx_t *ctx) {
     pcm1802_win_state_t *s = &ctx->win;
-    HRESULT hr;
 
     /* Get device from stored endpoint ID */
     IMMDeviceEnumerator *enumerator = NULL;
@@ -479,7 +476,7 @@ static int pcm1802_audio_thread(void *arg) {
             break;
         }
         if (frames == 0) {
-            thrd_yield();
+            thrd_sleep_ms(1);
             continue;
         }
 
