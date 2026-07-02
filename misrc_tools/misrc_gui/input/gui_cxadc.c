@@ -235,7 +235,7 @@ static int cxadc_capture_thread(void *arg) {
         }
         if (n == 0) {
             // No data available yet - device still open, keep trying
-            thrd_yield();
+            thrd_sleep_ms(1);
             continue;
         }
 
