@@ -97,7 +97,7 @@ if host_cpu_family == 'x86_64'
   nasm = find_program('nasm')
 
   outputname = '@BASENAME@.o'
-  if host_system == 'windows'
+   == 'windows'
     outputname = '@BASENAME@.obj'
   endif
 
@@ -177,15 +177,9 @@ endif
 # ALSA is needed on Linux for PCM1802 audio capture.
 cxadc_enabled = false
 if host_system == 'linux'
-  alsa_dep = dependency('alsa', required : false)
-  if alsa_dep.found()
-    deps += [ alsa_dep ]
-    cflags += ['-DENABLE_CXADC=1']
-    cxadc_enabled = true
-    message('ALSA found, building with CXADC support (including PCM1802 audio)')
-  else
-    message('ALSA not found, building without CXADC support')
-  endif
+  cflags += ['-DENABLE_CXADC=1']
+  cxadc_enabled = true
+  message('Building with CXADC support (Linux)')
 elif host_system == 'windows' or host_system == 'cygwin'
   # Windows: WASAPI is always available via Windows SDK, no external dep needed
   cflags += ['-DENABLE_CXADC=1']
