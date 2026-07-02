@@ -109,45 +109,19 @@ You have flashed your Tang Nano 20k!
 
 ## Software
 
-Supported operating systems with direct links to the latest release (also available on the [releases tab](https://github.com/Stefan-Olt/MISRC/releases)):
+Supported operating systems with direct links to the current release assets (also available on the [releases tab](https://github.com/harrypm/MISRC/releases)):
 
-| Operating System  | Minimum supported OS version | Download x86_64 (Intel / AMD)                                                                                                                                  | Download arm64 (Apple Silicon / aarch64)                                                                                                                                   |
-| ----------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Microsoft Windows | 10 (1803)                    | [misrc_tools-0.5.1-win-x86_64.zip](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-win-x86_64.zip)                         | [misrc_tools-0.5.1-win-arm64.zip](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-win-arm64.zip)                                       |
-| Apple macOS       | 10.15                        | [misrc_tools-0.5.1-macos-intel-x86_64.tar.gz](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-macos-intel-x86_64.tar.gz)   | [misrc_tools-0.5.1-macos-apple-silicon-arm64.tar.gz](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-macos-apple-silicon-arm64.tar.gz) |
-| Linux             | libc6 2.35 (Ubuntu 22.04)    | [misrc_tools-0.5.1-linux-x86_64.tar.gz](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-linux-x86_64.tar.gz)               | [misrc_tools-0.5.1-linux-arm64.tar.gz](https://github.com/Stefan-Olt/MISRC/releases/download/misrc_tools-0.5.1/misrc_tools-0.5.1-linux-arm64.tar.gz)                             |
-
+| Operating System  | Minimum supported OS version | Download x86_64 (Intel / AMD)                                                                                                                                 | Download arm64 (Apple Silicon / aarch64)                                                                                                        |
+| ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------|
+| Microsoft Windows | 10 (1803)                    | [windows_MISRC_v1.0.8_x86.zip](https://github.com/harrypm/MISRC/releases/download/v1.0.8/windows_MISRC_v1.0.8_x86.zip)                                        | [windows_MISRC_v1.0.8_arm64.zip](https://github.com/harrypm/MISRC/releases/download/v1.0.8/windows_MISRC_v1.0.8_arm64.zip)                      |
+| Apple macOS       | 10.15                        | [macos_MISRC_v1.0.8_universal.dmg (x86_64 + arm64)](https://github.com/harrypm/MISRC/releases/download/v1.0.8/macos_MISRC_v1.0.8_universal.dmg)               | [macos_MISRC_v1.0.8_universal.dmg (x86_64 + arm64)](https://github.com/harrypm/MISRC/releases/download/v1.0.8/macos_MISRC_v1.0.8_universal.dmg) |
+| Linux             | libc6 2.35 (Ubuntu 22.04)    | [linux_MISRC_v1.0.8_x86.zip](https://github.com/harrypm/MISRC/releases/download/v1.0.8/linux_MISRC_v1.0.8_x86.zip)                                            | [linux_MISRC_v1.0.8_arm64.zip](https://github.com/harrypm/MISRC/releases/download/v1.0.8/linux_MISRC_v1.0.8_arm64.zip)                          |
 
 > [!NOTE]  
 > The arm64 builds for Windows are untested and considered experimental!
-> Release artifacts now include `windows_MISRC_<version>_arm64.zip` in addition to the x86 ZIP.
+> Release artifacts include `windows_MISRC_<version>_arm64.zip` in addition to the x86 ZIP.
 
-The packages contain two command-line applications, `misrc_capture` and `misrc_extract`. For detailed usage information see the [misrc_tools readme](/misrc_tools/README.md) and the [usage example](#capture--usage-example) down below.
-
-If you want to build the tools yourself, see the instructions in the [misrc_tools readme](/misrc_tools/README.md).
-### Source build dependency note (FFT)
-`misrc_gui` requires FFT support via FFTW single-precision (`fftw3f`). Source builds now fail at configure time if FFTW is missing.
-
-Install FFTW development packages before running Meson:
-
-- Debian/Ubuntu/Linux Mint: `libfftw3-dev`
-- macOS (Homebrew): `fftw`
-- MSYS2 MinGW x86_64: `mingw-w64-x86_64-fftw`
-- MSYS2 MinGW arm64: `mingw-w64-clang-aarch64-fftw`
-
-If you already configured a Meson build directory before installing FFTW, wipe and reconfigure so stale dependency paths are removed:
-
-    meson setup --wipe misrc_tools/build misrc_tools
-
-### Local AppImage test build (Ubuntu 22.04 baseline)
-For a reproducible local AppImage build that targets a `glibc 2.35` baseline, run:
-
-    ./scripts/build-appimage-local.sh
-
-The script uses `docker` or `podman` (prefers docker if both are installed), installs build dependencies in an `ubuntu:22.04` container, and writes the output AppImage to `.ci-artifacts/linux-appimage/`.
-If you want to run directly on your host (with all dependencies already installed), use:
-
-    ./scripts/build-appimage-local.sh --native
+Expanded GUI/tool package and source-build notes were moved to [MISRC_GUI_README.md](MISRC_GUI_README.md).
 
 <details closed>
 <summary>Install Windows</summary>
