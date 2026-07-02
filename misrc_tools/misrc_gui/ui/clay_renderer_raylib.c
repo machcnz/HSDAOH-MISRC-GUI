@@ -240,6 +240,42 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                                    2.0f, col);
                         break;
                     }
+                    case CUSTOM_LAYOUT_ELEMENT_TYPE_VERSION_ICON: {
+                        // Fixed left-side "i" info badge with a capture-state accent ring.
+                        // Font-free (primitives only) so layout width is constant on every platform.
+                        CustomLayoutElement_VersionIcon *vi = &customElement->customData.version_icon;
+                        float cx = boundingBox.x + boundingBox.width * 0.5f;
+                        float cy = boundingBox.y + boundingBox.height * 0.5f;
+                        float r = (boundingBox.width < boundingBox.height ? boundingBox.width : boundingBox.height) * 0.5f;
+
+                        // State accent color (current MISRC capture info)
+                        Color accent;
+                        switch (vi->state) {
+                            case GUI_VERSION_ICON_RECORDING:  accent = COLOR_CLIP_RED;    break;
+                            case GUI_VERSION_ICON_CAPTURING:  accent = COLOR_SYNC_GREEN;  break;
+                            case GUI_VERSION_ICON_IDLE:
+                            default:                          accent = COLOR_TEXT_DIM;    break;
+                        }
+
+                        // Badge background (subtle, slightly darker than toolbar) + state accent ring
+                        DrawCircle((int)roundf(cx), (int)roundf(cy), r * 0.94f, (Color){ 35, 35, 42, 255 });
+                        DrawCircleLines((int)roundf(cx), (int)roundf(cy), r * 0.94f, accent);
+
+                        // "i" glyph in text color: dot above + rounded stem below
+                        Color glyph = COLOR_TEXT;
+                        float dot_r = r * 0.15f;
+                        float dot_cy = cy - r * 0.30f;
+                        DrawCircle((int)roundf(cx), (int)roundf(dot_cy), dot_r, glyph);
+
+                        float stem_top = cy - r * 0.05f;
+                        float stem_bot = cy + r * 0.34f;
+                        float stem_w = r * 0.28f;
+                        DrawLineEx((Vector2){cx, stem_top}, (Vector2){cx, stem_bot}, stem_w, glyph);
+                        // Round the stem ends so it reads as a clean "i"
+                        DrawCircle((int)roundf(cx), (int)roundf(stem_top), stem_w * 0.5f, glyph);
+                        DrawCircle((int)roundf(cx), (int)roundf(stem_bot), stem_w * 0.5f, glyph);
+                        break;
+                    }
                     default: break;
                 }
                 break;

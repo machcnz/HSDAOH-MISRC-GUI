@@ -28,6 +28,9 @@
 #ifndef MIRSC_TOOLS_VERSION
 #define MIRSC_TOOLS_VERSION "dev"
 #endif
+#ifndef MIRSC_TOOLS_COPYRIGHT
+#define MIRSC_TOOLS_COPYRIGHT "licensed under GNU GPL v3 or later, (c) 2023-2026 Harry Munday, AlessandroAU, Stefan O, Vrunk11"
+#endif
 
 // Track if UI consumed the current frame's click (prevents click-through)
 static bool s_ui_consumed_click = false;
@@ -164,6 +167,8 @@ static double s_active_text_backspace_repeat_at = 0.0;
 
 // Record-limit popup state (toolbar clock button)
 static bool s_record_limit_window_open = false;
+// Version info popup state (toolbar "i" badge button)
+static bool s_version_info_window_open = false;
 static bool s_record_limit_armed = false;
 static bool s_record_limit_timecode_edit = false;
 static double s_record_limit_backspace_repeat_at = 0.0;
@@ -271,7 +276,6 @@ static char temp_buf6[64];
 static char temp_buf7[64];
 static char temp_buf8[64];
 static char device_dropdown_buf[64];
-static char temp_title_buf[64];
 
 // Per-channel stat buffers (separate for A and B to avoid overwrite)
 static char stat_a_peak_pos[16];
@@ -986,6 +990,7 @@ static CustomLayoutElement s_vu_a_element;
 static CustomLayoutElement s_vu_b_element;
 static CustomLayoutElement s_settings_icon_element;
 static CustomLayoutElement s_record_limit_icon_element;
+static CustomLayoutElement s_version_icon_element;
 
 static int toolbar_title_font_size(void) {
     int width = GetScreenWidth();
@@ -1724,10 +1729,179 @@ static void render_record_limit_window(gui_app_t *app)
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
     }
 }
+
+static const char *gui_ui_device_type_name(device_type_t type) {
+    switch (type) {
+        case DEVICE_TYPE_HSDAOH:         return "HSDAOH";
+        case DEVICE_TYPE_SIMPLE_CAPTURE: return "Simple Capture";
+        case DEVICE_TYPE_CXADC:          return "CXADC";
+        case DEVICE_TYPE_SIMULATED:      return "Simulated";
+        case DEVICE_TYPE_PLAYBACK:       return "Playback";
+#ifdef ENABLE_FX3
+        case DEVICE_TYPE_FX3:            return "FX3";
+#endif
+        default:                         return "Unknown";
+    }
+}
+
+// Version info popup (opened by clicking the toolbar "i" badge)
+static void render_version_info_window(gui_app_t *app)
+{
+    if (!s_version_info_window_open) return;
+
+    static char vi_version[64];
+    static char vi_state[24];
+    static char vi_device[96];
+    static char vi_rate[32];
+
+    snprintf(vi_version, sizeof(vi_version), "%s", MIRSC_TOOLS_VERSION);
+
+    const char *state_label;
+    Color state_col;
+    if (app->is_recording)      { state_label = "Recording";  state_col = COLOR_CLIP_RED;   }
+    else if (app->is_capturing) { state_label = "Capturing";  state_col = COLOR_SYNC_GREEN; }
+    else                        { state_label = "Idle";       state_col = COLOR_TEXT_DIM;   }
+    snprintf(vi_state, sizeof(vi_state), "%s", state_label);
+
+    if (app->device_count > 0 &&
+        app->selected_device >= 0 && app->selected_device < app->device_count) {
+        const device_info_t *dev = &app->devices[app->selected_device];
+        snprintf(vi_device, sizeof(vi_device), "%s (%s)",
+                 dev->name, gui_ui_device_type_name(dev->type));
+    } else {
+        snprintf(vi_device, sizeof(vi_device), "No device selected");
+    }
+
+    uint32_t sr = atomic_load(&app->sample_rate);
+    if (sr >= 1000000u) {
+        snprintf(vi_rate, sizeof(vi_rate), "%.3f MSPS", (double)sr / 1000000.0);
+    } else if (sr >= 1000u) {
+        snprintf(vi_rate, sizeof(vi_rate), "%.3f kSPS", (double)sr / 1000.0);
+    } else {
+        snprintf(vi_rate, sizeof(vi_rate), "%u Hz", sr);
+    }
+
+    CLAY(CLAY_ID("VersionInfoBackdrop"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP }
+        },
+        .backgroundColor = (Clay_Color){0, 0, 0, 140}
+    }) {}
+
+    CLAY(CLAY_ID("VersionInfoWindow"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIT(.min = 380, .max = 460), CLAY_SIZING_FIT(0) },
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .padding = { 16, 16, 16, 16 },
+            .childGap = 10
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_CENTER_CENTER, .parent = CLAY_ATTACH_POINT_CENTER_CENTER }
+        },
+        .backgroundColor = to_clay_color(COLOR_PANEL_BG),
+        .cornerRadius = CLAY_CORNER_RADIUS(8)
+    }) {
+        // Header
+        CLAY(CLAY_ID("VersionInfoHeader"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 8
+            }
+        }) {
+            CLAY_TEXT(CLAY_STRING("About MISRC Capture"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_TITLE, .textColor = to_clay_color(COLOR_TEXT) }));
+            CLAY(CLAY_ID("VersionInfoHeaderSpacer"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } }
+            }) {}
+            CLAY(CLAY_ID("VersionInfoCloseButton"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(CLAY_STRING("X"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+        }
+
+        // Version row
+        CLAY(CLAY_ID("VersionInfoVersionRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoVersionLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Version:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY_TEXT(make_string(vi_version),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        // Capture state row
+        CLAY(CLAY_ID("VersionInfoStateRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoStateLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Capture:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY_TEXT(make_string(vi_state),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(state_col) }));
+        }
+
+        // Device row
+        CLAY(CLAY_ID("VersionInfoDeviceRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoDeviceLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Device:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY_TEXT(make_string(vi_device),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        // Sample rate row
+        CLAY(CLAY_ID("VersionInfoRateRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoRateLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Sample rate:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY_TEXT(make_string(vi_rate),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        // Copyright
+        CLAY_TEXT(CLAY_STRING(MIRSC_TOOLS_COPYRIGHT),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+    }
+}
+
 // Render the toolbar
 static void render_toolbar(gui_app_t *app) {
     s_settings_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON;
     s_record_limit_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON;
+    // Fixed left-side version/status badge: color reflects current MISRC capture state.
+    // The version string itself lives only in the OS window title (set in misrc_gui.c),
+    // so the toolbar left anchor is constant width and never shifts on any platform.
+    s_version_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_VERSION_ICON;
+    gui_version_icon_state_t version_icon_state = GUI_VERSION_ICON_IDLE;
+    if (app->is_recording) {
+        version_icon_state = GUI_VERSION_ICON_RECORDING;
+    } else if (app->is_capturing) {
+        version_icon_state = GUI_VERSION_ICON_CAPTURING;
+    }
+    s_version_icon_element.customData.version_icon.state = version_icon_state;
     CLAY(CLAY_ID("Toolbar"), {
         .layout = {
             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(48) },
@@ -1738,9 +1912,23 @@ static void render_toolbar(gui_app_t *app) {
         },
         .backgroundColor = to_clay_color(COLOR_TOOLBAR_BG)
     }) {
-        // Title
-        snprintf(temp_title_buf, sizeof(temp_title_buf), "MISRC Capture %s", MIRSC_TOOLS_VERSION);
-        CLAY_TEXT(make_string(temp_title_buf),
+        // Version/status icon (fixed 32x32, no variable-width text)
+        CLAY(CLAY_ID("VersionIconButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY(CLAY_ID("VersionIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(20), CLAY_SIZING_FIXED(20) } },
+                .custom = { .customData = &s_version_icon_element }
+            }) {}
+        }
+
+        // Constant-width brand label (no version suffix -> never shifts)
+        CLAY_TEXT(CLAY_STRING("MISRC"),
             CLAY_TEXT_CONFIG({ .fontSize = toolbar_title_font_size(), .textColor = to_clay_color(COLOR_TEXT) }));
 
         // Spacer
@@ -2708,6 +2896,9 @@ void gui_render_layout(gui_app_t *app) {
     // Record-limit popup overlay (if open)
     render_record_limit_window(app);
 
+    // Version info popup overlay (if open)
+    render_version_info_window(app);
+
     // Device dropdown overlay (if open)
     if (gui_dropdown_is_open(DROPDOWN_DEVICE, 0) && app->device_count > 0) {
         CLAY(CLAY_ID("DeviceDropdownOverlay"), {
@@ -2757,9 +2948,12 @@ void gui_handle_interactions(gui_app_t *app) {
     if (s_record_limit_window_open && !s_record_limit_timecode_edit && IsKeyPressed(KEY_ESCAPE)) {
         s_record_limit_window_open = false;
     }
+    if (s_version_info_window_open && IsKeyPressed(KEY_ESCAPE)) {
+        s_version_info_window_open = false;
+    }
 
 
-    if (!app->settings_panel_open || s_record_limit_window_open) {
+    if (!app->settings_panel_open || s_record_limit_window_open || s_version_info_window_open) {
         gui_ui_clear_text_edit();
     } else {
         gui_ui_handle_active_text_edit(app);
@@ -2837,6 +3031,24 @@ void gui_handle_interactions(gui_app_t *app) {
 
     // Handle clicks
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        // Version info popup modal interactions (consume before toolbar underneath)
+        if (s_version_info_window_open) {
+            if (Clay_PointerOver(CLAY_ID("VersionInfoCloseButton"))) {
+                s_version_info_window_open = false;
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("VersionInfoWindow"))) {
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("VersionInfoBackdrop"))) {
+                s_version_info_window_open = false;
+                gui_ui_set_click_consumed();
+                return;
+            }
+        }
+
         // Record-limit popup modal interactions (consume before toolbar underneath)
         if (s_record_limit_window_open) {
             if (Clay_PointerOver(CLAY_ID("RecordLimitCloseButton"))) {
@@ -2921,6 +3133,11 @@ void gui_handle_interactions(gui_app_t *app) {
             if (!s_record_limit_window_open) {
                 s_record_limit_timecode_edit = false;
             }
+            gui_ui_set_click_consumed();
+            return;
+        }
+        if (Clay_PointerOver(CLAY_ID("VersionIconButton"))) {
+            s_version_info_window_open = !s_version_info_window_open;
             gui_ui_set_click_consumed();
             return;
         }

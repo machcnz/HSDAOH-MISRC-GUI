@@ -3,7 +3,7 @@
  *
  * Real-time waveform display and capture control using raylib + Clay UI
  *
- * Copyright (C) 2024-2025 vrunk11, stefan_o
+ * Copyright (C) 2023-2026 Harry Munday, AlessandroAU, Stefan O, Vrunk11
  * Licensed under GNU GPL v3 or later
  */
 
