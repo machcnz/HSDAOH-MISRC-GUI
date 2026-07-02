@@ -69,11 +69,6 @@ endif
 if host_cpu_family == 'x86_64'
   nasm_flags = []
   if host_system == 'windows' or host_system == 'cygwin'
-    if host_cpu_family == 'x86'
-      cflags += '-mstackrealign'
-      ldflags += '-Wl,--kill-at'
-      nasm_flags += '-DPREFIX'
-    endif
     nasm_flags += ['-f', 'win64']
   elif host_system == 'linux' or host_system in ['freebsd', 'openbsd', 'netbsd']
     if debug_build
@@ -97,7 +92,7 @@ if host_cpu_family == 'x86_64'
   nasm = find_program('nasm')
 
   outputname = '@BASENAME@.o'
-if host_system == 'windows' or host_system == 'cygwin'
+  if host_system == 'windows' or host_system == 'cygwin'
     outputname = '@BASENAME@.obj'
   endif
 
@@ -107,7 +102,7 @@ if host_system == 'windows' or host_system == 'cygwin'
 
   nasm_genb = nasm_gen.process(nasm_sources)
   sources_extract += nasm_genb
-  sources_capture +=nasm_genb
+  sources_capture += nasm_genb
 endif
 
 
@@ -292,12 +287,15 @@ if raylib_dep.found()
     gui_deps += [ fftw3f_dep ]
   endif
 
-  gui_cflags = cflags + [
-    '-O3',                    # Maximum optimization (should already be set by buildtype=release)
-    '-funroll-loops',         # Unroll loops for better performance
-    '-ftree-vectorize',       # Enable auto-vectorization
-    '-ffast-math',            # Fast floating-point (safe for video/audio processing)
-  ]
+  gui_cflags = cflags
+  if not debug_build
+    gui_cflags += [
+      '-O3',
+      '-funroll-loops',
+      '-ftree-vectorize',
+      '-ffast-math',
+    ]
+  endif
 
   # GUI doesn't need all the ldflags_capture (e.g., onecore conflicts with raylib's CloseWindow)
   gui_ldflags = ldflags
@@ -315,6 +313,9 @@ if raylib_dep.found()
     endif
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
+    if cxadc_enabled
+      gui_ldflags += ['-lasound']
+    endif
     sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
   elif host_system == 'darwin'
     gui_ldflags += ['-Wl,-framework,OpenGL', '-Wl,-framework,Cocoa', '-Wl,-framework,IOKit', '-Wl,-framework,CoreAudio', '-Wl,-framework,CoreVideo']
