@@ -14,6 +14,10 @@
 #ifndef MISRC_FRAME_PARSER_H
 #define MISRC_FRAME_PARSER_H
 
+#ifdef HSDAOH_UPSTREAM
+/* Frame parser is not available in upstream hsdaoh mode (requires Stefan-Olt's forked hsdaoh_raw.h) */
+#else
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -397,4 +401,5 @@ bool capture_handler_process_sync_event(capture_handler_ctx_t *ctx,
 bool capture_handler_audio_filter(void *ctx, int stream_id,
                                    const uint8_t *data, size_t len);
 
+#endif /* !HSDAOH_UPSTREAM */
 #endif /* MISRC_FRAME_PARSER_H */

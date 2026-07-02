@@ -195,7 +195,7 @@ The pre-build packages contains the script `install-udev-rules.sh`. On execution
 > [!TIP]  
 > Pre-built Binaries is available on the [releases tab](https://github.com/Stefan-Olt/MISRC/releases).
 
-`misrc_capture` is a simple command line interface program to capture from MISRC boards using [hsdaoh](https://github.com/Stefan-Olt/hsdaoh) to which leverages data capture over HDMI with [MS2130](https://s.click.aliexpress.com/e/_DBaBiOp) "U3" cheep HDMI capture cards that have YUV support and full-frame signal acesses. 
+`misrc_capture` is a simple command line interface program to capture from MISRC boards using [hsdaoh](https://github.com/Stefan-Olt/hsdaoh) to which leverages data capture over HDMI with [MS2130](https://s.click.aliexpress.com/e/_DBaBiOp) "U3" cheap HDMI capture cards that have YUV support and full-frame signal acesses. 
 
 Create a folder which you wish to capture inside, open it inside terminal and then run `misrc_capture`.
 

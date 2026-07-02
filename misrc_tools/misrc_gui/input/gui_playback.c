@@ -418,6 +418,7 @@ static int playback_thread_func(void *ctx_ptr) {
             uint64_t target = atomic_load(&ctx->seek_target);
             atomic_store(&ctx->seek_requested, false);
 
+        // 08.2024 - Windows no flac output issue fix     
 #if LIBFLAC_ENABLED == 1
             // Seek both decoders
             if (ctx->decoder_a) {
@@ -493,10 +494,10 @@ static int playback_thread_func(void *ctx_ptr) {
 #endif
 
         // Limit output to available samples
-        if (ctx->decoder_a && avail_a < samples_to_output) {
+        if (ctx->decode_buf_a && avail_a < samples_to_output) {
             samples_to_output = avail_a;
         }
-        if (ctx->decoder_b && avail_b < samples_to_output) {
+        if (ctx->decode_buf_b && avail_b < samples_to_output) {
             samples_to_output = avail_b;
         }
 
@@ -506,7 +507,7 @@ static int playback_thread_func(void *ctx_ptr) {
         }
 
         // Fill output buffers
-        if (ctx->decoder_a && avail_a > 0) {
+        if (ctx->decode_buf_a && avail_a > 0) {
             size_t to_copy = (avail_a < samples_to_output) ? avail_a : samples_to_output;
             memcpy(buf_a, ctx->decode_buf_a + ctx->decode_pos_a, to_copy * sizeof(int16_t));
             ctx->decode_pos_a += to_copy;
@@ -518,7 +519,7 @@ static int playback_thread_func(void *ctx_ptr) {
             memset(buf_a, 0, samples_to_output * sizeof(int16_t));
         }
 
-        if (ctx->decoder_b && avail_b > 0) {
+        if (ctx->decode_buf_b && avail_b > 0) {
             size_t to_copy = (avail_b < samples_to_output) ? avail_b : samples_to_output;
             memcpy(buf_b, ctx->decode_buf_b + ctx->decode_pos_b, to_copy * sizeof(int16_t));
             ctx->decode_pos_b += to_copy;
