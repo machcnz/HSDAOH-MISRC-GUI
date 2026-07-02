@@ -25,10 +25,18 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// Shield raylib symbols from conflicting Win32 API declarations
+// (same pattern as gui_capture.c): raylib.h is already included via gui_app.h.
+#define Rectangle Win32_Rectangle
+#define CloseWindow Win32_CloseWindow
+#define ShowCursor Win32_ShowCursor
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <propidl.h>
+#undef Rectangle
+#undef CloseWindow
+#undef ShowCursor
 // Define PKEY_Device_FriendlyName locally to avoid initguid conflicts.
 static const PROPERTYKEY s_PKEY_Device_FriendlyName = {
     { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14
@@ -402,6 +410,16 @@ static const GUID s_KSDATAFORMAT_SUBTYPE_PCM =
     { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static const GUID s_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT =
     { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+// Explicit COM interface/class GUIDs for MinGW builds where the extern IID/CLSID
+// symbols are declared by headers but not provided by import libs.
+static const GUID s_CLSID_MMDeviceEnumerator =
+    { 0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E } };
+static const GUID s_IID_IMMDeviceEnumerator =
+    { 0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 } };
+static const GUID s_IID_IAudioClient =
+    { 0x1CB9AD4C, 0xDBFA, 0x4C32, { 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2 } };
+static const GUID s_IID_IAudioCaptureClient =
+    { 0xC8ADBD64, 0xE71E, 0x48a0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 } };
 
 static bool cxadc_guid_equal(const GUID *a, const GUID *b)
 {
@@ -513,8 +531,8 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
     bool com_initialized = SUCCEEDED(hr);
 
     IMMDeviceEnumerator *pEnum = NULL;
-    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-                          &IID_IMMDeviceEnumerator, (void **)&pEnum);
+    hr = CoCreateInstance(&s_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+                          &s_IID_IMMDeviceEnumerator, (void **)&pEnum);
     if (FAILED(hr)) {
         if (com_initialized) CoUninitialize();
         return -1;
@@ -585,7 +603,7 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
     }
 
     IAudioClient *pClient = NULL;
-    hr = pDevice->lpVtbl->Activate(pDevice, &IID_IAudioClient, CLSCTX_ALL,
+    hr = pDevice->lpVtbl->Activate(pDevice, &s_IID_IAudioClient, CLSCTX_ALL,
                                    NULL, (void **)&pClient);
     if (FAILED(hr)) {
         pDevice->lpVtbl->Release(pDevice);
@@ -635,7 +653,7 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
     }
 
     IAudioCaptureClient *pCapture = NULL;
-    hr = pClient->lpVtbl->GetService(pClient, &IID_IAudioCaptureClient,
+    hr = pClient->lpVtbl->GetService(pClient, &s_IID_IAudioCaptureClient,
                                      (void **)&pCapture);
     if (FAILED(hr)) {
         pClient->lpVtbl->Release(pClient);
