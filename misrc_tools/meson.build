@@ -168,13 +168,14 @@ endif
 # CXADC support (CX2388x raw ADC capture card)
 # Linux:   character device /dev/cxadcN + sysfs + ALSA for PCM1802 audio
 # Windows: \\.\cxadcN via cxadc-win driver + WASAPI for PCM1802 audio
-# No compile-time library dependency - device access is pure syscalls/IOCTL.
-# ALSA is needed on Linux for PCM1802 audio capture.
+# Video capture has no compile-time library dependency (pure syscalls/IOCTL).
+# PCM1802 audio requires ALSA on Linux, WASAPI on Windows (always available).
 cxadc_enabled = false
 if host_system == 'linux'
+  alsa_dep = dependency('alsa')
   cflags += ['-DENABLE_CXADC=1']
   cxadc_enabled = true
-  message('Building with CXADC support (Linux)')
+  message('Building with CXADC support (Linux, ALSA for PCM1802 audio)')
 elif host_system == 'windows' or host_system == 'cygwin'
   # Windows: WASAPI is always available via Windows SDK, no external dep needed
   cflags += ['-DENABLE_CXADC=1']
@@ -314,7 +315,7 @@ if raylib_dep.found()
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
     if cxadc_enabled
-      gui_ldflags += ['-lasound']
+      gui_deps += [ alsa_dep ]
     endif
     sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
   elif host_system == 'darwin'
