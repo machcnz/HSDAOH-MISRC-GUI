@@ -29,7 +29,7 @@
 #define MIRSC_TOOLS_VERSION "dev"
 #endif
 #ifndef MIRSC_TOOLS_COPYRIGHT
-#define MIRSC_TOOLS_COPYRIGHT "licensed under GNU GPL v3 or later, (c) 2023-2026 Harry Munday, AlessandroAU, Stefan O, Vrunk11"
+#define MIRSC_TOOLS_COPYRIGHT "licensed under GNU GPL v3 or later, (c) 2023-2026 Harry Munday, AlessandroAU, Stefan O, Vrunk11, machcnz"
 #endif
 
 // Track if UI consumed the current frame's click (prevents click-through)
