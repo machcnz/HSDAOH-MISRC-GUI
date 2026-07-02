@@ -75,7 +75,7 @@ if host_cpu_family == 'x86_64'
       nasm_flags += '-DPREFIX'
     endif
     nasm_flags += ['-f', 'win64']
-  elif host_system == 'linux' or host_system == 'bsd' # The BSDs are close enough, right?
+  elif host_system == 'linux' or host_system in ['freebsd', 'openbsd', 'netbsd']
     if debug_build
       nasm_flags += '-gdwarf'
     endif
@@ -97,7 +97,7 @@ if host_cpu_family == 'x86_64'
   nasm = find_program('nasm')
 
   outputname = '@BASENAME@.o'
-   == 'windows'
+if host_system == 'windows' or host_system == 'cygwin'
     outputname = '@BASENAME@.obj'
   endif
 
