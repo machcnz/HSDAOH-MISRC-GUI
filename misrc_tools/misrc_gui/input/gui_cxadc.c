@@ -528,32 +528,27 @@ int gui_cxadc_get_current_config(gui_app_t *app, cxadc_current_config_t *out_con
     // Read each parameter from sysfs. Path format:
     // /sys/class/cxadc/cxadcN/device/parameters/{vmux,level,sixdb,center_offset}
     // Confirmed from cxadc-linux3 driver: mycxadc_attrs[] registers these names.
-    static const struct {
-        const char *name;
-        int        *field;
-    } params[] = {
-        { "vmux",          &out_config->vmux          },
-        { "level",         &out_config->level         },
-        { "center_offset", &out_config->center_offset },
-    };
+    const char *param_names[] = { "vmux", "level", "center_offset" };
+    int *param_fields[] = { &out_config->vmux, &out_config->level, &out_config->center_offset };
 
-    for (size_t i = 0; i < sizeof(params)/sizeof(params[0]); i++) {
+    for (size_t i = 0; i < 3; i++) {
         char path[128];
         snprintf(path, sizeof(path),
                  "/sys/class/cxadc/cxadc%d/device/parameters/%s",
-                 app->cxadc_device_index, params[i].name);
+                 app->cxadc_device_index, param_names[i]);
 
         FILE *f = fopen(path, "r");
         if (!f) {
             fprintf(stderr, "[CXADC] cannot read sysfs %s\n", path);
             return -1;
         }
-        fscanf(f, "%d", params[i].field);
+        if (fscanf(f, "%d", param_fields[i]) != 1) {
+            fprintf(stderr, "[CXADC] failed to read sysfs %s\n", path);
+            fclose(f);
+            return -1;
+        }
         fclose(f);
     }
-
-    // sixdb is a boolean - read separately
-    {
         char path[128];
         snprintf(path, sizeof(path),
                  "/sys/class/cxadc/cxadc%d/device/parameters/sixdb",
