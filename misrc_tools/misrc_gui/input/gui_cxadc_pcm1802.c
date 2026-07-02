@@ -242,7 +242,7 @@ static int pcm1802_win_open(pcm1802_ctx_t *ctx) {
 
 static int pcm1802_win_start(pcm1802_ctx_t *ctx) {
     pcm1802_win_state_t *s = &ctx->win;
-
+    HRESULT hr;
     /* Get device from stored endpoint ID */
     IMMDeviceEnumerator *enumerator = NULL;
     CoCreateInstance(&s_IID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
