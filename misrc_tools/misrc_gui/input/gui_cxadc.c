@@ -536,7 +536,6 @@ int gui_cxadc_get_current_config(gui_app_t *app, cxadc_current_config_t *out_con
         snprintf(path, sizeof(path),
                  "/sys/class/cxadc/cxadc%d/device/parameters/%s",
                  app->cxadc_device_index, param_names[i]);
-
         FILE *f = fopen(path, "r");
         if (!f) {
             fprintf(stderr, "[CXADC] cannot read sysfs %s\n", path);
@@ -549,6 +548,8 @@ int gui_cxadc_get_current_config(gui_app_t *app, cxadc_current_config_t *out_con
         }
         fclose(f);
     }
+
+    {
         char path[128];
         snprintf(path, sizeof(path),
                  "/sys/class/cxadc/cxadc%d/device/parameters/sixdb",
@@ -556,8 +557,8 @@ int gui_cxadc_get_current_config(gui_app_t *app, cxadc_current_config_t *out_con
         FILE *f = fopen(path, "r");
         if (f) {
             int v = 0;
-            fscanf(f, "%d", &v);
-            out_config->sixdb = v ? true : false;
+            if (fscanf(f, "%d", &v) == 1)
+                out_config->sixdb = v ? true : false;
             fclose(f);
         }
     }
