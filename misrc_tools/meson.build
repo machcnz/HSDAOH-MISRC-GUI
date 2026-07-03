@@ -123,6 +123,26 @@ if flac_dep.found()
   if host_system == 'windows'
     cflags += ['-DFLAC__NO_DLL=1']
   endif
+  # libFLAC 1.5.x is the first release with a reliable multithreaded encoder
+  # (FLAC__stream_encoder_set_num_threads, API version >= 14). Without
+  # HAVE_FLAC_THREADING the set_num_threads call in flac_writer.c is compiled
+  # out, pinning each channel's encoder to a single core regardless of the
+  # flac_threads setting. That makes level-8 encoding fall behind real-time at
+  # 40 MSPS and forces the record spill file to open even on fast SSDs.
+  # Hard guardrail: libFLAC < 1.5.0 is not supported for this build. Fail the
+  # configure rather than silently emitting a single-threaded binary, so a stale
+  # distro libFLAC 1.4.x cannot produce a GUI that spills on fast hardware.
+  flac_version = flac_dep.version()
+  if flac_version == ''
+    # Source/dist-only installs sometimes report an empty version; require a
+    # verifiable >= 1.5.0 rather than assuming.
+    error('libFLAC found but its version could not be determined; require >= 1.5.0 for multithreaded encode. Install libflac >= 1.5.0.')
+  endif
+  if not flac_version.version_compare('>=1.5.0')
+    error('libFLAC @0@ is too old; require >= 1.5.0 for multithreaded FLAC encode (found @0@). Install libflac >= 1.5.0.'.format(flac_version))
+  endif
+  cflags += ['-DHAVE_FLAC_THREADING=1']
+  message('libFLAC >= 1.5.0 found (@0@), FLAC multithreading enabled'.format(flac_version))
   message('FLAC found, building with FLAC support')
 else
   cflags += ['-DLIBFLAC_ENABLED=0']

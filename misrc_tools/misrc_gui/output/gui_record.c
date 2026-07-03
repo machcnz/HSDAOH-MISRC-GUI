@@ -266,6 +266,31 @@ static uint32_t gui_record_get_cpu_core_count(void) {
 #endif
 }
 
+// Resolve the per-channel FLAC encoder thread count.
+//
+// user_threads == 0  -> auto: pick a real parallel count with a 4-core target
+//   base so a single level-8 encoder stream can keep up with 40 MSPS on modern
+//   desktop CPUs. We use half the online cores (leaving headroom for capture /
+//   extract / display / audio / GUI), clamped to [4, 8]. On an 18-core box this
+//   resolves to 8 threads per channel; on an 8-core box it resolves to 4.
+// user_threads > 0   -> honor the user's explicit override verbatim.
+//
+// Returns 0 only when the core count cannot be determined, in which case the
+// caller falls back to libFLAC's own default.
+static uint32_t gui_record_resolve_flac_threads(int32_t user_threads) {
+    if (user_threads > 0) {
+        return (uint32_t)user_threads;
+    }
+    uint32_t cores = gui_record_get_cpu_core_count();
+    if (cores == 0) {
+        return 0;  // unknown -> let libFLAC pick its default
+    }
+    uint32_t half = cores / 2;
+    if (half < 4) half = 4;    // 4-core target base
+    if (half > 8) half = 8;    // cap: diminishing returns + leave headroom
+    return half;
+}
+
 static void gui_record_get_cpu_model(char *dst, size_t dst_len) {
     if (!dst || dst_len == 0) return;
     dst[0] = '\0';
@@ -2028,8 +2053,12 @@ static int gui_record_start_confirmed(gui_app_t *app) {
         config_b.compression_level = app->settings.flac_level;
         config_a.verify = app->settings.flac_verification;
         config_b.verify = app->settings.flac_verification;
-        config_a.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;  // 0 = auto
-        config_b.num_threads = (app->settings.flac_threads > 0) ? (uint32_t)app->settings.flac_threads : 0;
+        // Auto (flac_threads == 0) resolves to a real parallel count (4-core
+        // base, up to 8) so level-8 encode keeps up with 40 MSPS without forcing
+        // the record spill file. A user override (>0) is honored verbatim.
+        uint32_t resolved_flac_threads = gui_record_resolve_flac_threads(app->settings.flac_threads);
+        config_a.num_threads = resolved_flac_threads;
+        config_b.num_threads = resolved_flac_threads;
         config_a.affinity_enabled = app->settings.flac_affinity_enabled;
         config_b.affinity_enabled = app->settings.flac_affinity_enabled;
         snprintf(config_a.affinity_cpu_list, sizeof(config_a.affinity_cpu_list), "%s", app->settings.flac_affinity_cpu_list);
