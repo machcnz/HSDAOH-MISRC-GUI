@@ -166,6 +166,53 @@ def check_meson_fft_policy(meson_path: Path) -> int:
     return 0
 
 
+def check_meson_vendored_hsdaoh_policy(meson_path: Path) -> int:
+    """Ensure meson.build prefers the vendored .deps/install hsdaoh (mirrors CI)
+    so a bare local build cannot silently link a stale system libhsdaoh that
+    lacks the v1.0.9 connect fixes."""
+    meson_text = read_text(meson_path)
+    required_snippets = [
+        "hsdaoh_vendored_pc",
+        "fs.exists(hsdaoh_vendored_pc)",
+        "Using vendored hsdaoh from .deps/install (mirrors CI",
+        "declare_dependency",
+        "deps = [ hsdaoh_dep ]",
+    ]
+    for snippet in required_snippets:
+        if snippet not in meson_text:
+            return fail(f"meson.build is missing vendored-hsdaoh policy snippet: {snippet}")
+    forbidden_snippets = [
+        "deps = [ dependency('hsdaoh', static: windows_static_deps) ]",
+    ]
+    for snippet in forbidden_snippets:
+        if snippet in meson_text:
+            return fail(f"meson.build still contains bare system-hsdaoh dependency (no vendored guard): {snippet}")
+    return 0
+
+
+def check_built_gui_links_vendored_hsdaoh(repo_root: Path) -> int:
+    """Runtime check: if a local misrc_gui build exists, assert it links the
+    vendored hsdaoh from .deps/install, not a stale system libhsdaoh."""
+    gui = repo_root / "misrc_tools" / "build" / "misrc_gui"
+    if not gui.exists():
+        return 0  # no local build present; CI build uses AppImage bundling
+    res = run_checked(["ldd", str(gui)])
+    if res.returncode != 0:
+        return fail(f"ldd misrc_gui failed: {res.stderr.strip()}")
+    found_hsdaoh = False
+    for line in res.stdout.splitlines():
+        if "libhsdaoh" in line:
+            found_hsdaoh = True
+            stripped = line.strip()
+            if "/usr/local/lib/" in line or " /usr/lib/" in line or " /lib/" in line:
+                return fail(f"misrc_gui links a SYSTEM hsdaoh (stale, lacks v1.0.9 connect fixes); expected vendored .deps/install: {stripped}")
+            if ".deps/install" not in line:
+                return fail(f"misrc_gui links hsdaoh from unexpected path (expected .deps/install): {stripped}")
+    if not found_hsdaoh:
+        return fail("misrc_gui does not link libhsdaoh at all")
+    return 0
+
+
 def check_linux_desktop_metadata(workflow_path: Path) -> int:
     workflow_text = read_text(workflow_path)
     required_desktop_fields = [
@@ -611,6 +658,7 @@ def main() -> int:
         ("macOS brew install policy", lambda: check_macos_brew_install_policy(workflow_path)),
         ("workflow FFT dependency policy", lambda: check_workflow_fft_dependency_policy(workflow_path)),
         ("meson FFT policy", lambda: check_meson_fft_policy(meson_path)),
+        ("meson vendored hsdaoh policy", lambda: check_meson_vendored_hsdaoh_policy(meson_path)),
         ("cross-platform smoke tests", lambda: check_cross_platform_smoke_tests(workflow_path)),
         ("linux desktop metadata", lambda: check_linux_desktop_metadata(workflow_path)),
         ("macOS layout policy", lambda: check_macos_layout_policy(gui_c_path)),
@@ -629,6 +677,7 @@ def main() -> int:
     if not args.static_only:
         checks.insert(7, ("AppRun runtime behavior", lambda: check_apprun_runtime_behavior(workflow_path, icon_path)))
         checks.insert(8, ("record ringbuffer fallback runtime", lambda: check_record_ringbuffer_fallback_runtime(repo_root)))
+        checks.insert(9, ("built GUI links vendored hsdaoh", lambda: check_built_gui_links_vendored_hsdaoh(repo_root)))
 
     for name, check in checks:
         rc = check()

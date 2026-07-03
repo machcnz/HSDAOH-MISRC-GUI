@@ -114,7 +114,32 @@ if host_cpu_family == 'x86_64'
 endif
 
 
-deps = [ dependency('hsdaoh', static: windows_static_deps) ]
+# hsdaoh: prefer the vendored build in .deps/install (mirrors CI) so a bare
+# local `meson setup && ninja` cannot silently link a stale system libhsdaoh
+# that lacks the v1.0.9 connect fixes (e.g. /usr/local/lib/libhsdaoh.so.0.1.0
+# from an old `make install`). Fall back to pkg-config only if the vendored
+# install is absent, and warn loudly there so the gap is visible.
+fs = import('fs')
+hsdaoh_vendored_pc = meson.current_source_dir() / '..' / '.deps' / 'install' / 'lib' / 'pkgconfig' / 'hsdaoh.pc'
+if fs.exists(hsdaoh_vendored_pc)
+  vendored_pc_dir = meson.current_source_dir() / '..' / '.deps' / 'install' / 'lib' / 'pkgconfig'
+  hs_cflags = run_command('pkg-config', '--cflags', 'hsdaoh',
+                          env: {'PKG_CONFIG_PATH': vendored_pc_dir}, check: true).stdout().strip().split()
+  hs_libs = run_command('pkg-config', '--libs', 'hsdaoh',
+                        env: {'PKG_CONFIG_PATH': vendored_pc_dir}, check: true).stdout().strip().split()
+  hsdaoh_libdir = run_command('pkg-config', '--variable=libdir', 'hsdaoh',
+                              env: {'PKG_CONFIG_PATH': vendored_pc_dir}, check: true).stdout().strip()
+  hsdaoh_dep = declare_dependency(
+    compile_args: hs_cflags,
+    link_args: hs_libs + ['-Wl,-rpath,' + hsdaoh_libdir],
+  )
+  message('Using vendored hsdaoh from .deps/install (mirrors CI; libdir=' + hsdaoh_libdir + ')')
+else
+  hsdaoh_dep = dependency('hsdaoh', static: windows_static_deps)
+  warning('Vendored hsdaoh not found in .deps/install; falling back to system hsdaoh. ' +
+          'Build third_party/hsdaoh into .deps/install (see .github/workflows/build.yml) to mirror CI.')
+endif
+deps = [ hsdaoh_dep ]
 
 flac_dep =  dependency('flac', required : false, static: windows_static_deps)
 if flac_dep.found()
