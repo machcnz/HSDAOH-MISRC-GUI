@@ -124,7 +124,6 @@ jobs:
             imagemagick \
             libasound2-dev \
             libfftw3-dev \
-            libflac-dev \
             libgl1-mesa-dev \
             libusb-1.0-0-dev \
             libuvc-dev \
@@ -142,11 +141,62 @@ jobs:
             unzip \
             zip
 
-      - name: Build and install hsdaoh + raylib
+      - name: Fetch libFLAC 1.5.0 cache + build hsdaoh/raylib
         run: |
           set -eux
           DEPS_PREFIX="$PWD/.deps/install"
           mkdir -p .deps
+
+          # libFLAC 1.5.0 is required by misrc_tools/meson.build for the
+          # multithreaded encoder (FLAC__stream_encoder_set_num_threads, libFLAC
+          # API v14). Ubuntu 22.04's libflac-dev apt is stuck at 1.3.3, so fetch a
+          # prebuilt static lib from the harrypm/MISRC-ci-cache release (built on
+          # jammy/glibc-2.35, ABI-compatible with the runners). The arm64 prebuilt
+          # is produced by the one-off .github/workflows/flac-cache.yml job; until
+          # it exists the arm64 job falls back to building from the cached source
+          # tarball, so arm64 stays unblocked without the cache.
+          FLAC_VERSION="1.5.0"
+          CACHE_BASE="https://github.com/harrypm/MISRC-ci-cache/releases/download/flac-${FLAC_VERSION}-linux"
+          FLAC_ARCH="${{ matrix.arch }}"
+          PREBUILT_NAME="flac-${FLAC_VERSION}-prebuilt-linux-${FLAC_ARCH}.tar.xz"
+          PREBUILT_SHA_NAME="${PREBUILT_NAME}.sha256"
+          SRC_NAME="flac-${FLAC_VERSION}.tar.xz"
+          FLAC_SRC_SHA256="f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920"
+
+          if curl -fsSL -o "/tmp/${PREBUILT_NAME}" "${CACHE_BASE}/${PREBUILT_NAME}" \
+             && curl -fsSL -o "/tmp/${PREBUILT_SHA_NAME}" "${CACHE_BASE}/${PREBUILT_SHA_NAME}"; then
+            expected="$(awk '{print $1}' "/tmp/${PREBUILT_SHA_NAME}")"
+            actual="$(sha256sum "/tmp/${PREBUILT_NAME}" | awk '{print $1}')"
+            [[ "${actual}" == "${expected}" ]] || { echo "prebuilt libFLAC sha mismatch: expected ${expected} got ${actual}"; exit 1; }
+            rm -rf .deps/flac-prebuilt
+            mkdir -p .deps/flac-prebuilt "${DEPS_PREFIX}/lib/pkgconfig" "${DEPS_PREFIX}/include"
+            tar -xf "/tmp/${PREBUILT_NAME}" -C .deps/flac-prebuilt --strip-components=1
+            cp -R .deps/flac-prebuilt/lib/. "${DEPS_PREFIX}/lib/"
+            cp -R .deps/flac-prebuilt/include/. "${DEPS_PREFIX}/include/"
+            echo "Using cached prebuilt libFLAC ${FLAC_VERSION} for ${FLAC_ARCH}"
+          else
+            echo "No prebuilt libFLAC for ${FLAC_ARCH}; building from cached source tarball."
+            curl -fsSL -o "/tmp/${SRC_NAME}" "${CACHE_BASE}/${SRC_NAME}"
+            echo "${FLAC_SRC_SHA256}  /tmp/${SRC_NAME}" | sha256sum -c -
+            rm -rf .deps/flac-src .deps/flac
+            mkdir -p .deps/flac-src
+            tar -xf "/tmp/${SRC_NAME}" -C .deps/flac-src --strip-components=1
+            cmake -S .deps/flac-src -B .deps/flac/build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DWITH_OGG=OFF \
+              -DBUILD_TESTING=OFF \
+              -DCMAKE_INSTALL_PREFIX="${DEPS_PREFIX}"
+            cmake --build .deps/flac/build --parallel
+            cmake --install .deps/flac/build
+            echo "Built libFLAC ${FLAC_VERSION} from cached source for ${FLAC_ARCH}"
+          fi
+
+          # Sanity: vendored flac.pc must report 1.5.0 before meson sees it.
+          # meson.build hard-fails configure if this ever regresses below 1.5.0.
+          PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig:${DEPS_PREFIX}/lib64/pkgconfig" \
+            pkg-config --modversion flac
+
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
