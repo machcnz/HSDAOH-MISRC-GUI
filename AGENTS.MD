@@ -22,3 +22,7 @@
 - HARD DEV NOTE (hsdaoh API split): do not call `hsdaoh_start_stream(...)` directly in capture paths; always use `MISRC_HSDAOH_START_STREAM(...)` from `misrc_tools/common/hsdaoh_compat.h` so builds stay compatible with both 3-arg system headers and 4-arg vendored/upstream headers.
 - HARD DEV NOTE (mode-toggle lock timing): keep `CaptureModeToggle` editable while connected/capturing and only lock it once recording starts; do not lock mode selection on Connect.
 - HARD DEV NOTE (settings lock timing): keep settings/config controls editable while connected/capturing and only lock them once recording starts; do not lock settings on Connect.
+- HARD VCS SCOPE RULE: default all repo operations to local branches (`main`, `misrc_gui_dev`) and the user's fork remote (`harrypm`) unless the user explicitly names a different branch/remote.
+- HARD VCS SCOPE RULE: treat `origin` (upstream) as read-only by default; never push, force-push, merge into, or otherwise update `origin/*` unless the user explicitly asks for that exact remote action in the current prompt.
+- HARD VCS SCOPE RULE: before any push, confirm target remote and target branch explicitly in command form and require user confirmation if either target is ambiguous.
+- HARD VCS SCOPE RULE: when the user says "my repo", interpret it as `harrypm/*` unless they explicitly override it.
