@@ -17,6 +17,7 @@ cflags = warnings + [
   # glibc default feature set (needed for endian helpers like le16toh)
   '-D_DEFAULT_SOURCE',
 ]
+cflags += ['-DHSDAOH_UPSTREAM=1']
 
 ldflags = [
 ]
@@ -351,7 +352,7 @@ if raylib_dep.found()
     gui_ldflags += ['-lmincore']
     # simple_capture for device enumeration
     sources_gui += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
-    gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32']
+    gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lavrt', '-lksuser']
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
     sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'
