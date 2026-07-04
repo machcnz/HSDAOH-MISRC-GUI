@@ -17,7 +17,15 @@ cflags = warnings + [
   # glibc default feature set (needed for endian helpers like le16toh)
   '-D_DEFAULT_SOURCE',
 ]
-cflags += ['-DHSDAOH_UPSTREAM=1']
+# HSDAOH_UPSTREAM selects the upstream-hsdaoh reference capture path in
+# gui_capture.c (hsdaoh_data_info_t structured callback, stream_id routing).
+# That path is incomplete for MISRC: it hard-disables simple-capture (MISRC
+# mode) at gui_capture.c:~1407 and has no stream_id==1 (ChB) handler, so it
+# drops channel B and skips gui_capture_configure_handler. It is therefore
+# NOT used for Linux/macOS, which rely on the complete MISRC raw-callback +
+# frame-parser path (both channels). Windows keeps HSDAOH_UPSTREAM=1 to
+# preserve PR #12's (@machcnz) Windows HSDAOH connect fix (added alongside
+# the -lavrt/-lksuser GUI linker flags below). See the Windows block.
 
 ldflags = [
 ]
@@ -240,6 +248,11 @@ if host_system == 'windows' or host_system == 'cygwin'
     sources_capture += [ 'getopt/getopt.c' ]
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
+  # Windows keeps PR #12's HSDAOH_UPSTREAM build (upstream-hsdaoh reference
+  # path) which fixed a Windows HSDAOH connect no-go. Kept Windows-only because
+  # the upstream path is incomplete for MISRC dual-channel on Linux/macOS
+  # (no ChB handler, MISRC simple-capture disabled). See note above the hsdaoh block.
+  cflags += [ '-DHSDAOH_UPSTREAM=1' ]
   ldflags += [ '-static', '-static-libgcc' ]
   if meson.get_compiler('c').get_id() == 'gcc'
     ldflags += [ '-lgomp' ]
