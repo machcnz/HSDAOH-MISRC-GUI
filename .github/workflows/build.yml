@@ -200,6 +200,12 @@ jobs:
           rm -rf .deps/hsdaoh
           cp -R third_party/hsdaoh .deps/hsdaoh
           git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git .deps/raylib
+          # hsdaoh's CMakeLists uses pkg_check_modules(flac), so the vendored
+          # flac.pc in DEPS_PREFIX must be on PKG_CONFIG_PATH now -- the apt
+          # libflac-dev that used to provide a system flac.pc is no longer
+          # installed. This export also benefits raylib/hsdaoh CMake finders.
+          export PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig:${DEPS_PREFIX}/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CMAKE_PREFIX_PATH="${DEPS_PREFIX}:${CMAKE_PREFIX_PATH:-}"
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
