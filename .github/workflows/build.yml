@@ -206,6 +206,15 @@ jobs:
           # installed. This export also benefits raylib/hsdaoh CMake finders.
           export PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig:${DEPS_PREFIX}/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
           export CMAKE_PREFIX_PATH="${DEPS_PREFIX}:${CMAKE_PREFIX_PATH:-}"
+          # hsdaoh's hsdaoh_file tool target includes "FLAC/metadata.h" but does
+          # not link the flac pkg-config module, so it does not inherit flac's
+          # -I include dir from CMake. With the old apt libflac-dev the headers
+          # lived in /usr/include/FLAC (default system include path) so the
+          # missing -I was masked; the vendored headers in DEPS_PREFIX/include/FLAC
+          # are not on a default path. Export CFLAGS/CXXFLAGS with -I so every
+          # hsdaoh target (including hsdaoh_file) can resolve FLAC/*.h.
+          export CFLAGS="-I${DEPS_PREFIX}/include ${CFLAGS:-}"
+          export CXXFLAGS="-I${DEPS_PREFIX}/include ${CXXFLAGS:-}"
           cmake -S .deps/hsdaoh -B .deps/hsdaoh/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
