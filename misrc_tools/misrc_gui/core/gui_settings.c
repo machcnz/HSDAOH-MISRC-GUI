@@ -15,6 +15,7 @@
 #include <unistd.h>
 #else
 #include <direct.h>
+#include <shlobj.h>
 #endif
 
 #ifdef __APPLE__
@@ -624,17 +625,14 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     }
     (void)pclose(fp);
 #elif defined(_WIN32) || defined(_WIN64)
-    // PowerShell folder picker (requires Windows Forms)
-    const char *cmd =
-        "powershell -NoProfile -Command "
-        "\"Add-Type -AssemblyName System.Windows.Forms; "
-        "$f=New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "if($f.ShowDialog() -eq 'OK'){ $f.SelectedPath }\"";
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return false;
-    if (!fgets(picked, sizeof(picked), fp)) {
-        pclose(fp);
-        return false;
+    // Native Win32 folder picker - works from GUI subsystem without console
+    BROWSEINFOA bi = {0};
+    bi.lpszTitle = "Select output folder for MISRC captures";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    if (pidl) {
+        SHGetPathFromIDListA(pidl, picked);
+        CoTaskMemFree(pidl);
     }
     (void)pclose(fp);
 #else
