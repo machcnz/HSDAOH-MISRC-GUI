@@ -19,6 +19,7 @@
 #define CloseWindow Win32_CloseWindow
 #define ShowCursor Win32_ShowCursor
 #include <shlobj.h>
+#include <shobjidl.h> 
 #undef ShowCursor
 #undef CloseWindow
 #undef Rectangle
