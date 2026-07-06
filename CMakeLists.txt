@@ -126,8 +126,6 @@ else()
     endif()
 endif()
 
-# Enable upstream mode for RP2350
-add_definitions(-DHSDAOH_UPSTREAM=1)
 
 # Build options
 option(USE_SYSTEM_RAYLIB "Use system raylib instead of downloading" OFF)

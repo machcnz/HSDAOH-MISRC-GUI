@@ -248,11 +248,12 @@ if host_system == 'windows' or host_system == 'cygwin'
     sources_capture += [ 'getopt/getopt.c' ]
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
-  # Windows keeps PR #12's HSDAOH_UPSTREAM build (upstream-hsdaoh reference
-  # path) which fixed a Windows HSDAOH connect no-go. Kept Windows-only because
-  # the upstream path is incomplete for MISRC dual-channel on Linux/macOS
-  # (no ChB handler, MISRC simple-capture disabled). See note above the hsdaoh block.
-  cflags += [ '-DHSDAOH_UPSTREAM=1' ]
+  # Windows uses the same complete MISRC raw-callback + frame-parser path as
+  # Linux/macOS (both channels + 4ch audio). HSDAOH_UPSTREAM is NOT defined
+  # here: that upstream reference path drops ChB (no stream_id==1 handler) and
+  # disables MISRC simple-capture. PR #12's Windows HSDAOH connect fix is the
+  # -lavrt/-lksuser GUI linker flags on gui_ldflags below, independent of this
+  # define, and remain in place.
   ldflags += [ '-static', '-static-libgcc' ]
   if meson.get_compiler('c').get_id() == 'gcc'
     ldflags += [ '-lgomp' ]
