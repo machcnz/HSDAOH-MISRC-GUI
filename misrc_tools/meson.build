@@ -366,7 +366,7 @@ if raylib_dep.found()
     gui_ldflags += ['-lmincore']
     # simple_capture for device enumeration
     sources_gui += 'misrc_capture/simple_capture/simple_capture_mediafoundation.c'
-    gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lavrt', '-lksuser']
+    gui_ldflags += ['-lmf', '-lmfplat', '-lmfuuid', '-lmfreadwrite', '-lole32', '-lavrt', '-lksuser', '-luuid', '-lshell32']
   elif host_system == 'linux'
     gui_ldflags += ['-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11']
     sources_gui += 'misrc_capture/simple_capture/simple_capture_v4l2.c'

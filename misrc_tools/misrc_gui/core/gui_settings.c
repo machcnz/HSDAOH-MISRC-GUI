@@ -15,6 +15,16 @@
 #include <unistd.h>
 #else
 #include <direct.h>
+#define COBJMACROS
+#define INITGUID
+#define Rectangle Win32_Rectangle
+#define CloseWindow Win32_CloseWindow
+#define ShowCursor Win32_ShowCursor
+#include <shlobj.h>
+#include <shobjidl.h> 
+#undef ShowCursor
+#undef CloseWindow
+#undef Rectangle
 #endif
 
 #ifdef __APPLE__
@@ -624,19 +634,17 @@ bool gui_settings_choose_output_folder(gui_settings_t *settings) {
     }
     (void)pclose(fp);
 #elif defined(_WIN32) || defined(_WIN64)
-    // PowerShell folder picker (requires Windows Forms)
-    const char *cmd =
-        "powershell -NoProfile -Command "
-        "\"Add-Type -AssemblyName System.Windows.Forms; "
-        "$f=New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "if($f.ShowDialog() -eq 'OK'){ $f.SelectedPath }\"";
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return false;
-    if (!fgets(picked, sizeof(picked), fp)) {
-        pclose(fp);
-        return false;
+    // Native Win32 folder picker - uses GUI subsystem without console or powershell
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    BROWSEINFOA bi = {0};
+    bi.lpszTitle = "Select output folder for MISRC captures";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS;
+    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    if (pidl) {
+        SHGetPathFromIDListA(pidl, picked);
+        CoTaskMemFree(pidl);
     }
-    (void)pclose(fp);
+    if (hr == S_OK) CoUninitialize();
 #else
     // Linux/BSD: try zenity first, then kdialog.
     const char *cmd =
@@ -692,20 +700,28 @@ bool gui_settings_choose_playback_file(gui_settings_t *settings, int channel) {
     (void)pclose(fp);
     trim_newlines(picked);
 #elif defined(_WIN32) || defined(_WIN64)
-    // PowerShell OpenFileDialog (requires Windows Forms)
-    const char *cmd =
-        "powershell -NoProfile -Command "
-        "\"Add-Type -AssemblyName System.Windows.Forms; "
-        "$f=New-Object System.Windows.Forms.OpenFileDialog; "
-        "$f.Filter='FLAC files (*.flac)|*.flac|All files (*.*)|*.*'; "
-        "if($f.ShowDialog() -eq 'OK'){ $f.FileName }\"";
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return false;
-    if (!fgets(picked, sizeof(picked), fp)) {
-        pclose(fp);
-        return false;
+    // Native Win32 file picker using IFileOpenDialog
+    HRESULT hr2 = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog *pfd = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                    &IID_IFileOpenDialog, (void **)&pfd))) {
+        COMDLG_FILTERSPEC filter = { L"FLAC files", L"*.flac" };
+        IFileOpenDialog_SetFileTypes(pfd, 1, &filter);
+        IFileOpenDialog_SetTitle(pfd, L"Select FLAC playback file");
+        if (SUCCEEDED(IFileOpenDialog_Show(pfd, NULL))) {
+            IShellItem *psi = NULL;
+            if (SUCCEEDED(IFileOpenDialog_GetResult(pfd, &psi))) {
+                PWSTR wpath = NULL;
+                if (SUCCEEDED(IShellItem_GetDisplayName(psi, SIGDN_FILESYSPATH, &wpath))) {
+                    WideCharToMultiByte(CP_UTF8, 0, wpath, -1, picked, sizeof(picked), NULL, NULL);
+                    CoTaskMemFree(wpath);
+                }
+                IShellItem_Release(psi);
+            }
+        }
+        IFileOpenDialog_Release(pfd);
     }
-    (void)pclose(fp);
+    if (hr2 == S_OK) CoUninitialize();
     trim_newlines(picked);
 #else
     // Linux/BSD: try zenity first, then kdialog.
