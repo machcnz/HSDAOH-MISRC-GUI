@@ -15,6 +15,8 @@
 #include <unistd.h>
 #else
 #include <direct.h>
+#define COBJMACROS
+#define INITGUID
 #define Rectangle Win32_Rectangle
 #define CloseWindow Win32_CloseWindow
 #define ShowCursor Win32_ShowCursor
