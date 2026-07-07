@@ -2184,8 +2184,9 @@ static void render_toolbar(gui_app_t *app) {
                 }
             }
         }
-        // Record button
-        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
+        // Record button - updated to support finalising code
+        bool record_finalizing = gui_record_is_finalizing();
+        Color record_color = record_finalizing ? (Color){184, 118, 20, 255} : (app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON);
         if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
         CLAY(CLAY_ID("RecordButton"), {
             .layout = {
@@ -2196,7 +2197,7 @@ static void render_toolbar(gui_app_t *app) {
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
             Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
-            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
+            CLAY_TEXT(record_finalizing ? CLAY_STRING("Finalize") : (app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record")),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
         }
         // Record limit button (clock icon)
@@ -3363,9 +3364,12 @@ void gui_handle_interactions(gui_app_t *app) {
             gui_settings_save(&app->settings);
         }
 
-        // Check record button
+        // Check record button - UI indicates record-write to disk finialization
+        // Mitigate app appearing hung
         if (Clay_PointerOver(CLAY_ID("RecordButton")) && app->is_capturing) {
-            if (app->is_recording) {
+            if (gui_record_is_finalizing()) {
+                gui_app_set_status(app, "Finalizing previous recording...");
+            } else if (app->is_recording) {
                 gui_app_stop_recording(app);
             } else {
                 gui_app_start_recording(app);
