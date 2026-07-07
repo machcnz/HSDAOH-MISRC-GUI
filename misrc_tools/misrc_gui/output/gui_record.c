@@ -343,6 +343,10 @@ static const char *gui_record_device_type_name(const gui_app_t *app) {
         case DEVICE_TYPE_FX3:
             return "fx3";
 #endif
+#ifdef ENABLE_DDD
+        case DEVICE_TYPE_DDD:
+            return "ddd";
+#endif
         default:
             return "unknown";
     }

@@ -241,6 +241,18 @@ else
   endif
 endif
 
+# DdD (DomesdayDuplicator) support (optional, uses libusb on all platforms)
+ddd_enabled = false
+libusb_ddd_dep = dependency('libusb-1.0', required : false, static: windows_static_deps)
+if libusb_ddd_dep.found()
+  deps += [ libusb_ddd_dep ]
+  cflags += ['-DENABLE_DDD=1']
+  ddd_enabled = true
+  message('libusb-1.0 found, building with DdD support')
+else
+  message('libusb-1.0 not found, building without DdD support')
+endif
+
 
 if host_system == 'windows' or host_system == 'cygwin'
   if meson.get_compiler('c').get_id() != 'gcc' and meson.get_compiler('c').get_id() != 'clang'
@@ -346,6 +358,11 @@ if raylib_dep.found()
   # Add FX3 support to GUI if available
   if fx3_enabled
     sources_gui += 'misrc_gui/input/gui_fx3.c'
+  endif
+
+  # Add DdD support to GUI if available
+  if ddd_enabled
+    sources_gui += 'misrc_gui/input/gui_ddd.c'
   endif
 
   gui_deps = deps + [ raylib_dep, fftw3f_dep ]

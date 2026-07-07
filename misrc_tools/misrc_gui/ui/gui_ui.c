@@ -73,6 +73,16 @@ static bool gui_ui_selected_device_is_cxadc(const gui_app_t *app, bool *clockgen
     return true;
 }
 
+#ifdef ENABLE_DDD
+// DdD is single-channel (channel A only); channel B has no signal source.
+static bool gui_ui_selected_device_is_ddd(const gui_app_t *app)
+{
+    if (!app) return false;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return false;
+    return app->devices[app->selected_device].type == DEVICE_TYPE_DDD;
+}
+#endif
+
 static void gui_ui_trace_capture_mode_state(gui_app_t *app, const char *source, bool force) {
     if (!app) return;
     bool ui_mode = s_capture_mode_state_misrc;
@@ -346,6 +356,11 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
         s_capture_mode_state_initialized = true;
         gui_ui_trace_capture_mode_state(app, "ui_init_from_settings", true);
     }
+#ifdef ENABLE_DDD
+    bool ddd_mode = gui_ui_selected_device_is_ddd(app);
+#else
+    bool ddd_mode = false;
+#endif
     bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
     bool expected_mode = s_capture_mode_state_misrc;
     if (cxadc_mode) {
@@ -413,6 +428,25 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
             gui_settings_save(&app->settings);
         }
     }
+#ifdef ENABLE_DDD
+    if (ddd_mode) {
+        // DdD is single-channel: force channel A on, channel B off. Channel B
+        // has no signal source (the 32-bit packed B field is always 0), so
+        // recording it would produce a silent empty file.
+        bool ddd_settings_changed = false;
+        if (!app->settings.capture_a) {
+            app->settings.capture_a = true;
+            ddd_settings_changed = true;
+        }
+        if (app->settings.capture_b) {
+            app->settings.capture_b = false;
+            ddd_settings_changed = true;
+        }
+        if (ddd_settings_changed) {
+            gui_settings_save(&app->settings);
+        }
+    }
+#endif
     gui_ui_trace_capture_mode_state(app, "gui_ui_sync_capture_mode_state", false);
 }
 
@@ -1032,6 +1066,14 @@ static int toolbar_title_font_size(void) {
 static void render_settings_panel(gui_app_t *app) {
     if (!app->settings_panel_open) return;
     bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
+#ifdef ENABLE_DDD
+    bool settings_ddd_mode = gui_ui_selected_device_is_ddd(app);
+#else
+    bool settings_ddd_mode = false;
+#endif
+    // DdD is single-channel: channel B has no signal source, so the RF B
+    // toggle, bit-depth, and tag controls are disabled (grayed out).
+    bool settings_b_disabled = settings_cxadc_mode || settings_ddd_mode;
 
     // Backdrop
     CLAY(CLAY_ID("SettingsBackdrop"), {
@@ -1257,23 +1299,26 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                     }
 
                     CLAY(CLAY_ID("ToggleRowCaptureB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleCaptureB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(app->settings.capture_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT(app->settings.capture_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color cap_b_toggle_bg = settings_b_disabled ? ui_disabled_color(app->settings.capture_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON) : (app->settings.capture_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON);
+                        Color cap_b_toggle_fg = settings_b_disabled ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY(CLAY_ID("ToggleCaptureB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(cap_b_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                            CLAY_TEXT(app->settings.capture_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(cap_b_toggle_fg) }));
                         }
-                        CLAY_TEXT(CLAY_STRING("RF B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                        Color rf_b_label_fg = settings_b_disabled ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        CLAY_TEXT(CLAY_STRING("RF B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(rf_b_label_fg) }));
 
                         CLAY(CLAY_ID("CaptureRowSpacerB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
                         snprintf(settings_rf_bits_b_display, sizeof(settings_rf_bits_b_display), "%s-bit", rf_bits_label(app->settings.rf_bits_b));
-                        Color rf_bits_b_bg = settings_cxadc_mode ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
-                        Color rf_bits_b_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color rf_bits_b_bg = settings_b_disabled ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rf_bits_b_fg = settings_b_disabled ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("RfBitsBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rf_bits_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_rf_bits_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rf_bits_b_fg) }));
                         }
-                        Color rf_tag_b_bg = app->settings.auto_names_enabled ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
-                        Color rf_tag_b_fg = app->settings.auto_names_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        Color rf_tag_b_bg = (app->settings.auto_names_enabled && !settings_b_disabled) ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
+                        Color rf_tag_b_fg = (app->settings.auto_names_enabled && !settings_b_disabled) ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("RfTagBField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(rf_tag_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *rf_tag_b = app->settings.rf_channel_tags[1][0] ? app->settings.rf_channel_tags[1] : "(tag)";
-                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_B) && app->settings.auto_names_enabled) {
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_B) && app->settings.auto_names_enabled && !settings_b_disabled) {
                                 snprintf(settings_rf_tag_b_display, sizeof(settings_rf_tag_b_display), "%s", gui_ui_build_text_with_caret(rf_tag_b, s_active_text_cursor));
                                 CLAY_TEXT(make_string(settings_rf_tag_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_b_fg) }));
                             } else {
@@ -1840,6 +1885,9 @@ static const char *gui_ui_device_type_name(device_type_t type) {
         case DEVICE_TYPE_PLAYBACK:       return "Playback";
 #ifdef ENABLE_FX3
         case DEVICE_TYPE_FX3:            return "FX3";
+#endif
+#ifdef ENABLE_DDD
+        case DEVICE_TYPE_DDD:            return "DdD";
 #endif
         default:                         return "Unknown";
     }
@@ -2615,6 +2663,16 @@ static void render_channel_stats(gui_app_t *app, int channel) {
 
 // Render the channels panel - each channel has VU meter + waveform + stats grouped together
 static void render_channels_panel(gui_app_t *app) {
+#ifdef ENABLE_DDD
+    // DdD is single-channel: hide the Channel B row entirely so channel A
+    // expands to fill the preview area. Channel B has no signal source (the
+    // 32-bit packed B field is always 0), so showing it would just display a
+    // flat zero line and dead stats.
+    bool ddd_single_channel = gui_ui_selected_device_is_ddd(app);
+#else
+    bool ddd_single_channel = false;
+#endif
+
     // Setup custom element data for this frame
     s_vu_a_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_VU_METER;
     s_vu_a_element.customData.vu_meter.meter = &app->vu_a;
@@ -2674,27 +2732,31 @@ static void render_channels_panel(gui_app_t *app) {
         }
 
         // Channel B row: VU meter + waveform + stats
-        CLAY(CLAY_ID("ChannelBRow"), {
-            .layout = {
-                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
-                .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                .childGap = 4
+        // Hidden entirely for DdD (single-channel device) — channel A expands
+        // to fill the full preview height instead.
+        if (!ddd_single_channel) {
+            CLAY(CLAY_ID("ChannelBRow"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 4
+                }
+            }) {
+                // VU meter B - custom element
+                CLAY(CLAY_ID("VUMeterB"), {
+                    .layout = { .sizing = { CLAY_SIZING_FIXED(70), CLAY_SIZING_GROW(0) } },
+                    .custom = { .customData = &s_vu_b_element }
+                }) {}
+
+                // Oscilloscope canvas B - custom element
+                CLAY(CLAY_ID("OscilloscopeCanvasB"), {
+                    .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } },
+                    .custom = { .customData = &s_osc_b_element }
+                }) {}
+
+                // Stats panel B
+                render_channel_stats(app, 1);
             }
-        }) {
-            // VU meter B - custom element
-            CLAY(CLAY_ID("VUMeterB"), {
-                .layout = { .sizing = { CLAY_SIZING_FIXED(70), CLAY_SIZING_GROW(0) } },
-                .custom = { .customData = &s_vu_b_element }
-            }) {}
-
-            // Oscilloscope canvas B - custom element
-            CLAY(CLAY_ID("OscilloscopeCanvasB"), {
-                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } },
-                .custom = { .customData = &s_osc_b_element }
-            }) {}
-
-            // Stats panel B
-            render_channel_stats(app, 1);
         }
     }
 }
@@ -3393,6 +3455,12 @@ void gui_handle_interactions(gui_app_t *app) {
         // Settings panel interactions
         if (app->settings_panel_open) {
             bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
+#ifdef ENABLE_DDD
+            bool settings_ddd_mode = gui_ui_selected_device_is_ddd(app);
+#else
+            bool settings_ddd_mode = false;
+#endif
+            bool settings_b_disabled = settings_cxadc_mode || settings_ddd_mode;
             if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
                 app->settings_panel_open = false;
                 gui_ui_clear_text_edit();
@@ -3417,6 +3485,8 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
                 if (settings_cxadc_mode) {
                     gui_app_set_status(app, "CXADC capture mapping is fixed by detected card count");
+                } else if (settings_ddd_mode) {
+                    gui_app_set_status(app, "DdD is single-channel; channel B has no signal source");
                 } else {
                     app->settings.capture_b = !app->settings.capture_b;
                     gui_settings_save(&app->settings);
@@ -3486,6 +3556,8 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
                 if (settings_cxadc_mode) {
                     gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else if (settings_ddd_mode) {
+                    gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
                 } else {
                     app->settings.enable_resample_b = !app->settings.enable_resample_b;
                     gui_settings_save(&app->settings);
@@ -3494,6 +3566,8 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("ResampleRateBBox"))) {
                 if (settings_cxadc_mode) {
                     gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
+                } else if (settings_ddd_mode) {
+                    gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
                 } else {
                     app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
                     gui_settings_save(&app->settings);
