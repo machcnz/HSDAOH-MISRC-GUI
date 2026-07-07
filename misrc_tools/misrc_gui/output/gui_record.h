@@ -48,6 +48,9 @@ bool gui_record_is_pending(void);
 // Stop recording
 void gui_record_stop(gui_app_t *app);
 
+// Returns true while record-stop finalization is running in background.
+bool gui_record_is_finalizing(void);
+
 // Check if recording is active
 bool gui_record_is_active(void);
 
