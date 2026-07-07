@@ -248,12 +248,15 @@ if host_system == 'windows' or host_system == 'cygwin'
     sources_capture += [ 'getopt/getopt.c' ]
   endif
   cflags += [ '-DNTDDI_VERSION=NTDDI_WIN10_RS4', '-D_WIN32_WINNT=_WIN32_WINNT_WIN10' ]
-  # Windows uses the same complete MISRC raw-callback + frame-parser path as
-  # Linux/macOS (both channels + 4ch audio). HSDAOH_UPSTREAM is NOT defined
-  # here: that upstream reference path drops ChB (no stream_id==1 handler) and
-  # disables MISRC simple-capture. PR #12's Windows HSDAOH connect fix is the
-  # -lavrt/-lksuser GUI linker flags on gui_ldflags below, independent of this
-  # define, and remain in place.
+  # The below line must be included to build HSDAOH 
+  # Windows keeps HSDAOH_UPSTREAM=1 to use the upstream-hsdaoh reference capture
+  # path which includes PR #12's (@machcnz) Windows HSDAOH connect fix via
+  # libusb/WinUSB. Without this define, hsdaoh_open() fails to claim the MS2130
+  # USB interface on Windows and the device cannot connect. The MISRC raw-callback
+  # + frame-parser path (used on Linux/macOS for both channels) does not have the
+  # Windows-specific USB claim sequence needed for the MS2130.
+  # The -lavrt/-lksuser GUI linker flags below are also part of PR #12's fix.
+  cflags += [ '-DHSDAOH_UPSTREAM=1' ]
   ldflags += [ '-static', '-static-libgcc' ]
   if meson.get_compiler('c').get_id() == 'gcc'
     ldflags += [ '-lgomp' ]
