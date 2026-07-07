@@ -248,6 +248,12 @@ typedef struct {
     float time_scale;         // Time per division (ms)
     float amplitude_scale;    // Amplitude scale factor
 
+    // Device discovery: V4L2/simple_capture device enumeration is opt-in.
+    // Disabled by default since most users use hsdaoh/CXADC/DdD/FX3 backends;
+    // enabling it lists OS video capture devices (e.g. MS2130 HDMI capture)
+    // in the device dropdown.
+    bool discover_simple_capture;
+
     // Playback settings
     char playback_file_a[MAX_FILENAME_LEN];   // FLAC file for channel A playback
     char playback_file_b[MAX_FILENAME_LEN];   // FLAC file for channel B playback

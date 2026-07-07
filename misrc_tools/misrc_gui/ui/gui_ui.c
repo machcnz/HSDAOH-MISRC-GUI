@@ -83,6 +83,17 @@ static bool gui_ui_selected_device_is_ddd(const gui_app_t *app)
 }
 #endif
 
+#ifdef ENABLE_FX3
+// FX3 is a distinct USB backend; showing its name as the mode label avoids
+// confusion with the hsdaoh-specific MISRC/HSDAOH A/B-swap toggle.
+static bool gui_ui_selected_device_is_fx3(const gui_app_t *app)
+{
+    if (!app) return false;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return false;
+    return app->devices[app->selected_device].type == DEVICE_TYPE_FX3;
+}
+#endif
+
 static void gui_ui_trace_capture_mode_state(gui_app_t *app, const char *source, bool force) {
     if (!app) return;
     bool ui_mode = s_capture_mode_state_misrc;
@@ -2030,6 +2041,32 @@ static void render_version_info_window(gui_app_t *app)
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
         }
 
+        // V4L2 Device List toggle (opt-in simple_capture/V4L2 device discovery).
+        // Disabled by default; enabling lists OS video capture devices in the
+        // device dropdown. Lives here in the info panel since it is not a
+        // daily-use setting.
+        CLAY(CLAY_ID("VersionInfoV4l2Row"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoV4l2Label"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("V4L2 devices:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("VersionInfoV4l2Toggle"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(app->settings.discover_simple_capture ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(app->settings.discover_simple_capture ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+            CLAY_TEXT(CLAY_STRING("list OS video capture devices"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+        }
+
         // Copyright
         CLAY_TEXT(CLAY_STRING(MIRSC_TOOLS_COPYRIGHT),
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
@@ -2121,17 +2158,33 @@ static void render_toolbar(gui_app_t *app) {
             CLAY_TEXT(app->is_capturing ? CLAY_STRING("Disconnect") : CLAY_STRING("Connect"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
-        // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B)
+        // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B).
+        // For non-hsdaoh USB backends (CXADC, FX3, DdD) the MISRC/HSDAOH A/B-swap
+        // concept does not apply, so the toggle shows the backend name as the
+        // mode label and is disabled — this avoids confusion about which
+        // driver/interface is active.
         bool cxadc_clockgen_mode = false;
         bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, &cxadc_clockgen_mode);
+#ifdef ENABLE_FX3
+        bool fx3_mode = gui_ui_selected_device_is_fx3(app);
+#else
+        bool fx3_mode = false;
+#endif
+#ifdef ENABLE_DDD
+        bool ddd_mode = gui_ui_selected_device_is_ddd(app);
+#else
+        bool ddd_mode = false;
+#endif
         bool mode_source_runtime = app->is_recording;
         bool mode_misrc = mode_source_runtime ? app->capture_mode_runtime_misrc
                                               : app->user_capture_mode_misrc;
-        if (cxadc_mode) {
+        if (cxadc_mode || ddd_mode) {
             mode_misrc = false;
         }
         gui_ui_trace_capture_mode_render(app, mode_misrc, mode_source_runtime);
-        bool mode_change_allowed = !app->is_recording && !cxadc_mode;
+        // Toggle is only clickable for hsdaoh/simple_capture backends where
+        // the MISRC/HSDAOH A/B-swap is meaningful.
+        bool mode_change_allowed = !app->is_recording && !cxadc_mode && !fx3_mode && !ddd_mode;
         Color mode_bg = mode_misrc ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
         if (!mode_change_allowed) {
             mode_bg = ui_disabled_color(mode_bg);
@@ -2148,6 +2201,10 @@ static void render_toolbar(gui_app_t *app) {
             const char *mode_label = NULL;
             if (cxadc_mode) {
                 mode_label = cxadc_clockgen_mode ? "Mode: CXADC Clockgen" : "Mode: CXADC";
+            } else if (fx3_mode) {
+                mode_label = "Mode: FX3";
+            } else if (ddd_mode) {
+                mode_label = "Mode: DdD";
             } else {
                 mode_label = mode_misrc ? "Mode: MISRC" : "Mode: HSDAOH";
             }
@@ -3202,6 +3259,18 @@ void gui_handle_interactions(gui_app_t *app) {
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         // Version info popup modal interactions (consume before toolbar underneath)
         if (s_version_info_window_open) {
+            if (Clay_PointerOver(CLAY_ID("VersionInfoV4l2Toggle"))) {
+                // Toggle V4L2/simple_capture device discovery and re-enumerate
+                // so the device dropdown reflects the new setting immediately.
+                app->settings.discover_simple_capture = !app->settings.discover_simple_capture;
+                gui_settings_save(&app->settings);
+                gui_app_enumerate_devices(app);
+                gui_app_set_status(app, app->settings.discover_simple_capture
+                    ? "V4L2 device discovery enabled"
+                    : "V4L2 device discovery disabled");
+                gui_ui_set_click_consumed();
+                return;
+            }
             if (Clay_PointerOver(CLAY_ID("VersionInfoCloseButton"))) {
                 s_version_info_window_open = false;
                 gui_ui_set_click_consumed();
@@ -3343,6 +3412,16 @@ void gui_handle_interactions(gui_app_t *app) {
         bool mode_toggle_hit = Clay_PointerOver(CLAY_ID("CaptureModeToggle"));
         bool mode_toggle_cxadc_clockgen = false;
         bool mode_toggle_is_cxadc = gui_ui_selected_device_is_cxadc(app, &mode_toggle_cxadc_clockgen);
+#ifdef ENABLE_FX3
+        bool mode_toggle_is_fx3 = gui_ui_selected_device_is_fx3(app);
+#else
+        bool mode_toggle_is_fx3 = false;
+#endif
+#ifdef ENABLE_DDD
+        bool mode_toggle_is_ddd = gui_ui_selected_device_is_ddd(app);
+#else
+        bool mode_toggle_is_ddd = false;
+#endif
         if (mode_toggle_hit) {
             TraceLog(LOG_INFO,
                      "MODE CLICK TRACE: x=%.1f y=%.1f recording=%d capturing=%d user=%s runtime=%s settings=%s",
@@ -3371,6 +3450,10 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_app_set_status(app, mode_toggle_cxadc_clockgen
                     ? "CXADC Clockgen mode is fixed by detected card count"
                     : "CXADC mode is fixed by detected card count");
+            } else if (mode_toggle_is_fx3) {
+                gui_app_set_status(app, "FX3 backend selected; MISRC/HSDAOH mode not applicable");
+            } else if (mode_toggle_is_ddd) {
+                gui_app_set_status(app, "DdD backend selected; MISRC/HSDAOH mode not applicable");
             } else if (app->is_recording) {
                 TraceLog(LOG_INFO,
                          "MODE TRACE: source=CaptureModeToggle blocked current=%s recording=1",

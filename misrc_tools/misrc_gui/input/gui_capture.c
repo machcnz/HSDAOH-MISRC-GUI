@@ -1054,11 +1054,11 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     misrc_device_list_t devices;
     misrc_device_list_init(&devices);
 #if defined(ENABLE_DDD)
-    int count = misrc_device_enumerate_ddd(&devices, true, true, true);
+    int count = misrc_device_enumerate_ddd(&devices, true, app->settings.discover_simple_capture, true);
 #elif defined(ENABLE_FX3)
-    int count = misrc_device_enumerate_fx3(&devices, true, true, true);
+    int count = misrc_device_enumerate_fx3(&devices, true, app->settings.discover_simple_capture, true);
 #else
-    int count = misrc_device_enumerate(&devices, true, true);
+    int count = misrc_device_enumerate(&devices, true, app->settings.discover_simple_capture);
 #endif
 
     if (count < 0) {
