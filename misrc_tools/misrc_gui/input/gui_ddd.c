@@ -38,12 +38,12 @@
 #ifndef NOUSER
 #define NOUSER
 #endif
-#include <libusb-1.0/libusb.h>
+#include "../../common/libusb_compat.h"
 #undef WIN32_LEAN_AND_MEAN
 #undef NOGDI
 #undef NOUSER
 #else
-#include <libusb-1.0/libusb.h>
+#include "../../common/libusb_compat.h"
 #endif
 
 #include "gui_ddd.h"
@@ -70,6 +70,14 @@ static int s_ddd_interface = 0;
 static uint8_t s_ddd_bulk_ep = DDD_EP_BULK_IN;
 static atomic_bool s_ddd_transfer_ready = false;
 
+typedef struct ddd_stream_path {
+    int interface_number;
+    int alternate_setting;
+    uint8_t endpoint_address;
+    uint16_t max_packet_size;
+    bool found;
+} ddd_stream_path_t;
+
 // Sequence-number validation state (capture thread only). The DdD sequence
 // number is constant for 65536 samples then advances by 1 (mod 64). We only
 // report a dropout when the sequence skips a value or jumps backward — a
@@ -95,6 +103,49 @@ static void gui_ddd_usb_exit(void) {
         libusb_exit(s_ddd_ctx);
         s_ddd_ctx = NULL;
     }
+}
+
+static ddd_stream_path_t gui_ddd_find_stream_path(libusb_device *device) {
+    ddd_stream_path_t best = {
+        .interface_number = 0,
+        .alternate_setting = 0,
+        .endpoint_address = DDD_EP_BULK_IN,
+        .max_packet_size = 0,
+        .found = false,
+    };
+
+    struct libusb_config_descriptor *config = NULL;
+    int r = libusb_get_active_config_descriptor(device, &config);
+    if (r != 0 || !config) {
+        r = libusb_get_config_descriptor(device, 0, &config);
+        if (r != 0 || !config) {
+            return best;
+        }
+    }
+
+    for (int if_i = 0; if_i < config->bNumInterfaces; if_i++) {
+        const struct libusb_interface *iface = &config->interface[if_i];
+        for (int alt = 0; alt < iface->num_altsetting; alt++) {
+            const struct libusb_interface_descriptor *id = &iface->altsetting[alt];
+            for (int ep = 0; ep < id->bNumEndpoints; ep++) {
+                const struct libusb_endpoint_descriptor *ed = &id->endpoint[ep];
+                bool is_bulk = (ed->bmAttributes & 0x03) == LIBUSB_TRANSFER_TYPE_BULK;
+                bool is_in = (ed->bEndpointAddress & LIBUSB_ENDPOINT_IN) != 0;
+                if (!is_bulk || !is_in) continue;
+
+                if (!best.found || ed->wMaxPacketSize > best.max_packet_size) {
+                    best.interface_number = id->bInterfaceNumber;
+                    best.alternate_setting = id->bAlternateSetting;
+                    best.endpoint_address = ed->bEndpointAddress;
+                    best.max_packet_size = ed->wMaxPacketSize;
+                    best.found = true;
+                }
+            }
+        }
+    }
+
+    libusb_free_config_descriptor(config);
+    return best;
 }
 
 //-----------------------------------------------------------------------------
@@ -185,7 +236,6 @@ int gui_ddd_enumerate(ddd_device_info_t *devices, int max_devices) {
 //-----------------------------------------------------------------------------
 
 int gui_ddd_open(gui_app_t *app, int device_index) {
-    (void)app;
 
     if (gui_ddd_usb_init() != 0) {
         fprintf(stderr, "[DdD] Failed to initialize libusb\n");
@@ -219,6 +269,22 @@ int gui_ddd_open(gui_app_t *app, int device_index) {
         if (r < 0) {
             fprintf(stderr, "[DdD] Failed to open device: %s\n",
                     libusb_error_name(r));
+            if (r == LIBUSB_ERROR_ACCESS) {
+#if defined(_WIN32)
+                fprintf(stderr, "[DdD] Access denied. Install/bind a WinUSB/libusbK "
+                                "driver for the DdD device interface.\n");
+                gui_app_set_status(app, "DdD access denied (install WinUSB/libusbK driver)");
+#elif defined(__APPLE__)
+                fprintf(stderr, "[DdD] Access denied. On macOS, run with appropriate "
+                                "permissions and allow USB device access.\n");
+                gui_app_set_status(app, "DdD access denied (check macOS USB permissions)");
+#else
+                fprintf(stderr, "[DdD] Access denied. Check udev/device permissions.\n");
+                gui_app_set_status(app, "DdD access denied (check USB permissions)");
+#endif
+            } else {
+                gui_app_set_status(app, "Failed to open DdD device");
+            }
             libusb_free_device_list(devlist, 1);
             gui_ddd_usb_exit();
             return -1;
@@ -238,17 +304,50 @@ int gui_ddd_open(gui_app_t *app, int device_index) {
             fprintf(stderr, "[DdD] WARNING: Device connected at high-speed, "
                     "not SuperSpeed. DdD requires USB 3.0 for full 40 MSPS.\n");
         }
+        // Determine the streaming interface/endpoint from descriptors
+        ddd_stream_path_t stream_path = gui_ddd_find_stream_path(devlist[i]);
+        s_ddd_interface = stream_path.interface_number;
+        s_ddd_bulk_ep = stream_path.endpoint_address;
+        if (stream_path.found) {
+            fprintf(stderr, "[DdD] Using interface %d alt %d, bulk IN endpoint 0x%02X "
+                            "(max packet %u)\n",
+                    stream_path.interface_number,
+                    stream_path.alternate_setting,
+                    stream_path.endpoint_address,
+                    stream_path.max_packet_size);
+        } else {
+            fprintf(stderr, "[DdD] WARNING: Could not auto-discover stream path; "
+                            "using defaults interface %d, endpoint 0x%02X\n",
+                    s_ddd_interface, s_ddd_bulk_ep);
+        }
+
+#if LIBUSB_API_VERSION >= 0x01000106
+        // Let libusb auto-detach where supported (Linux). Non-fatal elsewhere.
+        r = libusb_set_auto_detach_kernel_driver(s_ddd_handle, 1);
+        if (r < 0 && r != LIBUSB_ERROR_NOT_SUPPORTED) {
+            fprintf(stderr, "[DdD] Warning: auto-detach request failed: %s\n",
+                    libusb_error_name(r));
+        }
+#endif
 
         // Detach kernel driver if active
-        if (libusb_kernel_driver_active(s_ddd_handle, s_ddd_interface) == 1) {
+        r = libusb_kernel_driver_active(s_ddd_handle, s_ddd_interface);
+        if (r == 1) {
             fprintf(stderr, "[DdD] Detaching kernel driver from interface %d\n",
                     s_ddd_interface);
-            libusb_detach_kernel_driver(s_ddd_handle, s_ddd_interface);
+            int detach_r = libusb_detach_kernel_driver(s_ddd_handle, s_ddd_interface);
+            if (detach_r < 0 && detach_r != LIBUSB_ERROR_NOT_SUPPORTED) {
+                fprintf(stderr, "[DdD] Warning: detach kernel driver failed: %s\n",
+                        libusb_error_name(detach_r));
+            }
+        } else if (r < 0 && r != LIBUSB_ERROR_NOT_SUPPORTED) {
+            fprintf(stderr, "[DdD] Warning: kernel-driver query failed on interface %d: %s\n",
+                    s_ddd_interface, libusb_error_name(r));
         }
 
         // Set configuration
         r = libusb_set_configuration(s_ddd_handle, 1);
-        if (r < 0 && r != LIBUSB_ERROR_BUSY) {
+        if (r < 0 && r != LIBUSB_ERROR_BUSY && r != LIBUSB_ERROR_NOT_SUPPORTED) {
             fprintf(stderr, "[DdD] Warning: Failed to set configuration 1: %s\n",
                     libusb_error_name(r));
         } else {
@@ -267,35 +366,24 @@ int gui_ddd_open(gui_app_t *app, int device_index) {
             return -1;
         }
         fprintf(stderr, "[DdD] Claimed interface %d\n", s_ddd_interface);
-
-        // Discover the bulk IN endpoint from the configuration descriptor
-        s_ddd_bulk_ep = 0;
-        struct libusb_config_descriptor *config = NULL;
-        if (libusb_get_active_config_descriptor(devlist[i], &config) == 0) {
-            for (int if_i = 0; if_i < config->bNumInterfaces && !s_ddd_bulk_ep; if_i++) {
-                const struct libusb_interface *iface = &config->interface[if_i];
-                for (int alt = 0; alt < iface->num_altsetting && !s_ddd_bulk_ep; alt++) {
-                    const struct libusb_interface_descriptor *id = &iface->altsetting[alt];
-                    for (int ep = 0; ep < id->bNumEndpoints; ep++) {
-                        const struct libusb_endpoint_descriptor *ed = &id->endpoint[ep];
-                        bool is_bulk = (ed->bmAttributes & 0x03) == 2;
-                        bool is_in = (ed->bEndpointAddress & 0x80) != 0;
-                        if (is_bulk && is_in) {
-                            s_ddd_bulk_ep = ed->bEndpointAddress;
-                            fprintf(stderr, "[DdD] Found bulk IN endpoint 0x%02X "
-                                    "(max packet %d)\n", s_ddd_bulk_ep,
-                                    ed->wMaxPacketSize);
-                        }
-                    }
-                }
+        if (stream_path.found && stream_path.alternate_setting != 0) {
+            r = libusb_set_interface_alt_setting(s_ddd_handle,
+                                                 s_ddd_interface,
+                                                 stream_path.alternate_setting);
+            if (r < 0) {
+                fprintf(stderr, "[DdD] Failed to set interface %d alt %d: %s\n",
+                        s_ddd_interface,
+                        stream_path.alternate_setting,
+                        libusb_error_name(r));
+                libusb_release_interface(s_ddd_handle, s_ddd_interface);
+                libusb_close(s_ddd_handle);
+                s_ddd_handle = NULL;
+                libusb_free_device_list(devlist, 1);
+                gui_ddd_usb_exit();
+                return -1;
             }
-            libusb_free_config_descriptor(config);
-        }
-
-        if (!s_ddd_bulk_ep) {
-            fprintf(stderr, "[DdD] No bulk IN endpoint found; defaulting to 0x%02X\n",
-                    DDD_EP_BULK_IN);
-            s_ddd_bulk_ep = DDD_EP_BULK_IN;
+            fprintf(stderr, "[DdD] Activated alternate setting %d\n",
+                    stream_path.alternate_setting);
         }
 
         libusb_free_device_list(devlist, 1);
@@ -317,6 +405,8 @@ void gui_ddd_close(gui_app_t *app) {
         libusb_close(s_ddd_handle);
         s_ddd_handle = NULL;
     }
+    s_ddd_interface = 0;
+    s_ddd_bulk_ep = DDD_EP_BULK_IN;
     gui_ddd_usb_exit();
 }
 
@@ -490,6 +580,7 @@ int gui_ddd_start(gui_app_t *app) {
     atomic_store(&app->last_callback_time_ms, get_time_ms());
     atomic_store(&app->dropout_stop_requested, false);
     atomic_store(&app->dropout_stop_reason, GUI_DROPOUT_NONE);
+    atomic_store(&s_ddd_transfer_ready, false);
 
     // Reset display buffers
     app->display_samples_available_a = 0;
@@ -541,13 +632,18 @@ int gui_ddd_start(gui_app_t *app) {
     app->ddd_thread = (void *)(uintptr_t)thread;
 
     // Wait for capture thread to signal ready
-    atomic_store(&s_ddd_transfer_ready, false);
+    bool transfer_ready = false;
     for (int i = 0; i < 100; i++) {
         if (atomic_load(&s_ddd_transfer_ready)) {
             fprintf(stderr, "[DdD] Capture thread ready after %d ms\n", i * 10);
+            transfer_ready = true;
             break;
         }
         thrd_sleep_ms(10);
+    }
+    if (!transfer_ready) {
+        fprintf(stderr, "[DdD] Warning: capture thread did not signal readiness "
+                        "within 1000 ms (continuing)\n");
     }
 
     gui_app_set_status(app, "DdD capture running");

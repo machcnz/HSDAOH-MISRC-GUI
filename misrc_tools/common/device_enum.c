@@ -15,7 +15,7 @@
 #ifdef __linux__
 #include <cyusb.h>
 #else
-#include <libusb-1.0/libusb.h>
+#include "libusb_compat.h"
 #endif
 
 // FX3 USB VID/PID
@@ -32,7 +32,7 @@
 #endif
 
 #ifdef ENABLE_DDD
-#include <libusb-1.0/libusb.h>
+#include "libusb_compat.h"
 
 // DdD USB VID/PID (Domesday Duplicator)
 #define DDD_VID              0x1D50
