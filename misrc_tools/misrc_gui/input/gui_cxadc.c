@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <ctype.h>
 
 #ifndef LIBASOUND_ENABLED
 #define LIBASOUND_ENABLED 0
@@ -300,6 +301,31 @@ typedef struct {
     size_t sample_bytes;
 } cxadc_audio_format_desc_t;
 
+static bool cxadc_str_contains_nocase(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle || !needle[0]) return false;
+    size_t needle_len = strlen(needle);
+    for (const char *h = haystack; *h; h++) {
+        size_t i = 0;
+        while (i < needle_len && h[i] &&
+               tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) {
+            i++;
+        }
+        if (i == needle_len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cxadc_alsa_card_name_matches_clockgen(const char *name, const char *longname)
+{
+    return cxadc_str_contains_nocase(name, "cxadc") ||
+           cxadc_str_contains_nocase(name, "clockgen") ||
+           cxadc_str_contains_nocase(longname, "cxadc") ||
+           cxadc_str_contains_nocase(longname, "clockgen");
+}
+
 static int cxadc_configure_audio_pcm(snd_pcm_t *pcm,
                                      snd_pcm_format_t format,
                                      unsigned int *out_rate_hz)
@@ -363,6 +389,61 @@ static int cxadc_try_open_audio_device(cxadc_ctx_t *ctx, const char *device_name
     return -1;
 }
 
+static int cxadc_probe_alsa_cards_for_audio(cxadc_ctx_t *ctx)
+{
+    if (!ctx) return -1;
+
+    int card = -1;
+    if (snd_card_next(&card) < 0) return -1;
+
+    bool matched_named_clockgen_card = false;
+    while (card >= 0) {
+        char *name = NULL;
+        char *longname = NULL;
+        (void)snd_card_get_name(card, &name);
+        (void)snd_card_get_longname(card, &longname);
+
+        bool likely_clockgen = cxadc_alsa_card_name_matches_clockgen(name, longname);
+        if (likely_clockgen) {
+            matched_named_clockgen_card = true;
+            char hw_dev[32];
+            char plughw_dev[32];
+            snprintf(hw_dev, sizeof(hw_dev), "hw:%d", card);
+            snprintf(plughw_dev, sizeof(plughw_dev), "plughw:%d", card);
+            if (cxadc_try_open_audio_device(ctx, hw_dev) == 0 ||
+                cxadc_try_open_audio_device(ctx, plughw_dev) == 0) {
+                if (name) free(name);
+                if (longname) free(longname);
+                return 0;
+            }
+        }
+
+        if (name) free(name);
+        if (longname) free(longname);
+
+        if (snd_card_next(&card) < 0) break;
+    }
+
+    // Fallback: if no obvious clockgen card name was found, probe all cards.
+    if (matched_named_clockgen_card) return -1;
+
+    card = -1;
+    if (snd_card_next(&card) < 0) return -1;
+    while (card >= 0) {
+        char hw_dev[32];
+        char plughw_dev[32];
+        snprintf(hw_dev, sizeof(hw_dev), "hw:%d", card);
+        snprintf(plughw_dev, sizeof(plughw_dev), "plughw:%d", card);
+        if (cxadc_try_open_audio_device(ctx, hw_dev) == 0 ||
+            cxadc_try_open_audio_device(ctx, plughw_dev) == 0) {
+            return 0;
+        }
+        if (snd_card_next(&card) < 0) break;
+    }
+
+    return -1;
+}
+
 static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
 {
     if (!ctx) return -1;
@@ -372,9 +453,12 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
         env_device,
         "hw:CARD=CXADCADCClockGe",
         "hw:CARD=CXADCADCClockGen",
+        "hw:CARD=CXADCClockGen",
+        "hw:CARD=CXADCClockGe",
         "plughw:CARD=CXADCADCClockGe",
         "plughw:CARD=CXADCADCClockGen",
-        "default",
+        "plughw:CARD=CXADCClockGen",
+        "plughw:CARD=CXADCClockGe",
         NULL
     };
 
@@ -383,7 +467,8 @@ static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
             return 0;
         }
     }
-    return -1;
+
+    return cxadc_probe_alsa_cards_for_audio(ctx);
 }
 
 static void cxadc_abort_audio_capture(cxadc_ctx_t *ctx)
