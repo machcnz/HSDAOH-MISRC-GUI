@@ -1185,13 +1185,6 @@ static void waveform_render(void *state_ptr, gui_app_t *app, int channel,
     // Update drag state for trigger level (continuous while mouse is held)
     waveform_panel_update_drag(state, app, bounds);
 
-    // Set cursor when hovering over waveform panel or dragging
-    Vector2 mouse = GetMousePosition();
-    if (!gui_popup_is_open()) {
-        if (CheckCollisionPointRec(mouse, bounds) || state->dragging) {
-            SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
-        }
-    }
 
     // Dispatch based on render mode
     if (state->render_mode == WAVEFORM_MODE_PHOSPHOR) {

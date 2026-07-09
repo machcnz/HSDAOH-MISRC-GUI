@@ -474,29 +474,10 @@ static void gui_capture_apply_cxadc_profile(gui_app_t *app, int card_count)
         app->settings.rf_bits_b = 8;
         changed = true;
     }
-    if (app->settings.enable_resample_a) {
-        app->settings.enable_resample_a = false;
-        changed = true;
-    }
-    if (app->settings.enable_resample_b) {
-        app->settings.enable_resample_b = false;
-        changed = true;
-    }
-    if (fabsf(app->settings.resample_rate_a - 40000.0f) > 0.5f) {
-        app->settings.resample_rate_a = 40000.0f;
-        changed = true;
-    }
-    if (fabsf(app->settings.resample_rate_b - 40000.0f) > 0.5f) {
-        app->settings.resample_rate_b = 40000.0f;
-        changed = true;
-    }
-    if (!app->settings.capture_a) {
-        app->settings.capture_a = true;
-        changed = true;
-    }
-    bool want_capture_b = (card_count > 1);
-    if (app->settings.capture_b != want_capture_b) {
-        app->settings.capture_b = want_capture_b;
+    // Keep user-selected resample modes/rates and RF A toggle in CXADC mode.
+    // Only clamp RF-B capture when there is no second CXADC card source.
+    if (card_count < 2 && app->settings.capture_b) {
+        app->settings.capture_b = false;
         changed = true;
     }
 

@@ -739,10 +739,6 @@ int main(int argc, char **argv) {
 
         // Render
         BeginDrawing();
-
-        // Reset cursor to default at start of frame
-        // (Panels will set crosshair cursor when hovering/dragging via their render functions)
-        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
         ClearBackground(COLOR_BG);
 
         // Render Clay UI (custom elements are handled via CLAY_RENDER_COMMAND_TYPE_CUSTOM)

@@ -186,6 +186,13 @@ typedef enum {
 // Unified cursor-based text editing state (settings panel)
 static ui_text_field_t s_active_text_field = UI_TEXT_FIELD_NONE;
 static int s_active_text_cursor = 0;
+static int s_active_text_selection_anchor = -1;
+static bool s_active_text_drag_selecting = false;
+static Clay_ElementId s_active_text_element_id = { 0 };
+static float s_active_text_left_padding = 0.0f;
+static float s_active_text_right_padding = 0.0f;
+static double s_active_text_last_click_time = -1.0;
+static Clay_ElementId s_active_text_last_click_element_id = { 0 };
 static double s_active_text_backspace_repeat_at = 0.0;
 
 // Record-limit popup state (toolbar clock button)
@@ -291,13 +298,6 @@ static inline Clay_Color to_clay_color(Color c) {
 
 // Format helpers - use separate buffers to avoid overwriting
 static char temp_buf1[64];
-static char temp_buf2[64];
-static char temp_buf3[64];
-static char temp_buf4[64];
-static char temp_buf5[64];
-static char temp_buf6[64];
-static char temp_buf7[64];
-static char temp_buf8[64];
 static char device_dropdown_buf[64];
 
 // Per-channel stat buffers (separate for A and B to avoid overwrite)
@@ -319,25 +319,15 @@ static char stat_rec_duration[2][24];
 // Playback file display buffers
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
-static char settings_output_path_display[256]; // 080226 - separate buffer for output path display
 
 // Audio meter channel labels (static buffers)
 static char audio_ch_label[4][8];
 
 // Settings panel stable display buffers (avoid reuse of temp_buf* across layout)
-static char settings_base_name_display[256];
 static char settings_rf_bits_a_display[16];
 static char settings_rf_bits_b_display[16];
-static char settings_rf_tag_a_display[64];
-static char settings_rf_tag_b_display[64];
-static char settings_audio_tag_4ch_display[64];
-static char settings_audio_tag_12_display[64];
-static char settings_audio_tag_34_display[64];
 static char settings_flac_level_display[64];
 static char settings_flac_threads_display[64];
-static char settings_flac_affinity_display[96];
-static char settings_level_autostop_level_display[16];
-static char settings_level_autostop_duration_display[16];
 static char settings_resample_a_display[32];
 static char settings_resample_b_display[32];
 static char status_sample_rate_display[32];
@@ -398,17 +388,13 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
     }
     if (cxadc_mode) {
         bool cxadc_settings_changed = false;
-        bool want_capture_b = false;
+        bool cxadc_has_channel_b = false;
         if (app->selected_device >= 0 && app->selected_device < app->device_count) {
-            want_capture_b = (app->devices[app->selected_device].index > 1);
+            cxadc_has_channel_b = (app->devices[app->selected_device].index > 1);
         }
-
-        if (!app->settings.capture_a) {
-            app->settings.capture_a = true;
-            cxadc_settings_changed = true;
-        }
-        if (app->settings.capture_b != want_capture_b) {
-            app->settings.capture_b = want_capture_b;
+        // Single-card CXADC has no RF-B source.
+        if (!cxadc_has_channel_b && app->settings.capture_b) {
+            app->settings.capture_b = false;
             cxadc_settings_changed = true;
         }
         if (app->settings.rf_bits_a != 8) {
@@ -417,22 +403,6 @@ static void gui_ui_sync_capture_mode_state(gui_app_t *app) {
         }
         if (app->settings.rf_bits_b != 8) {
             app->settings.rf_bits_b = 8;
-            cxadc_settings_changed = true;
-        }
-        if (app->settings.enable_resample_a) {
-            app->settings.enable_resample_a = false;
-            cxadc_settings_changed = true;
-        }
-        if (app->settings.enable_resample_b) {
-            app->settings.enable_resample_b = false;
-            cxadc_settings_changed = true;
-        }
-        if (fabsf(app->settings.resample_rate_a - 40000.0f) > 0.5f) {
-            app->settings.resample_rate_a = 40000.0f;
-            cxadc_settings_changed = true;
-        }
-        if (fabsf(app->settings.resample_rate_b - 40000.0f) > 0.5f) {
-            app->settings.resample_rate_b = 40000.0f;
             cxadc_settings_changed = true;
         }
         if (cxadc_settings_changed) {
@@ -737,8 +707,8 @@ static void format_live_msps_label(char *dst, size_t dst_len, uint32_t sample_ra
 
 
 static float cycle_resample_khz(float current_khz) {
-    // User-facing presets: 5/10/14.3/17.9/20 MSPS, stored as kHz.
-    static const float presets_khz[] = { 5000.0f, 10000.0f, 14300.0f, 17900.0f, 20000.0f };
+    // User-facing presets (stored as kHz), including 40 MSPS passthrough base.
+    static const float presets_khz[] = { 5000.0f, 10000.0f, 14300.0f, 17900.0f, 20000.0f, 40000.0f };
     const int n = (int)(sizeof(presets_khz) / sizeof(presets_khz[0]));
 
     // Find nearest preset (within 1 kHz), otherwise start from first.
@@ -774,6 +744,13 @@ static void gui_ui_clear_text_edit(void)
 {
     s_active_text_field = UI_TEXT_FIELD_NONE;
     s_active_text_cursor = 0;
+    s_active_text_selection_anchor = -1;
+    s_active_text_drag_selecting = false;
+    s_active_text_element_id = (Clay_ElementId){ 0 };
+    s_active_text_left_padding = 0.0f;
+    s_active_text_right_padding = 0.0f;
+    s_active_text_last_click_time = -1.0;
+    s_active_text_last_click_element_id = (Clay_ElementId){ 0 };
     s_active_text_backspace_repeat_at = 0.0;
 }
 
@@ -782,27 +759,6 @@ static bool gui_ui_settings_locked(const gui_app_t *app)
     return app && app->is_recording;
 }
 
-static const char *gui_ui_build_text_with_caret(const char *src, int cursor)
-{
-    static char caret_buf[512];
-    if (!src) src = "";
-    size_t len = strlen(src);
-    if (len > sizeof(caret_buf) - 2) len = sizeof(caret_buf) - 2;
-    if (cursor < 0) cursor = 0;
-    if (cursor > (int)len) cursor = (int)len;
-
-    size_t out = 0;
-    for (size_t i = 0; i <= len && out + 1 < sizeof(caret_buf); ++i) {
-        if ((int)i == cursor && out + 1 < sizeof(caret_buf)) {
-            caret_buf[out++] = '|';
-        }
-        if (i < len && out + 1 < sizeof(caret_buf)) {
-            caret_buf[out++] = src[i];
-        }
-    }
-    caret_buf[out] = '\0';
-    return caret_buf;
-}
 
 static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, char **dst, size_t *cap)
 {
@@ -887,7 +843,8 @@ static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
         case UI_TEXT_FIELD_OUTPUT_PATH:
             return true;
         case UI_TEXT_FIELD_FLAC_AFFINITY:
-            return app->settings.use_flac &&
+            return app->settings.show_core_pinning_in_settings &&
+                   app->settings.use_flac &&
                    app->settings.flac_affinity_enabled &&
                    gui_ui_flac_affinity_supported();
         case UI_TEXT_FIELD_RF_TAG_A:
@@ -927,25 +884,319 @@ static bool gui_ui_text_field_char_allowed(ui_text_field_t field, int ch)
     return !(ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '\"' || ch == '<' || ch == '>' || ch == '|');
 }
 
-static int gui_ui_text_cursor_from_click(Clay_ElementId element_id, const char *text, float left_padding, float right_padding)
+static void gui_ui_text_field_font(ui_text_field_t field, int *font_size, int *font_id)
+{
+    int size = FONT_SIZE_NORMAL;
+    int id = 0;
+    switch (field) {
+        case UI_TEXT_FIELD_OUTPUT_BASE_NAME:
+        case UI_TEXT_FIELD_OUTPUT_PATH:
+            size = FONT_SIZE_NORMAL;
+            id = 0;
+            break;
+        case UI_TEXT_FIELD_FLAC_AFFINITY:
+            size = FONT_SIZE_STATS;
+            id = 0;
+            break;
+        case UI_TEXT_FIELD_RF_TAG_A:
+        case UI_TEXT_FIELD_RF_TAG_B:
+        case UI_TEXT_FIELD_AUDIO_TAG_4CH:
+        case UI_TEXT_FIELD_AUDIO_TAG_12:
+        case UI_TEXT_FIELD_AUDIO_TAG_34:
+        case UI_TEXT_FIELD_AUDIO_LABEL_1:
+        case UI_TEXT_FIELD_AUDIO_LABEL_2:
+        case UI_TEXT_FIELD_AUDIO_LABEL_3:
+        case UI_TEXT_FIELD_AUDIO_LABEL_4:
+        case UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL:
+        case UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION:
+            size = FONT_SIZE_STATS;
+            id = 1;
+            break;
+        default:
+            size = FONT_SIZE_NORMAL;
+            id = 0;
+            break;
+    }
+    if (font_size) *font_size = size;
+    if (font_id) *font_id = id;
+}
+
+static Font gui_ui_text_get_font(const gui_app_t *app, int font_id)
+{
+    Font font = GetFontDefault();
+    if (app && app->fonts && font_id >= 0 && font_id < 2 && app->fonts[font_id].texture.id != 0) {
+        font = app->fonts[font_id];
+    }
+    if (!font.glyphs) {
+        font = GetFontDefault();
+    }
+    return font;
+}
+
+static float gui_ui_text_char_width_px(const gui_app_t *app, int font_id, int font_size, unsigned char ch)
+{
+    Font font = gui_ui_text_get_font(app, font_id);
+    char glyph[2] = { (char)ch, '\0' };
+    Vector2 m = MeasureTextEx(font, glyph, (float)font_size, 0.0f);
+    if (m.x <= 0.0f) {
+        return (float)font_size * 0.5f;
+    }
+    return m.x;
+}
+
+static int gui_ui_text_cursor_from_click(gui_app_t *app,
+                                         ui_text_field_t field,
+                                         Clay_ElementId element_id,
+                                         const char *text,
+                                         float left_padding,
+                                         float right_padding)
 {
     size_t len = text ? strlen(text) : 0;
-    Clay_ElementData field = Clay_GetElementData(element_id);
-    if (!field.found || len == 0) return (int)len;
+    Clay_ElementData element_data = Clay_GetElementData(element_id);
+    if (!element_data.found || len == 0) return (int)len;
 
     Vector2 mouse = GetMousePosition();
-    float content_left = field.boundingBox.x + left_padding;
-    float content_width = field.boundingBox.width - (left_padding + right_padding);
+    float content_left = element_data.boundingBox.x + left_padding;
+    float content_width = element_data.boundingBox.width - (left_padding + right_padding);
     if (content_width < 1.0f) return (int)len;
 
     float local_x = mouse.x - content_left;
     if (local_x < 0.0f) local_x = 0.0f;
     if (local_x > content_width) local_x = content_width;
+    int font_size = FONT_SIZE_NORMAL;
+    int font_id = 0;
+    gui_ui_text_field_font(field, &font_size, &font_id);
 
-    int cursor = (int)floorf((local_x / content_width) * (float)(len + 1));
+    float x = 0.0f;
+    for (int i = 0; i < (int)len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        float w = gui_ui_text_char_width_px(app, font_id, font_size, ch);
+        if (local_x < x + (w * 0.5f)) {
+            return i;
+        }
+        x += w;
+    }
+    return (int)len;
+}
+
+static void gui_ui_text_clamp_state(const char *dst)
+{
+    size_t len = dst ? strlen(dst) : 0;
+    if (s_active_text_cursor < 0) s_active_text_cursor = 0;
+    if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
+    if (s_active_text_selection_anchor >= 0) {
+        if (s_active_text_selection_anchor < 0) s_active_text_selection_anchor = 0;
+        if ((size_t)s_active_text_selection_anchor > len) s_active_text_selection_anchor = (int)len;
+        if (s_active_text_selection_anchor == s_active_text_cursor) {
+            s_active_text_selection_anchor = -1;
+        }
+    }
+}
+
+static bool gui_ui_text_get_selection_range(const char *dst, int *start, int *end)
+{
+    if (!dst || !start || !end || s_active_text_selection_anchor < 0) return false;
+    gui_ui_text_clamp_state(dst);
+    if (s_active_text_selection_anchor < 0 || s_active_text_selection_anchor == s_active_text_cursor) {
+        return false;
+    }
+    if (s_active_text_selection_anchor < s_active_text_cursor) {
+        *start = s_active_text_selection_anchor;
+        *end = s_active_text_cursor;
+    } else {
+        *start = s_active_text_cursor;
+        *end = s_active_text_selection_anchor;
+    }
+    return (*end > *start);
+}
+
+static bool gui_ui_text_delete_selection(char *dst)
+{
+    if (!dst) return false;
+    int start = 0, end = 0;
+    if (!gui_ui_text_get_selection_range(dst, &start, &end)) return false;
+    size_t len = strlen(dst);
+    memmove(dst + start, dst + end, len - (size_t)end + 1);
+    s_active_text_cursor = start;
+    s_active_text_selection_anchor = -1;
+    return true;
+}
+
+static void gui_ui_text_set_cursor_position(const char *dst, int new_cursor, bool keep_selection)
+{
+    size_t len = dst ? strlen(dst) : 0;
+    if (new_cursor < 0) new_cursor = 0;
+    if ((size_t)new_cursor > len) new_cursor = (int)len;
+    if (keep_selection) {
+        if (s_active_text_selection_anchor < 0) {
+            s_active_text_selection_anchor = s_active_text_cursor;
+        }
+    } else {
+        s_active_text_selection_anchor = -1;
+    }
+    s_active_text_cursor = new_cursor;
+}
+
+static bool gui_ui_text_insert_char(char *dst, size_t cap, int ch)
+{
+    if (!dst || cap == 0) return false;
+    size_t len = strlen(dst);
+    if (len + 1 >= cap) return false;
+    if (s_active_text_cursor < 0) s_active_text_cursor = 0;
+    if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
+    memmove(dst + s_active_text_cursor + 1,
+            dst + s_active_text_cursor,
+            len - (size_t)s_active_text_cursor + 1);
+    dst[s_active_text_cursor] = (char)ch;
+    s_active_text_cursor++;
+    return true;
+}
+
+static bool gui_ui_text_insert_filtered(ui_text_field_t field, char *dst, size_t cap, const char *src)
+{
+    if (!dst || !src) return false;
+    bool changed = false;
+    for (const unsigned char *p = (const unsigned char *)src; *p; ++p) {
+        int ch = (int)(*p);
+        if (!gui_ui_text_field_char_allowed(field, ch)) continue;
+        if (!gui_ui_text_insert_char(dst, cap, ch)) break;
+        changed = true;
+    }
+    return changed;
+}
+
+static void gui_ui_text_copy_selection_to_clipboard(const char *dst)
+{
+    if (!dst) return;
+    int start = 0, end = 0;
+    if (!gui_ui_text_get_selection_range(dst, &start, &end)) return;
+    size_t count = (size_t)(end - start);
+    char *copy_buf = (char *)malloc(count + 1);
+    if (!copy_buf) return;
+    memcpy(copy_buf, dst + start, count);
+    copy_buf[count] = '\0';
+    SetClipboardText(copy_buf);
+    free(copy_buf);
+}
+
+static Clay_String gui_ui_make_string_slice(const char *src, int start, int end)
+{
+    if (!src) src = "";
+    int len = (int)strlen(src);
+    if (start < 0) start = 0;
+    if (end < start) end = start;
+    if (start > len) start = len;
+    if (end > len) end = len;
+    return (Clay_String){
+        .isStaticallyAllocated = false,
+        .length = (int32_t)(end - start),
+        .chars = src + start
+    };
+}
+
+static void gui_ui_sort_unique_ints(int *values, int *count)
+{
+    if (!values || !count || *count <= 1) return;
+    for (int i = 1; i < *count; i++) {
+        int key = values[i];
+        int j = i - 1;
+        while (j >= 0 && values[j] > key) {
+            values[j + 1] = values[j];
+            j--;
+        }
+        values[j + 1] = key;
+    }
+    int out = 1;
+    for (int i = 1; i < *count; i++) {
+        if (values[i] != values[out - 1]) {
+            values[out++] = values[i];
+        }
+    }
+    *count = out;
+}
+
+static void gui_ui_render_active_text(ui_text_field_t field,
+                                      const char *text,
+                                      int font_size,
+                                      int font_id,
+                                      Color text_color)
+{
+    if (!text) text = "";
+    int len = (int)strlen(text);
+    int cursor = s_active_text_cursor;
     if (cursor < 0) cursor = 0;
-    if (cursor > (int)len) cursor = (int)len;
-    return cursor;
+    if (cursor > len) cursor = len;
+    int anchor = s_active_text_selection_anchor;
+    if (anchor < 0) anchor = cursor;
+    if (anchor > len) anchor = len;
+    bool has_selection = (anchor != cursor);
+    int sel_start = has_selection ? ((anchor < cursor) ? anchor : cursor) : cursor;
+    int sel_end = has_selection ? ((anchor > cursor) ? anchor : cursor) : cursor;
+
+    int points[5];
+    int point_count = 0;
+    points[point_count++] = 0;
+    points[point_count++] = cursor;
+    points[point_count++] = len;
+    if (has_selection) {
+        points[point_count++] = sel_start;
+        points[point_count++] = sel_end;
+    }
+    gui_ui_sort_unique_ints(points, &point_count);
+    bool caret_visible = ((int)(GetTime() * 1.8) % 2) == 0;
+
+    CLAY(CLAY_IDI("TextEditRow", (int)field), {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+            .layoutDirection = CLAY_LEFT_TO_RIGHT,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 0
+        }
+    }) {
+        for (int i = 0; i < point_count; i++) {
+            int p = points[i];
+            if (p == cursor) {
+                Color caret_color = caret_visible ? (Color){240, 240, 240, 255} : (Color){240, 240, 240, 0};
+                CLAY(CLAY_IDI("TextEditCaret", i), {
+                    .layout = {
+                        .sizing = { CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(font_size + 4) }
+                    },
+                    .backgroundColor = to_clay_color(caret_color),
+                    .cornerRadius = CLAY_CORNER_RADIUS(1)
+                }) {}
+            }
+
+            if (i + 1 < point_count && points[i + 1] > p) {
+                int next = points[i + 1];
+                bool highlighted = has_selection && p >= sel_start && next <= sel_end;
+                Clay_String seg = gui_ui_make_string_slice(text, p, next);
+                if (seg.length <= 0) continue;
+
+                if (highlighted) {
+                    CLAY(CLAY_IDI("TextEditSel", i), {
+                        .layout = {
+                            .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }
+                        },
+                        .backgroundColor = to_clay_color((Color){76, 128, 255, 255}),
+                        .cornerRadius = CLAY_CORNER_RADIUS(2)
+                    }) {
+                        CLAY_TEXT(seg, CLAY_TEXT_CONFIG({
+                            .fontSize = font_size,
+                            .fontId = font_id,
+                            .textColor = to_clay_color((Color){255, 255, 255, 255})
+                        }));
+                    }
+                } else {
+                    CLAY_TEXT(seg, CLAY_TEXT_CONFIG({
+                        .fontSize = font_size,
+                        .fontId = font_id,
+                        .textColor = to_clay_color(text_color)
+                    }));
+                }
+            }
+        }
+    }
 }
 
 static void gui_ui_begin_text_edit(gui_app_t *app, ui_text_field_t field, Clay_ElementId element_id, float left_padding, float right_padding)
@@ -958,9 +1209,36 @@ static void gui_ui_begin_text_edit(gui_app_t *app, ui_text_field_t field, Clay_E
     }
 
     (void)cap;
+    double now = GetTime();
+    bool same_click_target = (s_active_text_last_click_element_id.id == element_id.id);
+    bool is_double_click = same_click_target &&
+                           s_active_text_last_click_time >= 0.0 &&
+                           (now - s_active_text_last_click_time) <= 0.35;
+    s_active_text_last_click_time = now;
+    s_active_text_last_click_element_id = element_id;
+    bool same_field = (s_active_text_field == field);
+    bool extend_selection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    if (!same_field) {
+        s_active_text_selection_anchor = -1;
+    } else if (extend_selection && s_active_text_selection_anchor < 0 && !is_double_click) {
+        s_active_text_selection_anchor = s_active_text_cursor;
+    } else if (!extend_selection && !is_double_click) {
+        s_active_text_selection_anchor = -1;
+    }
     s_active_text_field = field;
+    s_active_text_element_id = element_id;
+    s_active_text_left_padding = left_padding;
+    s_active_text_right_padding = right_padding;
     s_active_text_backspace_repeat_at = 0.0;
-    s_active_text_cursor = gui_ui_text_cursor_from_click(element_id, dst, left_padding, right_padding);
+    if (is_double_click) {
+        s_active_text_selection_anchor = 0;
+        s_active_text_cursor = (int)strlen(dst);
+        s_active_text_drag_selecting = false;
+    } else {
+        s_active_text_cursor = gui_ui_text_cursor_from_click(app, field, element_id, dst, left_padding, right_padding);
+        s_active_text_drag_selecting = true;
+    }
+    gui_ui_text_clamp_state(dst);
 }
 
 static bool gui_ui_text_backspace(char *dst, int *cursor)
@@ -994,58 +1272,95 @@ static void gui_ui_handle_active_text_edit(gui_app_t *app)
         gui_ui_clear_text_edit();
         return;
     }
-
-    size_t len = strlen(dst);
-    if (s_active_text_cursor < 0) s_active_text_cursor = 0;
-    if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
+    gui_ui_text_clamp_state(dst);
 
     bool changed = false;
-    int ch = GetCharPressed();
-    while (ch > 0) {
-        if (gui_ui_text_field_char_allowed(s_active_text_field, ch)) {
-            len = strlen(dst);
-            if (len + 1 < cap) {
-                if ((size_t)s_active_text_cursor > len) s_active_text_cursor = (int)len;
-                memmove(dst + s_active_text_cursor + 1,
-                        dst + s_active_text_cursor,
-                        len - (size_t)s_active_text_cursor + 1);
-                dst[s_active_text_cursor] = (char)ch;
-                s_active_text_cursor++;
+    bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    bool primary_mod_down = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+#if defined(__APPLE__)
+    primary_mod_down = primary_mod_down || IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+#endif
+
+    if (s_active_text_drag_selecting && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        int drag_cursor = gui_ui_text_cursor_from_click(app, s_active_text_field, s_active_text_element_id, dst, s_active_text_left_padding, s_active_text_right_padding);
+        gui_ui_text_set_cursor_position(dst, drag_cursor, true);
+        gui_ui_text_clamp_state(dst);
+    }
+    if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+        s_active_text_drag_selecting = false;
+    }
+
+    if (primary_mod_down && IsKeyPressed(KEY_A)) {
+        s_active_text_selection_anchor = 0;
+        s_active_text_cursor = (int)strlen(dst);
+        gui_ui_text_clamp_state(dst);
+    }
+    if (primary_mod_down && IsKeyPressed(KEY_C)) {
+        gui_ui_text_copy_selection_to_clipboard(dst);
+    }
+    if (primary_mod_down && IsKeyPressed(KEY_X)) {
+        gui_ui_text_copy_selection_to_clipboard(dst);
+        if (gui_ui_text_delete_selection(dst)) changed = true;
+    }
+    if (primary_mod_down && IsKeyPressed(KEY_V)) {
+        const char *clip = GetClipboardText();
+        if (gui_ui_text_delete_selection(dst)) changed = true;
+        if (clip && clip[0]) {
+            if (gui_ui_text_insert_filtered(s_active_text_field, dst, cap, clip)) {
                 changed = true;
             }
+        }
+    }
+    int ch = GetCharPressed();
+    while (ch > 0) {
+        if (!primary_mod_down && gui_ui_text_field_char_allowed(s_active_text_field, ch)) {
+            if (gui_ui_text_delete_selection(dst)) changed = true;
+            if (gui_ui_text_insert_char(dst, cap, ch)) changed = true;
         }
         ch = GetCharPressed();
     }
 
-    if (IsKeyPressed(KEY_LEFT) && s_active_text_cursor > 0) {
-        s_active_text_cursor--;
+    if (IsKeyPressed(KEY_LEFT)) {
+        gui_ui_text_set_cursor_position(dst, s_active_text_cursor - 1, shift_down);
     }
     if (IsKeyPressed(KEY_RIGHT)) {
-        len = strlen(dst);
-        if ((size_t)s_active_text_cursor < len) s_active_text_cursor++;
+        gui_ui_text_set_cursor_position(dst, s_active_text_cursor + 1, shift_down);
     }
     if (IsKeyPressed(KEY_HOME)) {
-        s_active_text_cursor = 0;
+        gui_ui_text_set_cursor_position(dst, 0, shift_down);
     }
     if (IsKeyPressed(KEY_END)) {
-        s_active_text_cursor = (int)strlen(dst);
+        gui_ui_text_set_cursor_position(dst, (int)strlen(dst), shift_down);
     }
 
     if (IsKeyPressed(KEY_BACKSPACE)) {
         s_active_text_backspace_repeat_at = GetTime() + 0.25;
-        if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+        if (!gui_ui_text_delete_selection(dst)) {
+            if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+        } else {
+            changed = true;
+        }
     } else if (IsKeyDown(KEY_BACKSPACE)) {
         double now = GetTime();
         if (now >= s_active_text_backspace_repeat_at) {
             s_active_text_backspace_repeat_at = now + 0.05;
-            if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+            if (s_active_text_selection_anchor >= 0) {
+                if (gui_ui_text_delete_selection(dst)) changed = true;
+            } else {
+                if (gui_ui_text_backspace(dst, &s_active_text_cursor)) changed = true;
+            }
         }
     }
 
     if (IsKeyPressed(KEY_DELETE)) {
-        if (gui_ui_text_delete(dst, &s_active_text_cursor)) changed = true;
+        if (!gui_ui_text_delete_selection(dst)) {
+            if (gui_ui_text_delete(dst, &s_active_text_cursor)) changed = true;
+        } else {
+            changed = true;
+        }
     }
 
+    gui_ui_text_clamp_state(dst);
     if (changed) {
         gui_settings_save(&app->settings);
     }
@@ -1076,15 +1391,19 @@ static int toolbar_title_font_size(void) {
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
     if (!app->settings_panel_open) return;
-    bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
+    bool settings_cxadc_has_channel_b = false;
+    bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, &settings_cxadc_has_channel_b);
 #ifdef ENABLE_DDD
     bool settings_ddd_mode = gui_ui_selected_device_is_ddd(app);
 #else
     bool settings_ddd_mode = false;
 #endif
-    // DdD is single-channel: channel B has no signal source, so the RF B
-    // toggle, bit-depth, and tag controls are disabled (grayed out).
-    bool settings_b_disabled = settings_cxadc_mode || settings_ddd_mode;
+    // DdD is single-channel and single-card CXADC has no RF-B source.
+    // In both cases RF-B controls are disabled (grayed out).
+    bool settings_b_disabled = settings_ddd_mode || (settings_cxadc_mode && !settings_cxadc_has_channel_b);
+    // CH-B settings controls (bits/tags/resample) are editable only when
+    // channel B is both available and enabled for capture.
+    bool settings_b_controls_disabled = settings_b_disabled || !app->settings.capture_b;
 
     // Backdrop
     CLAY(CLAY_ID("SettingsBackdrop"), {
@@ -1182,8 +1501,7 @@ static void render_settings_panel(gui_app_t *app) {
             CLAY(CLAY_ID("OutputBaseNameField"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(base_box_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                 const char *base = app->settings.output_base_name[0] ? app->settings.output_base_name : "capture";
                 if (gui_ui_is_text_field_active(UI_TEXT_FIELD_OUTPUT_BASE_NAME) && app->settings.auto_names_enabled) {
-                    snprintf(settings_base_name_display, sizeof(settings_base_name_display), "%s", gui_ui_build_text_with_caret(base, s_active_text_cursor));
-                    CLAY_TEXT(make_string(settings_base_name_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
+                    gui_ui_render_active_text(UI_TEXT_FIELD_OUTPUT_BASE_NAME, base, FONT_SIZE_NORMAL, 0, base_box_fg);
                 } else {
                     CLAY_TEXT(make_string(base), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(base_box_fg) }));
                 }
@@ -1224,9 +1542,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
             if (gui_ui_is_text_field_active(UI_TEXT_FIELD_OUTPUT_PATH)) {
-                snprintf(settings_output_path_display, sizeof(settings_output_path_display), "%s", gui_ui_build_text_with_caret(app->settings.output_path, s_active_text_cursor));
-                CLAY_TEXT(make_string(settings_output_path_display),
-                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+                gui_ui_render_active_text(UI_TEXT_FIELD_OUTPUT_PATH, app->settings.output_path, FONT_SIZE_NORMAL, 0, COLOR_TEXT);
             } else {
                 CLAY_TEXT(make_string(app->settings.output_path),
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
@@ -1301,8 +1617,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY(CLAY_ID("RfTagAField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(rf_tag_a_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *rf_tag_a = app->settings.rf_channel_tags[0][0] ? app->settings.rf_channel_tags[0] : "(tag)";
                             if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_A) && app->settings.auto_names_enabled) {
-                                snprintf(settings_rf_tag_a_display, sizeof(settings_rf_tag_a_display), "%s", gui_ui_build_text_with_caret(rf_tag_a, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_rf_tag_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_a_fg) }));
+                                gui_ui_render_active_text(UI_TEXT_FIELD_RF_TAG_A, rf_tag_a, FONT_SIZE_STATS, 1, rf_tag_a_fg);
                             } else {
                                 CLAY_TEXT(make_string(rf_tag_a), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_a_fg) }));
                             }
@@ -1320,18 +1635,17 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
 
                         CLAY(CLAY_ID("CaptureRowSpacerB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } } }) { }
                         snprintf(settings_rf_bits_b_display, sizeof(settings_rf_bits_b_display), "%s-bit", rf_bits_label(app->settings.rf_bits_b));
-                        Color rf_bits_b_bg = settings_b_disabled ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
-                        Color rf_bits_b_fg = settings_b_disabled ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color rf_bits_b_bg = (settings_cxadc_mode || settings_b_controls_disabled) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rf_bits_b_fg = (settings_cxadc_mode || settings_b_controls_disabled) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("RfBitsBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rf_bits_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_rf_bits_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rf_bits_b_fg) }));
                         }
-                        Color rf_tag_b_bg = (app->settings.auto_names_enabled && !settings_b_disabled) ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
-                        Color rf_tag_b_fg = (app->settings.auto_names_enabled && !settings_b_disabled) ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        Color rf_tag_b_bg = (app->settings.auto_names_enabled && !settings_b_controls_disabled) ? (Color){25,25,30,255} : ui_disabled_color((Color){25,25,30,255});
+                        Color rf_tag_b_fg = (app->settings.auto_names_enabled && !settings_b_controls_disabled) ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
                         CLAY(CLAY_ID("RfTagBField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(rf_tag_b_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *rf_tag_b = app->settings.rf_channel_tags[1][0] ? app->settings.rf_channel_tags[1] : "(tag)";
-                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_B) && app->settings.auto_names_enabled && !settings_b_disabled) {
-                                snprintf(settings_rf_tag_b_display, sizeof(settings_rf_tag_b_display), "%s", gui_ui_build_text_with_caret(rf_tag_b, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_rf_tag_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_b_fg) }));
+                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_RF_TAG_B) && app->settings.auto_names_enabled && !settings_b_controls_disabled) {
+                                gui_ui_render_active_text(UI_TEXT_FIELD_RF_TAG_B, rf_tag_b, FONT_SIZE_STATS, 1, rf_tag_b_fg);
                             } else {
                                 CLAY_TEXT(make_string(rf_tag_b), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(rf_tag_b_fg) }));
                             }
@@ -1379,42 +1693,43 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY(CLAY_ID("FlacThreadsPlus"), { .layout = { .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(COLOR_BUTTON), .cornerRadius = CLAY_CORNER_RADIUS(4) }) { CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) })); }
                     }
 
+                    if (app->settings.show_core_pinning_in_settings) {
 #if defined(__linux__)
-                    bool flac_affinity_supported = true;
+                        bool flac_affinity_supported = true;
 #else
-                    bool flac_affinity_supported = false;
+                        bool flac_affinity_supported = false;
 #endif
-                    bool flac_affinity_editable = app->settings.use_flac && app->settings.flac_affinity_enabled && flac_affinity_supported;
-                    Color affinity_toggle_bg = (app->settings.use_flac && flac_affinity_supported)
-                        ? (app->settings.flac_affinity_enabled ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON)
-                        : ui_disabled_color(COLOR_BUTTON);
-                    Color affinity_toggle_fg = (app->settings.use_flac && flac_affinity_supported)
-                        ? COLOR_TEXT
-                        : ui_disabled_color(COLOR_TEXT);
-                    Color affinity_list_bg = flac_affinity_editable
-                        ? (Color){25,25,30,255}
-                        : ui_disabled_color((Color){25,25,30,255});
-                    Color affinity_list_fg = flac_affinity_editable ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+                        bool flac_affinity_editable = app->settings.use_flac && app->settings.flac_affinity_enabled && flac_affinity_supported;
+                        Color affinity_toggle_bg = (app->settings.use_flac && flac_affinity_supported)
+                            ? (app->settings.flac_affinity_enabled ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON)
+                            : ui_disabled_color(COLOR_BUTTON);
+                        Color affinity_toggle_fg = (app->settings.use_flac && flac_affinity_supported)
+                            ? COLOR_TEXT
+                            : ui_disabled_color(COLOR_TEXT);
+                        Color affinity_list_bg = flac_affinity_editable
+                            ? (Color){25,25,30,255}
+                            : ui_disabled_color((Color){25,25,30,255});
+                        Color affinity_list_fg = flac_affinity_editable ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
 
-                    CLAY(CLAY_ID("FlacAffinityToggleRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY(CLAY_ID("ToggleFlacAffinity"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(affinity_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            CLAY_TEXT((app->settings.flac_affinity_enabled && flac_affinity_supported) ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
-                        }
-                        CLAY_TEXT(CLAY_STRING("FLAC core pinning (Linux)"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
-                    }
-
-                    CLAY(CLAY_ID("FlacAffinityListRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        CLAY_TEXT(CLAY_STRING("CPU list:"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_list_fg) }));
-                        CLAY(CLAY_ID("FlacAffinityListField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(affinity_list_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
-                            const char *cpu_list = app->settings.flac_affinity_cpu_list[0] ? app->settings.flac_affinity_cpu_list : "10-17";
-                            if (gui_ui_is_text_field_active(UI_TEXT_FIELD_FLAC_AFFINITY) && flac_affinity_editable) {
-                                snprintf(settings_flac_affinity_display, sizeof(settings_flac_affinity_display), "%s", gui_ui_build_text_with_caret(cpu_list, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_flac_affinity_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
-                            } else {
-                                CLAY_TEXT(make_string(cpu_list), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
+                        CLAY(CLAY_ID("FlacAffinityToggleRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                            CLAY(CLAY_ID("ToggleFlacAffinity"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(affinity_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                                CLAY_TEXT((app->settings.flac_affinity_enabled && flac_affinity_supported) ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
                             }
+                            CLAY_TEXT(CLAY_STRING("FLAC core pinning (Linux)"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_toggle_fg) }));
                         }
-                        CLAY_TEXT(flac_affinity_supported ? CLAY_STRING("e.g. 10-17,20") : CLAY_STRING("Linux only"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+                        CLAY(CLAY_ID("FlacAffinityListRow"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
+                            CLAY_TEXT(CLAY_STRING("CPU list:"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(affinity_list_fg) }));
+                            CLAY(CLAY_ID("FlacAffinityListField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(170), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 8, 8, 0, 0 } }, .backgroundColor = to_clay_color(affinity_list_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
+                                const char *cpu_list = app->settings.flac_affinity_cpu_list[0] ? app->settings.flac_affinity_cpu_list : "10-17";
+                                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_FLAC_AFFINITY) && flac_affinity_editable) {
+                                    gui_ui_render_active_text(UI_TEXT_FIELD_FLAC_AFFINITY, cpu_list, FONT_SIZE_STATS, 0, affinity_list_fg);
+                                } else {
+                                    CLAY_TEXT(make_string(cpu_list), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(affinity_list_fg) }));
+                                }
+                            }
+                            CLAY_TEXT(flac_affinity_supported ? CLAY_STRING("e.g. 10-17,20") : CLAY_STRING("Linux only"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                        }
                     }
 
                     // Resample section
@@ -1422,10 +1737,8 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
 
                     CLAY(CLAY_ID("ToggleRowResampleA"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        Color resample_a_toggle_bg = settings_cxadc_mode
-                            ? ui_disabled_color(COLOR_BUTTON)
-                            : (app->settings.enable_resample_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON);
-                        Color resample_a_toggle_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color resample_a_toggle_bg = app->settings.enable_resample_a ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+                        Color resample_a_toggle_fg = COLOR_TEXT;
                         CLAY(CLAY_ID("ToggleResampleA"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(resample_a_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_resample_a ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_a_toggle_fg) }));
                         }
@@ -1433,26 +1746,26 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
 
                         // Rate selector (kHz stored; display MSPS)
                         format_msps_label(settings_resample_a_display, sizeof(settings_resample_a_display), app->settings.resample_rate_a);
-                        Color rate_bg = (settings_cxadc_mode || !app->settings.enable_resample_a) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
-                        Color rate_fg = (settings_cxadc_mode || !app->settings.enable_resample_a) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color rate_bg = !app->settings.enable_resample_a ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rate_fg = !app->settings.enable_resample_a ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("ResampleRateABox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_resample_a_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
                         }
                     }
 
                     CLAY(CLAY_ID("ToggleRowResampleB"), { .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 } }) {
-                        Color resample_b_toggle_bg = settings_cxadc_mode
+                        Color resample_b_toggle_bg = settings_b_controls_disabled
                             ? ui_disabled_color(COLOR_BUTTON)
                             : (app->settings.enable_resample_b ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON);
-                        Color resample_b_toggle_fg = settings_cxadc_mode ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color resample_b_toggle_fg = settings_b_controls_disabled ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("ToggleResampleB"), { .layout = { .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(resample_b_toggle_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(app->settings.enable_resample_b ? CLAY_STRING("ON") : CLAY_STRING("OFF"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_b_toggle_fg) }));
                         }
                         CLAY_TEXT(CLAY_STRING("Resample B"), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(resample_b_toggle_fg) }));
 
                         format_msps_label(settings_resample_b_display, sizeof(settings_resample_b_display), app->settings.resample_rate_b);
-                        Color rate_bg = (settings_cxadc_mode || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
-                        Color rate_fg = (settings_cxadc_mode || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+                        Color rate_bg = (settings_b_controls_disabled || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_BUTTON) : COLOR_BUTTON;
+                        Color rate_fg = (settings_b_controls_disabled || !app->settings.enable_resample_b) ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
                         CLAY(CLAY_ID("ResampleRateBBox"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER } }, .backgroundColor = to_clay_color(rate_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             CLAY_TEXT(make_string(settings_resample_b_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(rate_fg) }));
                         }
@@ -1482,8 +1795,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY(CLAY_ID("AudioTag4chField"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_4ch_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag4 = app->settings.audio_output_tags[0][0] ? app->settings.audio_output_tags[0] : "(tag)";
                             if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_4CH) && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_4ch_display, sizeof(settings_audio_tag_4ch_display), "%s", gui_ui_build_text_with_caret(tag4, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_audio_tag_4ch_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_4ch_fg) }));
+                                gui_ui_render_active_text(UI_TEXT_FIELD_AUDIO_TAG_4CH, tag4, FONT_SIZE_STATS, 1, audio_tag_4ch_fg);
                             } else {
                                 CLAY_TEXT(make_string(tag4), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_4ch_fg) }));
                             }
@@ -1500,8 +1812,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY(CLAY_ID("AudioTag2ch12Field"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_12_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag12 = app->settings.audio_output_tags[1][0] ? app->settings.audio_output_tags[1] : "(tag)";
                             if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_12) && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_12_display, sizeof(settings_audio_tag_12_display), "%s", gui_ui_build_text_with_caret(tag12, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_audio_tag_12_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_12_fg) }));
+                                gui_ui_render_active_text(UI_TEXT_FIELD_AUDIO_TAG_12, tag12, FONT_SIZE_STATS, 1, audio_tag_12_fg);
                             } else {
                                 CLAY_TEXT(make_string(tag12), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_12_fg) }));
                             }
@@ -1518,8 +1829,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                         CLAY(CLAY_ID("AudioTag2ch34Field"), { .layout = { .sizing = { CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(audio_tag_34_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                             const char *tag34 = app->settings.audio_output_tags[2][0] ? app->settings.audio_output_tags[2] : "(tag)";
                             if (gui_ui_is_text_field_active(UI_TEXT_FIELD_AUDIO_TAG_34) && app->settings.auto_names_enabled) {
-                                snprintf(settings_audio_tag_34_display, sizeof(settings_audio_tag_34_display), "%s", gui_ui_build_text_with_caret(tag34, s_active_text_cursor));
-                                CLAY_TEXT(make_string(settings_audio_tag_34_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_34_fg) }));
+                                gui_ui_render_active_text(UI_TEXT_FIELD_AUDIO_TAG_34, tag34, FONT_SIZE_STATS, 1, audio_tag_34_fg);
                             } else {
                                 CLAY_TEXT(make_string(tag34), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(audio_tag_34_fg) }));
                             }
@@ -1551,8 +1861,7 @@ CLAY(CLAY_ID("SettingsOutputPath"), {
                             CLAY(label_id, { .layout = { .sizing = { CLAY_SIZING_FIXED(90), CLAY_SIZING_FIXED(28) }, .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER }, .padding = { 6, 6, 0, 0 } }, .backgroundColor = to_clay_color(tag_bg), .cornerRadius = CLAY_CORNER_RADIUS(4) }) {
                                 const char *tag = app->settings.audio_1ch_labels[i][0] ? app->settings.audio_1ch_labels[i] : "(tag)";
                                 if (gui_ui_is_text_field_active((ui_text_field_t)(UI_TEXT_FIELD_AUDIO_LABEL_1 + i)) && app->settings.auto_names_enabled) {
-                                    snprintf(temp_buf8, sizeof(temp_buf8), "%s", gui_ui_build_text_with_caret(tag, s_active_text_cursor));
-                                    CLAY_TEXT(make_string(temp_buf8), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
+                                    gui_ui_render_active_text((ui_text_field_t)(UI_TEXT_FIELD_AUDIO_LABEL_1 + i), tag, FONT_SIZE_STATS, 1, tag_fg);
                                 } else {
                                     CLAY_TEXT(make_string(tag), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(tag_fg) }));
                                 }
@@ -1852,8 +2161,7 @@ static void render_record_limit_window(gui_app_t *app)
             }) {
                 const char *lvl = app->settings.level_autostop_level_str[0] ? app->settings.level_autostop_level_str : "33";
                 if (gui_ui_is_text_field_active(UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL) && app->settings.level_autostop_enabled) {
-                    snprintf(settings_level_autostop_level_display, sizeof(settings_level_autostop_level_display), "%s", gui_ui_build_text_with_caret(lvl, s_active_text_cursor));
-                    CLAY_TEXT(make_string(settings_level_autostop_level_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(lvl_box_fg) }));
+                    gui_ui_render_active_text(UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL, lvl, FONT_SIZE_STATS, 1, lvl_box_fg);
                 } else {
                     CLAY_TEXT(make_string(lvl), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(lvl_box_fg) }));
                 }
@@ -1876,8 +2184,7 @@ static void render_record_limit_window(gui_app_t *app)
             }) {
                 const char *dur = app->settings.level_autostop_duration_str[0] ? app->settings.level_autostop_duration_str : "5.0";
                 if (gui_ui_is_text_field_active(UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION) && app->settings.level_autostop_enabled) {
-                    snprintf(settings_level_autostop_duration_display, sizeof(settings_level_autostop_duration_display), "%s", gui_ui_build_text_with_caret(dur, s_active_text_cursor));
-                    CLAY_TEXT(make_string(settings_level_autostop_duration_display), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(dur_box_fg) }));
+                    gui_ui_render_active_text(UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION, dur, FONT_SIZE_STATS, 1, dur_box_fg);
                 } else {
                     CLAY_TEXT(make_string(dur), CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(dur_box_fg) }));
                 }
@@ -2064,6 +2371,28 @@ static void render_version_info_window(gui_app_t *app)
                     CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
             }
             CLAY_TEXT(CLAY_STRING("list OS video capture devices"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+        }
+
+        CLAY(CLAY_ID("VersionInfoCorePinningRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoCorePinningLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Enable Core Pinning:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("VersionInfoCorePinningToggle"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(app->settings.show_core_pinning_in_settings ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(app->settings.show_core_pinning_in_settings ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+            CLAY_TEXT(CLAY_STRING("show/hide core pinning in Settings"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
         }
 
@@ -3259,6 +3588,18 @@ void gui_handle_interactions(gui_app_t *app) {
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         // Version info popup modal interactions (consume before toolbar underneath)
         if (s_version_info_window_open) {
+            if (Clay_PointerOver(CLAY_ID("VersionInfoCorePinningToggle"))) {
+                app->settings.show_core_pinning_in_settings = !app->settings.show_core_pinning_in_settings;
+                if (!app->settings.show_core_pinning_in_settings && s_active_text_field == UI_TEXT_FIELD_FLAC_AFFINITY) {
+                    gui_ui_clear_text_edit();
+                }
+                gui_settings_save(&app->settings);
+                gui_app_set_status(app, app->settings.show_core_pinning_in_settings
+                    ? "Core pinning controls shown in Settings"
+                    : "Core pinning controls hidden from Settings");
+                gui_ui_set_click_consumed();
+                return;
+            }
             if (Clay_PointerOver(CLAY_ID("VersionInfoV4l2Toggle"))) {
                 // Toggle V4L2/simple_capture device discovery and re-enumerate
                 // so the device dropdown reflects the new setting immediately.
@@ -3537,13 +3878,15 @@ void gui_handle_interactions(gui_app_t *app) {
 
         // Settings panel interactions
         if (app->settings_panel_open) {
-            bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, NULL);
+            bool settings_cxadc_has_channel_b = false;
+            bool settings_cxadc_mode = gui_ui_selected_device_is_cxadc(app, &settings_cxadc_has_channel_b);
 #ifdef ENABLE_DDD
             bool settings_ddd_mode = gui_ui_selected_device_is_ddd(app);
 #else
             bool settings_ddd_mode = false;
 #endif
-            bool settings_b_disabled = settings_cxadc_mode || settings_ddd_mode;
+            bool settings_b_disabled = settings_ddd_mode || (settings_cxadc_mode && !settings_cxadc_has_channel_b);
+            bool settings_b_controls_disabled = settings_b_disabled || !app->settings.capture_b;
             if (Clay_PointerOver(CLAY_ID("SettingsBackdrop")) || Clay_PointerOver(CLAY_ID("SettingsCloseButton"))) {
                 app->settings_panel_open = false;
                 gui_ui_clear_text_edit();
@@ -3555,23 +3898,25 @@ void gui_handle_interactions(gui_app_t *app) {
             }
 
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureA"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC capture mapping is fixed by device mode");
-                } else {
-                    app->settings.capture_a = !app->settings.capture_a;
-                    gui_settings_save(&app->settings);
-                    if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
-                        gui_ui_clear_text_edit();
-                    }
+                app->settings.capture_a = !app->settings.capture_a;
+                gui_settings_save(&app->settings);
+                if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
+                    gui_ui_clear_text_edit();
                 }
             }
             if (Clay_PointerOver(CLAY_ID("ToggleCaptureB"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC capture mapping is fixed by detected card count");
-                } else if (settings_ddd_mode) {
-                    gui_app_set_status(app, "DdD is single-channel; channel B has no signal source");
+                if (settings_b_disabled) {
+                    if (settings_ddd_mode) {
+                        gui_app_set_status(app, "DdD is single-channel; channel B has no signal source");
+                    } else if (settings_cxadc_mode) {
+                        gui_app_set_status(app, "Single-card CXADC has no RF channel B source");
+                    }
                 } else {
                     app->settings.capture_b = !app->settings.capture_b;
+                    if (!app->settings.capture_b) {
+                        app->settings.enable_resample_b = false;
+                        app->settings.resample_rate_b = 40000.0f;
+                    }
                     gui_settings_save(&app->settings);
                 }
             }
@@ -3604,7 +3949,9 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ToggleFlacAffinity"))) {
-                if (gui_ui_flac_affinity_supported() && app->settings.use_flac) {
+                if (app->settings.show_core_pinning_in_settings &&
+                    gui_ui_flac_affinity_supported() &&
+                    app->settings.use_flac) {
                     app->settings.flac_affinity_enabled = !app->settings.flac_affinity_enabled;
                     gui_settings_save(&app->settings);
                     if (!gui_ui_text_field_can_edit(app, s_active_text_field)) {
@@ -3616,41 +3963,50 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (app->settings_panel_open &&
                 Clay_PointerOver(CLAY_ID("FlacAffinityListField")) &&
+                app->settings.show_core_pinning_in_settings &&
                 !gui_ui_click_consumed()) {
                 gui_ui_begin_text_edit(app, UI_TEXT_FIELD_FLAC_AFFINITY, CLAY_ID("FlacAffinityListField"), 8.0f, 8.0f);
                 gui_ui_set_click_consumed();
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleA"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
-                } else {
-                    app->settings.enable_resample_a = !app->settings.enable_resample_a;
-                    gui_settings_save(&app->settings);
+                bool enable = !app->settings.enable_resample_a;
+                app->settings.enable_resample_a = enable;
+                if (!enable) {
+                    app->settings.resample_rate_a = 40000.0f;
                 }
+                gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ResampleRateABox"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
-                } else {
-                    app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
-                    gui_settings_save(&app->settings);
-                }
+                app->settings.resample_rate_a = cycle_resample_khz(app->settings.resample_rate_a);
+                gui_settings_save(&app->settings);
             }
             if (Clay_PointerOver(CLAY_ID("ToggleResampleB"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
-                } else if (settings_ddd_mode) {
-                    gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
+                if (settings_b_controls_disabled) {
+                    if (settings_ddd_mode) {
+                        gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
+                    } else if (settings_cxadc_mode) {
+                        gui_app_set_status(app, "Single-card CXADC has no RF channel B source");
+                    } else if (!app->settings.capture_b) {
+                        gui_app_set_status(app, "Enable RF channel B to edit CH B resample settings");
+                    }
                 } else {
-                    app->settings.enable_resample_b = !app->settings.enable_resample_b;
+                    bool enable = !app->settings.enable_resample_b;
+                    app->settings.enable_resample_b = enable;
+                    if (!enable) {
+                        app->settings.resample_rate_b = 40000.0f;
+                    }
                     gui_settings_save(&app->settings);
                 }
             }
             if (Clay_PointerOver(CLAY_ID("ResampleRateBBox"))) {
-                if (settings_cxadc_mode) {
-                    gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS (resample disabled)");
-                } else if (settings_ddd_mode) {
-                    gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
+                if (settings_b_controls_disabled) {
+                    if (settings_ddd_mode) {
+                        gui_app_set_status(app, "DdD is single-channel; channel B resample not applicable");
+                    } else if (settings_cxadc_mode) {
+                        gui_app_set_status(app, "Single-card CXADC has no RF channel B source");
+                    } else if (!app->settings.capture_b) {
+                        gui_app_set_status(app, "Enable RF channel B to edit CH B resample settings");
+                    }
                 } else {
                     app->settings.resample_rate_b = cycle_resample_khz(app->settings.resample_rate_b);
                     gui_settings_save(&app->settings);
@@ -3719,6 +4075,12 @@ void gui_handle_interactions(gui_app_t *app) {
             if (Clay_PointerOver(CLAY_ID("RfBitsBBox"))) {
                 if (settings_cxadc_mode) {
                     gui_app_set_status(app, "CXADC RF is fixed at 8-bit 40MSPS");
+                } else if (settings_b_controls_disabled) {
+                    if (settings_ddd_mode) {
+                        gui_app_set_status(app, "DdD is single-channel; channel B bit depth not applicable");
+                    } else if (!app->settings.capture_b) {
+                        gui_app_set_status(app, "Enable RF channel B to edit CH B bit depth");
+                    }
                 } else {
                     uint8_t b = app->settings.rf_bits_b;
                     if (app->settings.use_flac) {
@@ -3747,7 +4109,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_ui_begin_text_edit(app, UI_TEXT_FIELD_AUDIO_TAG_34, CLAY_ID("AudioTag2ch34Field"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }
-            if (Clay_PointerOver(CLAY_ID("RfTagBField")) && app->settings.auto_names_enabled) {
+            if (Clay_PointerOver(CLAY_ID("RfTagBField")) && app->settings.auto_names_enabled && !settings_b_controls_disabled) {
                 gui_ui_begin_text_edit(app, UI_TEXT_FIELD_RF_TAG_B, CLAY_ID("RfTagBField"), 6.0f, 6.0f);
                 gui_ui_set_click_consumed();
             }

@@ -1118,9 +1118,12 @@ static int flac_writer_thread(void *ctx) {
             continue;
         }
         size_t out_n = GUI_RECORD_WRITER_BLOCK_SAMPLES;
+        bool encoded_block = false;
 
 #if LIBSOXR_ENABLED
-        if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+        if (wctx->enable_resample &&
+            wctx->resample_rate_khz > 0.0f &&
+            wctx->resample_rate_khz < 40000.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
                 size_t in_done = 0, out_done = 0;
@@ -1141,12 +1144,14 @@ static int flac_writer_thread(void *ctx) {
                     }
                     if (result < 0) {
                         encode_failed = true;
+                    } else {
+                        encoded_block = true;
                     }
                 }
             }
-        } else
+        }
 #endif
-        {
+        if (!encode_failed && !encoded_block) {
             convert_i16_to_flac_i32(tmp_i32, in, GUI_RECORD_WRITER_BLOCK_SAMPLES, wctx->flac_bits_per_sample);
             int result = flac_writer_process(wctx->writer, tmp_i32, GUI_RECORD_WRITER_BLOCK_SAMPLES);
             if (result < 0 && !flac_encoder_error_logged) {
@@ -1269,9 +1274,12 @@ static int raw_writer_thread(void *ctx) {
             continue;
         }
         size_t out_n = GUI_RECORD_WRITER_BLOCK_SAMPLES;
+        bool wrote_block = false;
 
 #if LIBSOXR_ENABLED
-        if (wctx->enable_resample && wctx->resample_rate_khz > 0.0f) {
+        if (wctx->enable_resample &&
+            wctx->resample_rate_khz > 0.0f &&
+            wctx->resample_rate_khz < 40000.0f) {
             soxr_t s = ensure_soxr(wctx, wctx->resample_rate_khz);
             if (s) {
                 size_t in_done = 0, out_done = 0;
@@ -1281,11 +1289,12 @@ static int raw_writer_thread(void *ctx) {
                     out_n = out_done;
                     convert_i16_to_raw_bytes(tmp_out, tmp_i16, out_n, wctx->rf_bits);
                     fwrite(tmp_out, 1, out_n * bps, wctx->file);
+                    wrote_block = true;
                 }
             }
-        } else
+        }
 #endif
-        {
+        if (!wrote_block) {
             convert_i16_to_raw_bytes(tmp_out, in, out_n, wctx->rf_bits);
             fwrite(tmp_out, 1, out_n * bps, wctx->file);
         }

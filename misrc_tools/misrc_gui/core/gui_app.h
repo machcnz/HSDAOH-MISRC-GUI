@@ -253,6 +253,8 @@ typedef struct {
     // enabling it lists OS video capture devices (e.g. MS2130 HDMI capture)
     // in the device dropdown.
     bool discover_simple_capture;
+    // Advanced settings visibility: show/hide core-pinning controls in Settings.
+    bool show_core_pinning_in_settings;
 
     // Playback settings
     char playback_file_a[MAX_FILENAME_LEN];   // FLAC file for channel A playback
