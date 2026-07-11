@@ -246,13 +246,62 @@ static int record_limit_move_cursor_char(int cursor, int dir)
         if (record_limit_is_digit_char_index(next)) return next;
     }
 }
-
-static int record_limit_segment_from_cursor_char(int cursor_char)
+static int record_limit_timecode_font_size_px(void)
 {
-    int cursor = record_limit_nearest_digit_cursor_char(cursor_char);
-    if (cursor <= 1) return 0; // HH
-    if (cursor <= 4) return 1; // MM
-    return 2; // SS
+    return (int)ceilf((float)FONT_SIZE_TITLE * RECORD_LIMIT_TIMECODE_SCALE);
+}
+
+static const char *record_limit_timecode_buffer_for_layout(void)
+{
+    static const char fallback_timecode[] = "00:00:00";
+    const char *text = s_record_limit_timecode_edit
+        ? s_record_limit_timecode_edit_buffer
+        : s_record_limit_timecode;
+    if (!text || strlen(text) < 8) {
+        return fallback_timecode;
+    }
+    return text;
+}
+
+static Font record_limit_timecode_font(gui_app_t *app)
+{
+    Font font = GetFontDefault();
+    if (app && app->fonts && app->fonts[1].texture.id != 0) {
+        font = app->fonts[1];
+    }
+    if (!font.glyphs) {
+        font = GetFontDefault();
+    }
+    return font;
+}
+
+static void record_limit_measure_char_widths(gui_app_t *app,
+                                             const char *timecode_text,
+                                             int font_size,
+                                             float out_widths[8],
+                                             float *out_total_width)
+{
+    static const char fallback_timecode[] = "00:00:00";
+    const char *text = timecode_text;
+    if (!text || strlen(text) < 8) {
+        text = fallback_timecode;
+    }
+
+    Font font = record_limit_timecode_font(app);
+    float total = 0.0f;
+    for (int i = 0; i < 8; i++) {
+        char glyph[2] = { text[i], '\0' };
+        Vector2 m = MeasureTextEx(font, glyph, (float)font_size, 0.0f);
+        float w = m.x;
+        if (w <= 0.0f) {
+            w = (text[i] == ':') ? ((float)font_size * 0.35f) : ((float)font_size * 0.5f);
+        }
+        out_widths[i] = w;
+        total += w;
+    }
+    if (out_total_width) {
+        *out_total_width = total;
+    }
 }
 
 static void record_limit_begin_timecode_edit(void)
@@ -265,8 +314,7 @@ static void record_limit_begin_timecode_edit(void)
     s_record_limit_backspace_repeat_at = 0.0;
     s_record_limit_timecode_edit = true;
 }
-
-static void record_limit_set_cursor_from_field_click(void)
+static void record_limit_set_cursor_from_field_click(gui_app_t *app)
 {
     Clay_ElementData field = Clay_GetElementData(CLAY_ID("RecordLimitTimecodeField"));
     if (!field.found) {
@@ -278,14 +326,27 @@ static void record_limit_set_cursor_from_field_click(void)
     float content_left = field.boundingBox.x + (float)RECORD_LIMIT_TIMECODE_BORDER_X;
     float content_width = field.boundingBox.width - (float)(RECORD_LIMIT_TIMECODE_BORDER_X * 2);
     if (content_width < 8.0f) content_width = 8.0f;
-    float local_x = mouse.x - content_left;
-    if (local_x < 0.0f) local_x = 0.0f;
-    if (local_x > content_width - 1.0f) local_x = content_width - 1.0f;
 
-    int char_idx = (int)floorf((local_x / content_width) * 8.0f); // HH:MM:SS (8 chars)
-    if (char_idx < 0) char_idx = 0;
-    if (char_idx > 7) char_idx = 7;
-    s_record_limit_cursor_char = record_limit_nearest_digit_cursor_char(char_idx);
+    float char_widths[8] = { 0 };
+    float text_width = 0.0f;
+    int font_size = record_limit_timecode_font_size_px();
+    record_limit_measure_char_widths(app, record_limit_timecode_buffer_for_layout(), font_size, char_widths, &text_width);
+
+    float text_left = content_left + fmaxf(0.0f, (content_width - text_width) * 0.5f);
+    float x = text_left;
+    int nearest_idx = 0;
+    float nearest_dist = 1.0e30f;
+    for (int i = 0; i < 8; i++) {
+        float center = x + (char_widths[i] * 0.5f);
+        float dist = fabsf(mouse.x - center);
+        if (dist < nearest_dist) {
+            nearest_dist = dist;
+            nearest_idx = i;
+        }
+        x += char_widths[i];
+    }
+
+    s_record_limit_cursor_char = record_limit_nearest_digit_cursor_char(nearest_idx);
 }
 
 static inline void gui_ui_set_click_consumed(void) { // 130226 - added
@@ -2033,11 +2094,13 @@ static void render_record_limit_window(gui_app_t *app)
 
         Color timecode_bg = (Color){25, 25, 30, 255};
         Color timecode_fg = display_timecode_valid ? COLOR_TEXT : COLOR_CLIP_RED;
-        int record_limit_timecode_font_size = (int)ceilf((float)FONT_SIZE_TITLE * RECORD_LIMIT_TIMECODE_SCALE);
-        Vector2 record_limit_timecode_text_size;
-        if (app->fonts) {
-            record_limit_timecode_text_size = MeasureTextEx(app->fonts[1], "00:00:00", (float)record_limit_timecode_font_size, 0.0f);
-        } else {
+        int record_limit_timecode_font_size = record_limit_timecode_font_size_px();
+        Font record_limit_font = record_limit_timecode_font(app);
+        Vector2 record_limit_timecode_text_size = MeasureTextEx(record_limit_font,
+                                                                "00:00:00",
+                                                                (float)record_limit_timecode_font_size,
+                                                                0.0f);
+        if (record_limit_timecode_text_size.x <= 0.0f || record_limit_timecode_text_size.y <= 0.0f) {
             record_limit_timecode_text_size = (Vector2){
                 (float)record_limit_timecode_font_size * 4.8f,
                 (float)record_limit_timecode_font_size
@@ -2045,12 +2108,25 @@ static void render_record_limit_window(gui_app_t *app)
         }
         int record_limit_timecode_width = (int)ceilf(record_limit_timecode_text_size.x) + (RECORD_LIMIT_TIMECODE_BORDER_X * 2);
         int record_limit_timecode_height = (int)ceilf(record_limit_timecode_text_size.y) + (RECORD_LIMIT_TIMECODE_BORDER_Y * 2);
-        int record_limit_indicator_height = (int)roundf(4.0f * RECORD_LIMIT_TIMECODE_SCALE);
-        int record_limit_indicator_gap = (int)roundf(8.0f * RECORD_LIMIT_TIMECODE_SCALE);
+        int record_limit_indicator_height = (int)roundf(2.0f * RECORD_LIMIT_TIMECODE_SCALE);
         if (record_limit_indicator_height < 1) record_limit_indicator_height = 1;
-        if (record_limit_indicator_gap < 1) record_limit_indicator_gap = 1;
-        int record_limit_segment_width = (record_limit_timecode_width - (record_limit_indicator_gap * 2)) / 3;
-        if (record_limit_segment_width < 1) record_limit_segment_width = 1;
+        float record_limit_indicator_char_widths[8] = { 0 };
+        float record_limit_indicator_text_width = 0.0f;
+        record_limit_measure_char_widths(app,
+                                         record_limit_timecode_buffer_for_layout(),
+                                         record_limit_timecode_font_size,
+                                         record_limit_indicator_char_widths,
+                                         &record_limit_indicator_text_width);
+        float record_limit_indicator_content_width = (float)record_limit_timecode_width - (float)(RECORD_LIMIT_TIMECODE_BORDER_X * 2);
+        if (record_limit_indicator_content_width < 0.0f) record_limit_indicator_content_width = 0.0f;
+        float record_limit_indicator_left_pad = (float)RECORD_LIMIT_TIMECODE_BORDER_X +
+                                                fmaxf(0.0f, (record_limit_indicator_content_width - record_limit_indicator_text_width) * 0.5f);
+        float record_limit_indicator_right_pad = (float)record_limit_timecode_width -
+                                                 record_limit_indicator_left_pad -
+                                                 record_limit_indicator_text_width;
+        if (record_limit_indicator_right_pad < 0.0f) record_limit_indicator_right_pad = 0.0f;
+        bool record_limit_digit_indicator_visible = ((int)(GetTime() * 1.8f) % 2) == 0;
+        int active_digit_char = record_limit_nearest_digit_cursor_char(s_record_limit_cursor_char);
         CLAY(CLAY_ID("RecordLimitTimecodeCenterRow"), {
             .layout = {
                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
@@ -2089,23 +2165,38 @@ static void render_record_limit_window(gui_app_t *app)
                 }
 
                 if (s_record_limit_timecode_edit) {
-                    int active_segment = record_limit_segment_from_cursor_char(s_record_limit_cursor_char);
-                    CLAY(CLAY_ID("RecordLimitSegmentIndicatorRow"), {
+                    CLAY(CLAY_ID("RecordLimitDigitIndicatorRow"), {
                         .layout = {
                             .sizing = { CLAY_SIZING_FIXED(record_limit_timecode_width), CLAY_SIZING_FIXED(record_limit_indicator_height) },
                             .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER },
-                            .childGap = record_limit_indicator_gap
+                            .childGap = 0
                         }
                     }) {
-                        for (int i = 0; i < 3; i++) {
-                            Color segment_color = (i == active_segment) ? COLOR_SYNC_GREEN : ui_disabled_color(COLOR_TEXT_DIM);
-                            CLAY(CLAY_IDI("RecordLimitSegmentIndicator", i), {
+                        if (record_limit_indicator_left_pad > 0.0f) {
+                            CLAY(CLAY_ID("RecordLimitDigitIndicatorLeftPad"), {
                                 .layout = {
-                                    .sizing = { CLAY_SIZING_FIXED(record_limit_segment_width), CLAY_SIZING_FIXED(record_limit_indicator_height) }
+                                    .sizing = { CLAY_SIZING_FIXED(record_limit_indicator_left_pad), CLAY_SIZING_FIXED(record_limit_indicator_height) }
+                                }
+                            }) {}
+                        }
+                        for (int i = 0; i < 8; i++) {
+                            bool active_digit = record_limit_is_digit_char_index(i) && (i == active_digit_char);
+                            Color indicator_color = (active_digit && record_limit_digit_indicator_visible)
+                                ? COLOR_SYNC_GREEN
+                                : (Color){ 0, 0, 0, 0 };
+                            CLAY(CLAY_IDI("RecordLimitDigitIndicator", i), {
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_FIXED(record_limit_indicator_char_widths[i]), CLAY_SIZING_FIXED(record_limit_indicator_height) }
                                 },
-                                .backgroundColor = to_clay_color(segment_color),
+                                .backgroundColor = to_clay_color(indicator_color),
                                 .cornerRadius = CLAY_CORNER_RADIUS(2)
+                            }) {}
+                        }
+                        if (record_limit_indicator_right_pad > 0.0f) {
+                            CLAY(CLAY_ID("RecordLimitDigitIndicatorRightPad"), {
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_FIXED(record_limit_indicator_right_pad), CLAY_SIZING_FIXED(record_limit_indicator_height) }
+                                }
                             }) {}
                         }
                     }
@@ -3691,7 +3782,7 @@ void gui_handle_interactions(gui_app_t *app) {
                 if (!s_record_limit_timecode_edit) {
                     record_limit_begin_timecode_edit();
                 }
-                record_limit_set_cursor_from_field_click();
+                record_limit_set_cursor_from_field_click(app);
                 gui_ui_set_click_consumed();
                 return;
             }
