@@ -88,9 +88,17 @@ typedef enum {
 typedef enum {
     TRIGGER_MODE_RISING,      // Rising edge crossing level
     TRIGGER_MODE_FALLING,     // Falling edge crossing level
+    TRIGGER_MODE_SYNC,        // Sync-locked trigger (CH3 headswitch phase lock)
     TRIGGER_MODE_CVBS_HSYNC,  // CVBS horizontal sync (auto PAL/NTSC)
     TRIGGER_MODE_COUNT
 } trigger_mode_t;
+// Trigger source selection (absolute channels)
+typedef enum {
+    TRIGGER_SOURCE_CH1,       // RF channel 1 / Channel A
+    TRIGGER_SOURCE_CH2,       // RF channel 2 / Channel B
+    TRIGGER_SOURCE_CH3,       // Clockgen headswitch channel
+    TRIGGER_SOURCE_COUNT
+} trigger_source_t;
 
 // Per-channel trigger configuration and state
 typedef struct {
@@ -101,6 +109,7 @@ typedef struct {
     atomic_int display_width;  // Actual pixel width of oscilloscope display (updated by renderer, read by extraction thread)
     scope_display_mode_t scope_mode;       // Display mode for this channel (line or phosphor)
     trigger_mode_t trigger_mode;           // Trigger mode (rising edge, falling edge, CVBS)
+    trigger_source_t trigger_source;       // Trigger source channel (CH1/CH2/CH3)
     phosphor_color_mode_t phosphor_color;  // Phosphor color mode (heatmap or opacity)
 
     // Resampler state (managed by gui_oscilloscope.c)

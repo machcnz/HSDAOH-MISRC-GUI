@@ -325,6 +325,7 @@ if raylib_dep.found()
     'misrc_gui/processing/gui_extract.c',
     'misrc_gui/processing/gui_display_thread.c',
     # Signal
+    'misrc_gui/signal/gui_headswitch_lock.c',
     'misrc_gui/signal/gui_trigger.c',
     'misrc_gui/signal/gui_cvbs.c',
     'misrc_gui/signal/gui_histogram.c',

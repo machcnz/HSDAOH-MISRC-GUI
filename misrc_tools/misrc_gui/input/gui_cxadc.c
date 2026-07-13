@@ -4,6 +4,7 @@
 #include "../processing/gui_extract.h"
 #include "../processing/gui_display_thread.h"
 #include "../output/gui_audio.h"
+#include "../signal/gui_headswitch_lock.h"
 #include "../../common/buffer_manager.h"
 #include "../../common/threading.h"
 
@@ -887,6 +888,7 @@ static int cxadc_audio_capture_thread(void *ctx_ptr)
                         dst_frame[10] = 0;
                         dst_frame[11] = 0;
                     }
+                    gui_headswitch_lock_ingest_s24le_interleaved(out, output_bytes, ctx->audio_sample_rate_hz);
                     bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, output_bytes);
                     bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
                     atomic_store(&app->audio_sample_rate, ctx->audio_sample_rate_hz);
@@ -977,6 +979,7 @@ cxadc_wasapi_done:
             dst_frame[10] = 0;
             dst_frame[11] = 0;
         }
+        gui_headswitch_lock_ingest_s24le_interleaved(out, output_bytes, ctx->audio_sample_rate_hz);
 
         bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, output_bytes);
         bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
@@ -1111,6 +1114,8 @@ int gui_cxadc_start(gui_app_t *app, int card_count)
     s_cxadc.audio_channels = 0;
     s_cxadc.audio_device_name[0] = '\0';
 
+    gui_headswitch_lock_reset();
+
     if (cxadc_open_cards(&s_cxadc, card_count) != 0) {
         gui_app_set_status(app, "CXADC: failed to open card device(s)");
         return -1;
@@ -1234,6 +1239,7 @@ void gui_cxadc_stop(gui_app_t *app)
     cxadc_close_audio_capture(&s_cxadc);
 
     cxadc_close_cards(&s_cxadc);
+    gui_headswitch_lock_reset();
 
     if (app) {
         atomic_store(&app->stream_synced, false);
