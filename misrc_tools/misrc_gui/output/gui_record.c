@@ -1853,6 +1853,18 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     snprintf(msg, sizeof(msg), "Ingest metadata tape_id: %s",
              app->settings.ingest_tape_id[0] ? app->settings.ingest_tape_id : "(empty)");
     gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata tape_format: %s",
+             app->settings.ingest_tape_format[0] ? app->settings.ingest_tape_format : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata tape_size: %s",
+             app->settings.ingest_tape_size[0] ? app->settings.ingest_tape_size : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata tape_speed: %s",
+             app->settings.ingest_tape_speed[0] ? app->settings.ingest_tape_speed : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata tape_condition: %s",
+             app->settings.ingest_tape_condition[0] ? app->settings.ingest_tape_condition : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
     snprintf(msg, sizeof(msg), "Ingest metadata operator: %s",
              app->settings.ingest_operator[0] ? app->settings.ingest_operator : "(empty)");
     gui_record_log_write_line_locked("INFO", msg);

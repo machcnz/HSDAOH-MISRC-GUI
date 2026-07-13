@@ -368,6 +368,10 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     }
     settings->ingest_project[0] = '\0';
     settings->ingest_tape_id[0] = '\0';
+    settings->ingest_tape_format[0] = '\0';
+    settings->ingest_tape_size[0] = '\0';
+    settings->ingest_tape_speed[0] = '\0';
+    settings->ingest_tape_condition[0] = '\0';
     settings->ingest_operator[0] = '\0';
     settings->ingest_location[0] = '\0';
     settings->ingest_notes[0] = '\0';
@@ -504,6 +508,10 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"level_autostop_duration_str\": \"%s\",\n", settings->level_autostop_duration_str);
     fprintf(f, "  \"ingest_project\": \"%s\",\n", settings->ingest_project);
     fprintf(f, "  \"ingest_tape_id\": \"%s\",\n", settings->ingest_tape_id);
+    fprintf(f, "  \"ingest_tape_format\": \"%s\",\n", settings->ingest_tape_format);
+    fprintf(f, "  \"ingest_tape_size\": \"%s\",\n", settings->ingest_tape_size);
+    fprintf(f, "  \"ingest_tape_speed\": \"%s\",\n", settings->ingest_tape_speed);
+    fprintf(f, "  \"ingest_tape_condition\": \"%s\",\n", settings->ingest_tape_condition);
     fprintf(f, "  \"ingest_operator\": \"%s\",\n", settings->ingest_operator);
     fprintf(f, "  \"ingest_location\": \"%s\",\n", settings->ingest_location);
     fprintf(f, "  \"ingest_notes\": \"%s\",\n", settings->ingest_notes);
@@ -1048,6 +1056,22 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "ingest_tape_id")) != NULL) {
         strncpy(settings->ingest_tape_id, value, sizeof(settings->ingest_tape_id) - 1);
         settings->ingest_tape_id[sizeof(settings->ingest_tape_id) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_format")) != NULL) {
+        strncpy(settings->ingest_tape_format, value, sizeof(settings->ingest_tape_format) - 1);
+        settings->ingest_tape_format[sizeof(settings->ingest_tape_format) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_size")) != NULL) {
+        strncpy(settings->ingest_tape_size, value, sizeof(settings->ingest_tape_size) - 1);
+        settings->ingest_tape_size[sizeof(settings->ingest_tape_size) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_speed")) != NULL) {
+        strncpy(settings->ingest_tape_speed, value, sizeof(settings->ingest_tape_speed) - 1);
+        settings->ingest_tape_speed[sizeof(settings->ingest_tape_speed) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_condition")) != NULL) {
+        strncpy(settings->ingest_tape_condition, value, sizeof(settings->ingest_tape_condition) - 1);
+        settings->ingest_tape_condition[sizeof(settings->ingest_tape_condition) - 1] = '\0';
     }
     if ((value = find_value(content, "ingest_operator")) != NULL) {
         strncpy(settings->ingest_operator, value, sizeof(settings->ingest_operator) - 1);

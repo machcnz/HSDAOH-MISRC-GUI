@@ -183,6 +183,10 @@ typedef enum {
     UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION,  // Level autostop sustain seconds
     UI_TEXT_FIELD_INGEST_PROJECT,
     UI_TEXT_FIELD_INGEST_TAPE_ID,
+    UI_TEXT_FIELD_INGEST_TAPE_FORMAT,
+    UI_TEXT_FIELD_INGEST_TAPE_SIZE,
+    UI_TEXT_FIELD_INGEST_TAPE_SPEED,
+    UI_TEXT_FIELD_INGEST_TAPE_CONDITION,
     UI_TEXT_FIELD_INGEST_OPERATOR,
     UI_TEXT_FIELD_INGEST_LOCATION,
     UI_TEXT_FIELD_INGEST_NOTES
@@ -897,6 +901,22 @@ static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, 
             *dst = app->settings.ingest_tape_id;
             *cap = sizeof(app->settings.ingest_tape_id);
             return true;
+        case UI_TEXT_FIELD_INGEST_TAPE_FORMAT:
+            *dst = app->settings.ingest_tape_format;
+            *cap = sizeof(app->settings.ingest_tape_format);
+            return true;
+        case UI_TEXT_FIELD_INGEST_TAPE_SIZE:
+            *dst = app->settings.ingest_tape_size;
+            *cap = sizeof(app->settings.ingest_tape_size);
+            return true;
+        case UI_TEXT_FIELD_INGEST_TAPE_SPEED:
+            *dst = app->settings.ingest_tape_speed;
+            *cap = sizeof(app->settings.ingest_tape_speed);
+            return true;
+        case UI_TEXT_FIELD_INGEST_TAPE_CONDITION:
+            *dst = app->settings.ingest_tape_condition;
+            *cap = sizeof(app->settings.ingest_tape_condition);
+            return true;
         case UI_TEXT_FIELD_INGEST_OPERATOR:
             *dst = app->settings.ingest_operator;
             *cap = sizeof(app->settings.ingest_operator);
@@ -926,6 +946,10 @@ static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
     }
     if (field == UI_TEXT_FIELD_INGEST_PROJECT ||
         field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_FORMAT ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_SIZE ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_SPEED ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_CONDITION ||
         field == UI_TEXT_FIELD_INGEST_OPERATOR ||
         field == UI_TEXT_FIELD_INGEST_LOCATION ||
         field == UI_TEXT_FIELD_INGEST_NOTES) {
@@ -972,6 +996,10 @@ static bool gui_ui_text_field_char_allowed(ui_text_field_t field, int ch)
     }
     if (field == UI_TEXT_FIELD_INGEST_PROJECT ||
         field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_FORMAT ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_SIZE ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_SPEED ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_CONDITION ||
         field == UI_TEXT_FIELD_INGEST_OPERATOR ||
         field == UI_TEXT_FIELD_INGEST_LOCATION ||
         field == UI_TEXT_FIELD_INGEST_NOTES) {
@@ -1014,6 +1042,10 @@ static void gui_ui_text_field_font(ui_text_field_t field, int *font_size, int *f
         case UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION:
         case UI_TEXT_FIELD_INGEST_PROJECT:
         case UI_TEXT_FIELD_INGEST_TAPE_ID:
+        case UI_TEXT_FIELD_INGEST_TAPE_FORMAT:
+        case UI_TEXT_FIELD_INGEST_TAPE_SIZE:
+        case UI_TEXT_FIELD_INGEST_TAPE_SPEED:
+        case UI_TEXT_FIELD_INGEST_TAPE_CONDITION:
         case UI_TEXT_FIELD_INGEST_OPERATOR:
         case UI_TEXT_FIELD_INGEST_LOCATION:
         case UI_TEXT_FIELD_INGEST_NOTES:
@@ -2653,6 +2685,129 @@ static void render_metadata_window(gui_app_t *app)
             }
         }
 
+        CLAY(CLAY_ID("MetadataTapeFormatRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataTapeFormatLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Tape Format:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataTapeFormatField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_tape_format;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_TAPE_FORMAT)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_TAPE_FORMAT, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataTapeSizeRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataTapeSizeLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Tape Size:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataTapeSizeField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_tape_size;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_TAPE_SIZE)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_TAPE_SIZE, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataTapeSpeedRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataTapeSpeedLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Tape Speed:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataTapeSpeedField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_tape_speed;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_TAPE_SPEED)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_TAPE_SPEED, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataTapeConditionRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataTapeConditionLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Tape Condition:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataTapeConditionField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_tape_condition;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_TAPE_CONDITION)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_TAPE_CONDITION, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
         CLAY(CLAY_ID("MetadataOperatorRow"), {
             .layout = {
                 .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
@@ -3870,6 +4025,10 @@ void gui_handle_interactions(gui_app_t *app) {
     bool metadata_text_field_active =
         (s_active_text_field == UI_TEXT_FIELD_INGEST_PROJECT ||
          s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_FORMAT ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_SIZE ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_SPEED ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_CONDITION ||
          s_active_text_field == UI_TEXT_FIELD_INGEST_OPERATOR ||
          s_active_text_field == UI_TEXT_FIELD_INGEST_LOCATION ||
          s_active_text_field == UI_TEXT_FIELD_INGEST_NOTES);
@@ -4005,6 +4164,10 @@ void gui_handle_interactions(gui_app_t *app) {
                 s_metadata_window_open = false;
                 if (s_active_text_field == UI_TEXT_FIELD_INGEST_PROJECT ||
                     s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_FORMAT ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_SIZE ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_SPEED ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_CONDITION ||
                     s_active_text_field == UI_TEXT_FIELD_INGEST_OPERATOR ||
                     s_active_text_field == UI_TEXT_FIELD_INGEST_LOCATION ||
                     s_active_text_field == UI_TEXT_FIELD_INGEST_NOTES) {
@@ -4020,6 +4183,26 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (Clay_PointerOver(CLAY_ID("MetadataTapeIdField"))) {
                 gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_ID, CLAY_ID("MetadataTapeIdField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataTapeFormatField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_FORMAT, CLAY_ID("MetadataTapeFormatField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataTapeSizeField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_SIZE, CLAY_ID("MetadataTapeSizeField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataTapeSpeedField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_SPEED, CLAY_ID("MetadataTapeSpeedField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataTapeConditionField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_CONDITION, CLAY_ID("MetadataTapeConditionField"), 8.0f, 8.0f);
                 gui_ui_set_click_consumed();
                 return;
             }

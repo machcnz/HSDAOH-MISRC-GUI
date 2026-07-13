@@ -254,6 +254,10 @@ typedef struct {
     // Ingest metadata (saved to settings and written to capture log at record start)
     char ingest_project[128];
     char ingest_tape_id[128];
+    char ingest_tape_format[128];
+    char ingest_tape_size[128];
+    char ingest_tape_speed[128];
+    char ingest_tape_condition[128];
     char ingest_operator[128];
     char ingest_location[128];
     char ingest_notes[256];
