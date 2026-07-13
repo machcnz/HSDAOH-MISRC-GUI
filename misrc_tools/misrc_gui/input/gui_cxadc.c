@@ -407,6 +407,13 @@ static int cxadc_probe_alsa_cards_for_audio(cxadc_ctx_t *ctx)
         bool likely_clockgen = cxadc_alsa_card_name_matches_clockgen(name, longname);
         if (likely_clockgen) {
             matched_named_clockgen_card = true;
+            char usbstream_dev[32];
+            snprintf(usbstream_dev, sizeof(usbstream_dev), "usbstream:CARD=%d", card);
+            if (cxadc_try_open_audio_device(ctx, usbstream_dev) == 0) {
+                if (name) free(name);
+                if (longname) free(longname);
+                return 0;
+            }
             char hw_dev[32];
             char plughw_dev[32];
             snprintf(hw_dev, sizeof(hw_dev), "hw:%d", card);
@@ -431,6 +438,11 @@ static int cxadc_probe_alsa_cards_for_audio(cxadc_ctx_t *ctx)
     card = -1;
     if (snd_card_next(&card) < 0) return -1;
     while (card >= 0) {
+        char usbstream_dev[32];
+        snprintf(usbstream_dev, sizeof(usbstream_dev), "usbstream:CARD=%d", card);
+        if (cxadc_try_open_audio_device(ctx, usbstream_dev) == 0) {
+            return 0;
+        }
         char hw_dev[32];
         char plughw_dev[32];
         snprintf(hw_dev, sizeof(hw_dev), "hw:%d", card);
@@ -448,10 +460,18 @@ static int cxadc_probe_alsa_cards_for_audio(cxadc_ctx_t *ctx)
 static int cxadc_open_audio_capture(cxadc_ctx_t *ctx)
 {
     if (!ctx) return -1;
+    // Internal support note (ClockGen Lite feed, Linux):
+    // If the aux/headswitch feed is missing, verify mixer state with:
+    //   alsamixer -D usbstream:CARD=CXADCADCClockGe
+    // and make sure "USB Stream Output" is enabled/unmuted.
 
     const char *env_device = getenv("MISRC_CXADC_ALSA_DEVICE");
     const char *candidates[] = {
         env_device,
+        "usbstream:CARD=CXADCADCClockGe",
+        "usbstream:CARD=CXADCADCClockGen",
+        "usbstream:CARD=CXADCClockGen",
+        "usbstream:CARD=CXADCClockGe",
         "hw:CARD=CXADCADCClockGe",
         "hw:CARD=CXADCADCClockGen",
         "hw:CARD=CXADCClockGen",
@@ -1149,6 +1169,11 @@ int gui_cxadc_start(gui_app_t *app, int card_count)
     } else {
 #if defined(_WIN32) || LIBASOUND_ENABLED
         fprintf(stderr, "[CXADC] clockgen audio device not available; continuing RF-only\n");
+#if !defined(_WIN32) && LIBASOUND_ENABLED
+        fprintf(stderr, "[CXADC] support note: for ClockGen Lite feed, check alsamixer card "
+                        "\"CXADC+ADC-ClockGen\" (e.g. -D usbstream:CARD=CXADCADCClockGe) "
+                        "and ensure \"USB Stream Output\" is enabled\n");
+#endif
 #endif
     }
 
