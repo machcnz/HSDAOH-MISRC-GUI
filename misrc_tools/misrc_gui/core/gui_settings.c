@@ -366,6 +366,11 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     for (int i = 0; i < 3; i++) {
         settings->audio_output_tags[i][0] = '\0';
     }
+    settings->ingest_project[0] = '\0';
+    settings->ingest_tape_id[0] = '\0';
+    settings->ingest_operator[0] = '\0';
+    settings->ingest_location[0] = '\0';
+    settings->ingest_notes[0] = '\0';
     // Optional per-channel RF tags
     for (int i = 0; i < 2; i++) {
         settings->rf_channel_tags[i][0] = '\0';
@@ -497,6 +502,11 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"level_autostop_enabled\": %s,\n", settings->level_autostop_enabled ? "true" : "false");
     fprintf(f, "  \"level_autostop_level_str\": \"%s\",\n", settings->level_autostop_level_str);
     fprintf(f, "  \"level_autostop_duration_str\": \"%s\",\n", settings->level_autostop_duration_str);
+    fprintf(f, "  \"ingest_project\": \"%s\",\n", settings->ingest_project);
+    fprintf(f, "  \"ingest_tape_id\": \"%s\",\n", settings->ingest_tape_id);
+    fprintf(f, "  \"ingest_operator\": \"%s\",\n", settings->ingest_operator);
+    fprintf(f, "  \"ingest_location\": \"%s\",\n", settings->ingest_location);
+    fprintf(f, "  \"ingest_notes\": \"%s\",\n", settings->ingest_notes);
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -1030,6 +1040,26 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "level_autostop_duration_str")) != NULL) {
         strncpy(settings->level_autostop_duration_str, value, sizeof(settings->level_autostop_duration_str) - 1);
         settings->level_autostop_duration_str[sizeof(settings->level_autostop_duration_str) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_project")) != NULL) {
+        strncpy(settings->ingest_project, value, sizeof(settings->ingest_project) - 1);
+        settings->ingest_project[sizeof(settings->ingest_project) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_id")) != NULL) {
+        strncpy(settings->ingest_tape_id, value, sizeof(settings->ingest_tape_id) - 1);
+        settings->ingest_tape_id[sizeof(settings->ingest_tape_id) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_operator")) != NULL) {
+        strncpy(settings->ingest_operator, value, sizeof(settings->ingest_operator) - 1);
+        settings->ingest_operator[sizeof(settings->ingest_operator) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_location")) != NULL) {
+        strncpy(settings->ingest_location, value, sizeof(settings->ingest_location) - 1);
+        settings->ingest_location[sizeof(settings->ingest_location) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_notes")) != NULL) {
+        strncpy(settings->ingest_notes, value, sizeof(settings->ingest_notes) - 1);
+        settings->ingest_notes[sizeof(settings->ingest_notes) - 1] = '\0';
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

@@ -251,6 +251,12 @@ typedef struct {
     char audio_1ch_labels[4][32];
     // Optional tags for non-mono audio outputs: [0]=4ch, [1]=stereo ch1/2, [2]=stereo ch3/4
     char audio_output_tags[3][32];
+    // Ingest metadata (saved to settings and written to capture log at record start)
+    char ingest_project[128];
+    char ingest_tape_id[128];
+    char ingest_operator[128];
+    char ingest_location[128];
+    char ingest_notes[256];
 
     // Display settings (existing)
     bool show_grid;

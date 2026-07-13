@@ -1847,6 +1847,21 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
     snprintf(msg, sizeof(msg), "Dropout handling: stop_on_dropout=%s",
              app->settings.stop_on_dropout ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata project: %s",
+             app->settings.ingest_project[0] ? app->settings.ingest_project : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata tape_id: %s",
+             app->settings.ingest_tape_id[0] ? app->settings.ingest_tape_id : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata operator: %s",
+             app->settings.ingest_operator[0] ? app->settings.ingest_operator : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata location: %s",
+             app->settings.ingest_location[0] ? app->settings.ingest_location : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "Ingest metadata notes: %s",
+             app->settings.ingest_notes[0] ? app->settings.ingest_notes : "(empty)");
+    gui_record_log_write_line_locked("INFO", msg);
 
     if (app->settings.use_flac) {
         snprintf(msg, sizeof(msg), "FLAC settings: level=%d verify=%s threads=%d",

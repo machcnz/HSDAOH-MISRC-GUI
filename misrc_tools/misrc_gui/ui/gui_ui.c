@@ -180,7 +180,12 @@ typedef enum {
     UI_TEXT_FIELD_AUDIO_LABEL_3,
     UI_TEXT_FIELD_AUDIO_LABEL_4,
     UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL,    // Level autostop threshold percent
-    UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION  // Level autostop sustain seconds
+    UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION,  // Level autostop sustain seconds
+    UI_TEXT_FIELD_INGEST_PROJECT,
+    UI_TEXT_FIELD_INGEST_TAPE_ID,
+    UI_TEXT_FIELD_INGEST_OPERATOR,
+    UI_TEXT_FIELD_INGEST_LOCATION,
+    UI_TEXT_FIELD_INGEST_NOTES
 } ui_text_field_t;
 
 // Unified cursor-based text editing state (settings panel)
@@ -199,6 +204,8 @@ static double s_active_text_backspace_repeat_at = 0.0;
 static bool s_record_limit_window_open = false;
 // Version info popup state (toolbar "i" badge button)
 static bool s_version_info_window_open = false;
+// Metadata popup state (toolbar scroll badge button)
+static bool s_metadata_window_open = false;
 static bool s_record_limit_armed = false;
 static bool s_record_limit_timecode_edit = false;
 static double s_record_limit_backspace_repeat_at = 0.0;
@@ -882,6 +889,26 @@ static bool gui_ui_text_field_get_buffer(gui_app_t *app, ui_text_field_t field, 
             *dst = app->settings.level_autostop_duration_str;
             *cap = sizeof(app->settings.level_autostop_duration_str);
             return true;
+        case UI_TEXT_FIELD_INGEST_PROJECT:
+            *dst = app->settings.ingest_project;
+            *cap = sizeof(app->settings.ingest_project);
+            return true;
+        case UI_TEXT_FIELD_INGEST_TAPE_ID:
+            *dst = app->settings.ingest_tape_id;
+            *cap = sizeof(app->settings.ingest_tape_id);
+            return true;
+        case UI_TEXT_FIELD_INGEST_OPERATOR:
+            *dst = app->settings.ingest_operator;
+            *cap = sizeof(app->settings.ingest_operator);
+            return true;
+        case UI_TEXT_FIELD_INGEST_LOCATION:
+            *dst = app->settings.ingest_location;
+            *cap = sizeof(app->settings.ingest_location);
+            return true;
+        case UI_TEXT_FIELD_INGEST_NOTES:
+            *dst = app->settings.ingest_notes;
+            *cap = sizeof(app->settings.ingest_notes);
+            return true;
         default:
             return false;
     }
@@ -896,6 +923,13 @@ static bool gui_ui_text_field_can_edit(gui_app_t *app, ui_text_field_t field)
     if (field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL ||
         field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION) {
         return s_record_limit_window_open && app->settings.level_autostop_enabled;
+    }
+    if (field == UI_TEXT_FIELD_INGEST_PROJECT ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+        field == UI_TEXT_FIELD_INGEST_OPERATOR ||
+        field == UI_TEXT_FIELD_INGEST_LOCATION ||
+        field == UI_TEXT_FIELD_INGEST_NOTES) {
+        return s_metadata_window_open;
     }
     if (!app->settings_panel_open || gui_ui_settings_locked(app)) return false;
     switch (field) {
@@ -936,6 +970,14 @@ static bool gui_ui_text_field_char_allowed(ui_text_field_t field, int ch)
         // Decimal seconds: digits and a single '.' (allow typing; parse clamps).
         return (ch >= '0' && ch <= '9') || ch == '.';
     }
+    if (field == UI_TEXT_FIELD_INGEST_PROJECT ||
+        field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+        field == UI_TEXT_FIELD_INGEST_OPERATOR ||
+        field == UI_TEXT_FIELD_INGEST_LOCATION ||
+        field == UI_TEXT_FIELD_INGEST_NOTES) {
+        // Keep these permissive for ingest entry, but still block JSON-breaking quote chars.
+        return (ch >= 32 && ch < 127 && ch != '\"');
+    }
     if (ch < 32 || ch >= 127) {
         return false;
     }
@@ -970,6 +1012,11 @@ static void gui_ui_text_field_font(ui_text_field_t field, int *font_size, int *f
         case UI_TEXT_FIELD_AUDIO_LABEL_4:
         case UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL:
         case UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION:
+        case UI_TEXT_FIELD_INGEST_PROJECT:
+        case UI_TEXT_FIELD_INGEST_TAPE_ID:
+        case UI_TEXT_FIELD_INGEST_OPERATOR:
+        case UI_TEXT_FIELD_INGEST_LOCATION:
+        case UI_TEXT_FIELD_INGEST_NOTES:
             size = FONT_SIZE_STATS;
             id = 1;
             break;
@@ -1440,14 +1487,7 @@ static CustomLayoutElement s_vu_b_element;
 static CustomLayoutElement s_settings_icon_element;
 static CustomLayoutElement s_record_limit_icon_element;
 static CustomLayoutElement s_version_icon_element;
-
-static int toolbar_title_font_size(void) {
-    int width = GetScreenWidth();
-    if (width <= 1280) return 18;
-    if (width <= 1440) return 20;
-    if (width <= 1680) return 22;
-    return 24;
-}
+static CustomLayoutElement s_metadata_icon_element;
 
 // Render settings panel (floating modal)
 static void render_settings_panel(gui_app_t *app) {
@@ -2492,11 +2532,227 @@ static void render_version_info_window(gui_app_t *app)
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
     }
 }
+// Metadata popup (opened by clicking the toolbar scroll badge)
+static void render_metadata_window(gui_app_t *app)
+{
+    if (!s_metadata_window_open) return;
+
+    CLAY(CLAY_ID("MetadataBackdrop"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP }
+        },
+        .backgroundColor = (Clay_Color){0, 0, 0, 140}
+    }) {}
+
+    CLAY(CLAY_ID("MetadataWindow"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIT(.min = 640, .max = 840), CLAY_SIZING_FIT(0) },
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .padding = { 16, 16, 16, 16 },
+            .childGap = 10
+        },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { .element = CLAY_ATTACH_POINT_CENTER_CENTER, .parent = CLAY_ATTACH_POINT_CENTER_CENTER }
+        },
+        .backgroundColor = to_clay_color(COLOR_PANEL_BG),
+        .cornerRadius = CLAY_CORNER_RADIUS(8)
+    }) {
+        CLAY(CLAY_ID("MetadataHeader"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 8
+            }
+        }) {
+            CLAY_TEXT(CLAY_STRING("Capture Ingest Metadata"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_TITLE, .textColor = to_clay_color(COLOR_TEXT) }));
+            CLAY(CLAY_ID("MetadataHeaderSpacer"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } }
+            }) {}
+            CLAY(CLAY_ID("MetadataCloseButton"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(28), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(COLOR_BUTTON),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(CLAY_STRING("X"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT) }));
+            }
+        }
+
+        CLAY_TEXT(CLAY_STRING("These fields are saved to settings and written to the capture log at recording start."),
+            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+
+        CLAY(CLAY_ID("MetadataProjectRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataProjectLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Project:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataProjectField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_project;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_PROJECT)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_PROJECT, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataTapeIdRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataTapeIdLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Tape ID:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataTapeIdField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_tape_id;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_TAPE_ID)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_TAPE_ID, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataOperatorRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataOperatorLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Operator:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataOperatorField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_operator;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_OPERATOR)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_OPERATOR, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataLocationRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataLocationLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Location:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataLocationField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_location;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_LOCATION)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_LOCATION, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+
+        CLAY(CLAY_ID("MetadataNotesRow"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 10
+            }
+        }) {
+            CLAY(CLAY_ID("MetadataNotesLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(140), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("Notes:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            CLAY(CLAY_ID("MetadataNotesField"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER },
+                    .padding = { 8, 8, 0, 0 }
+                },
+                .backgroundColor = to_clay_color((Color){25, 25, 30, 255}),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                const char *v = app->settings.ingest_notes;
+                if (gui_ui_is_text_field_active(UI_TEXT_FIELD_INGEST_NOTES)) {
+                    gui_ui_render_active_text(UI_TEXT_FIELD_INGEST_NOTES, v, FONT_SIZE_STATS, 1, COLOR_TEXT);
+                } else {
+                    CLAY_TEXT(v[0] ? make_string(v) : CLAY_STRING("(empty)"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 1, .textColor = to_clay_color(v[0] ? COLOR_TEXT : COLOR_TEXT_DIM) }));
+                }
+            }
+        }
+    }
+}
 
 // Render the toolbar
 static void render_toolbar(gui_app_t *app) {
     s_settings_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_SETTINGS_ICON;
     s_record_limit_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON;
+    s_metadata_icon_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_SCROLL_ICON;
     // Fixed left-side version/status badge: color reflects current MISRC capture state.
     // The version string itself lives only in the OS window title (set in misrc_gui.c),
     // so the toolbar left anchor is constant width and never shifts on any platform.
@@ -2532,14 +2788,23 @@ static void render_toolbar(gui_app_t *app) {
                 .custom = { .customData = &s_version_icon_element }
             }) {}
         }
-
-        // Constant-width brand label (no version suffix -> never shifts)
-        CLAY_TEXT(CLAY_STRING("MISRC"),
-            CLAY_TEXT_CONFIG({ .fontSize = toolbar_title_font_size(), .textColor = to_clay_color(COLOR_TEXT) }));
+        CLAY(CLAY_ID("MetadataIconButton"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
+                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+            },
+            .backgroundColor = to_clay_color(COLOR_BUTTON),
+            .cornerRadius = CLAY_CORNER_RADIUS(4)
+        }) {
+            CLAY(CLAY_ID("MetadataIcon"), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .custom = { .customData = &s_metadata_icon_element }
+            }) {}
+        }
 
         // Spacer
         CLAY(CLAY_ID("ToolbarSpacer1"), {
-            .layout = { .sizing = { CLAY_SIZING_FIXED(20), CLAY_SIZING_GROW(0) } }
+            .layout = { .sizing = { CLAY_SIZING_FIXED(8), CLAY_SIZING_GROW(0) } }
         }) {}
 
         // Device label
@@ -3538,6 +3803,8 @@ void gui_render_layout(gui_app_t *app) {
 
     // Version info popup overlay (if open)
     render_version_info_window(app);
+    // Metadata popup overlay (if open)
+    render_metadata_window(app);
 
     // Device dropdown overlay (if open)
     if (gui_dropdown_is_open(DROPDOWN_DEVICE, 0) && app->device_count > 0) {
@@ -3591,15 +3858,28 @@ void gui_handle_interactions(gui_app_t *app) {
     if (s_version_info_window_open && IsKeyPressed(KEY_ESCAPE)) {
         s_version_info_window_open = false;
     }
+    if (s_metadata_window_open && IsKeyPressed(KEY_ESCAPE)) {
+        s_metadata_window_open = false;
+    }
 
 
     // Level autostop fields are edited inside the record-limit (timer) window,
     // so keep processing their keystrokes even while that window is open.
     bool las_text_field_active = (s_active_text_field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_LEVEL ||
                                   s_active_text_field == UI_TEXT_FIELD_LEVEL_AUTOSTOP_DURATION);
+    bool metadata_text_field_active =
+        (s_active_text_field == UI_TEXT_FIELD_INGEST_PROJECT ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_OPERATOR ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_LOCATION ||
+         s_active_text_field == UI_TEXT_FIELD_INGEST_NOTES);
     if (las_text_field_active && s_record_limit_window_open) {
         gui_ui_handle_active_text_edit(app);
-    } else if (!app->settings_panel_open || s_record_limit_window_open || s_version_info_window_open) {
+    } else if (metadata_text_field_active && s_metadata_window_open &&
+               !s_record_limit_window_open && !s_version_info_window_open) {
+        gui_ui_handle_active_text_edit(app);
+    } else if ((!app->settings_panel_open && !s_metadata_window_open) ||
+               s_record_limit_window_open || s_version_info_window_open) {
         gui_ui_clear_text_edit();
     } else {
         gui_ui_handle_active_text_edit(app);
@@ -3714,6 +3994,51 @@ void gui_handle_interactions(gui_app_t *app) {
             }
             if (Clay_PointerOver(CLAY_ID("VersionInfoBackdrop"))) {
                 s_version_info_window_open = false;
+                gui_ui_set_click_consumed();
+                return;
+            }
+        }
+        // Metadata popup modal interactions (consume before toolbar underneath)
+        if (s_metadata_window_open) {
+            if (Clay_PointerOver(CLAY_ID("MetadataCloseButton")) ||
+                Clay_PointerOver(CLAY_ID("MetadataBackdrop"))) {
+                s_metadata_window_open = false;
+                if (s_active_text_field == UI_TEXT_FIELD_INGEST_PROJECT ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_TAPE_ID ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_OPERATOR ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_LOCATION ||
+                    s_active_text_field == UI_TEXT_FIELD_INGEST_NOTES) {
+                    gui_ui_clear_text_edit();
+                }
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataProjectField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_PROJECT, CLAY_ID("MetadataProjectField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataTapeIdField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_TAPE_ID, CLAY_ID("MetadataTapeIdField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataOperatorField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_OPERATOR, CLAY_ID("MetadataOperatorField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataLocationField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_LOCATION, CLAY_ID("MetadataLocationField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataNotesField"))) {
+                gui_ui_begin_text_edit(app, UI_TEXT_FIELD_INGEST_NOTES, CLAY_ID("MetadataNotesField"), 8.0f, 8.0f);
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("MetadataWindow"))) {
                 gui_ui_set_click_consumed();
                 return;
             }
@@ -3837,6 +4162,17 @@ void gui_handle_interactions(gui_app_t *app) {
         }
         if (Clay_PointerOver(CLAY_ID("VersionIconButton"))) {
             s_version_info_window_open = !s_version_info_window_open;
+            if (s_version_info_window_open) {
+                s_metadata_window_open = false;
+            }
+            gui_ui_set_click_consumed();
+            return;
+        }
+        if (Clay_PointerOver(CLAY_ID("MetadataIconButton"))) {
+            s_metadata_window_open = !s_metadata_window_open;
+            if (s_metadata_window_open) {
+                s_version_info_window_open = false;
+            }
             gui_ui_set_click_consumed();
             return;
         }

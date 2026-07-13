@@ -276,6 +276,41 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                         DrawCircle((int)roundf(cx), (int)roundf(stem_bot), stem_w * 0.5f, glyph);
                         break;
                     }
+                    case CUSTOM_LAYOUT_ELEMENT_TYPE_SCROLL_ICON: {
+                        // Compact white line-only scroll icon aligned with toolbar icon style.
+                        float cx = boundingBox.x + boundingBox.width * 0.5f;
+                        float cy = boundingBox.y + boundingBox.height * 0.5f;
+                        float s = (boundingBox.width < boundingBox.height ? boundingBox.width : boundingBox.height);
+                        Color glyph = COLOR_TEXT;
+                        float body_w = s * 0.56f;
+                        float body_h = s * 0.66f;
+                        float body_x = cx - body_w * 0.5f;
+                        float body_y = cy - body_h * 0.50f;
+                        float body_r = s * 0.085f;
+                        float stroke = 1.8f;
+                        float left = body_x;
+                        float right = body_x + body_w;
+                        float top = body_y;
+                        float bottom = body_y + body_h;
+
+                        // Outer parchment contour
+                        DrawLineEx((Vector2){left + body_r, top}, (Vector2){right - body_r, top}, stroke, glyph);
+                        DrawLineEx((Vector2){left, top + body_r}, (Vector2){left, bottom - body_r}, stroke, glyph);
+                        DrawLineEx((Vector2){left + body_r, bottom}, (Vector2){right - body_r, bottom}, stroke, glyph);
+                        DrawLineEx((Vector2){right, top + body_r}, (Vector2){right, bottom - body_r}, stroke, glyph);
+
+                        // Parchment rolled corners
+                        float curl_r = s * 0.07f;
+                        DrawCircleLines((int)roundf(right - body_r * 0.9f), (int)roundf(top + body_r * 0.9f), curl_r, glyph);
+                        DrawCircleLines((int)roundf(left + body_r * 0.9f), (int)roundf(bottom - body_r * 0.9f), curl_r, glyph);
+
+                        // Internal text lines
+                        float line_l = body_x + body_w * 0.24f;
+                        float line_r = body_x + body_w * 0.76f;
+                        DrawLineEx((Vector2){line_l, body_y + body_h * 0.44f}, (Vector2){line_r, body_y + body_h * 0.44f}, 1.3f, glyph);
+                        DrawLineEx((Vector2){line_l, body_y + body_h * 0.60f}, (Vector2){line_r, body_y + body_h * 0.60f}, 1.3f, glyph);
+                        break;
+                    }
                     default: break;
                 }
                 break;
