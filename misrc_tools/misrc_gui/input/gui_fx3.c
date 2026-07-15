@@ -18,15 +18,18 @@
 #ifdef __linux__
 #include <cyusb.h>
 #else
-// On Windows, we need to avoid windows.h conflicts with raylib
-// libusb can be used without the full Windows headers
+// On Windows, avoid windows.h conflicts with raylib
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOGDI
 #define NOUSER
-#include <libusb-1.0/libusb.h>
+#endif
+#include "../../common/libusb_compat.h"
+#if defined(_WIN32)
 #undef WIN32_LEAN_AND_MEAN
 #undef NOGDI
 #undef NOUSER
+#endif
 #endif
 
 #include "gui_fx3.h"

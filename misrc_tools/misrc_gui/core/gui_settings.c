@@ -366,6 +366,15 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     for (int i = 0; i < 3; i++) {
         settings->audio_output_tags[i][0] = '\0';
     }
+    settings->ingest_project[0] = '\0';
+    settings->ingest_tape_id[0] = '\0';
+    settings->ingest_tape_format[0] = '\0';
+    settings->ingest_tape_size[0] = '\0';
+    settings->ingest_tape_speed[0] = '\0';
+    settings->ingest_tape_condition[0] = '\0';
+    settings->ingest_operator[0] = '\0';
+    settings->ingest_location[0] = '\0';
+    settings->ingest_notes[0] = '\0';
     // Optional per-channel RF tags
     for (int i = 0; i < 2; i++) {
         settings->rf_channel_tags[i][0] = '\0';
@@ -415,6 +424,7 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->audio_monitor_playback = false;
     settings->audio_monitor_ch34 = false;  // Default to CH1/2
     settings->misrc_mode = true;           // Default to MISRC mode (A/B swapped)
+    settings->misrc_v15_v25_ab_swap = false;
     settings->stop_on_dropout = false;
 
     // Level autostop defaults (tape-end detection). Disabled by default.
@@ -427,6 +437,11 @@ void gui_settings_init_defaults(gui_settings_t *settings) {
     settings->show_grid = true;
     settings->time_scale = 1.0f;
     settings->amplitude_scale = 1.0f;
+
+    // V4L2/simple_capture device discovery is opt-in (disabled by default).
+    settings->discover_simple_capture = false;
+    // Core-pinning controls are hidden by default; users can enable from info page.
+    settings->show_core_pinning_in_settings = false;
 
     // Keep derived filenames coherent with default auto-naming state.
     gui_settings_refresh_auto_names(settings);
@@ -488,10 +503,20 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"audio_monitor_playback\": %s,\n", settings->audio_monitor_playback ? "true" : "false");
     fprintf(f, "  \"audio_monitor_ch34\": %s,\n", settings->audio_monitor_ch34 ? "true" : "false");
     fprintf(f, "  \"misrc_mode\": %s,\n", settings->misrc_mode ? "true" : "false");
+    fprintf(f, "  \"misrc_v15_v25_ab_swap\": %s,\n", settings->misrc_v15_v25_ab_swap ? "true" : "false");
     fprintf(f, "  \"stop_on_dropout\": %s,\n", settings->stop_on_dropout ? "true" : "false");
     fprintf(f, "  \"level_autostop_enabled\": %s,\n", settings->level_autostop_enabled ? "true" : "false");
     fprintf(f, "  \"level_autostop_level_str\": \"%s\",\n", settings->level_autostop_level_str);
     fprintf(f, "  \"level_autostop_duration_str\": \"%s\",\n", settings->level_autostop_duration_str);
+    fprintf(f, "  \"ingest_project\": \"%s\",\n", settings->ingest_project);
+    fprintf(f, "  \"ingest_tape_id\": \"%s\",\n", settings->ingest_tape_id);
+    fprintf(f, "  \"ingest_tape_format\": \"%s\",\n", settings->ingest_tape_format);
+    fprintf(f, "  \"ingest_tape_size\": \"%s\",\n", settings->ingest_tape_size);
+    fprintf(f, "  \"ingest_tape_speed\": \"%s\",\n", settings->ingest_tape_speed);
+    fprintf(f, "  \"ingest_tape_condition\": \"%s\",\n", settings->ingest_tape_condition);
+    fprintf(f, "  \"ingest_operator\": \"%s\",\n", settings->ingest_operator);
+    fprintf(f, "  \"ingest_location\": \"%s\",\n", settings->ingest_location);
+    fprintf(f, "  \"ingest_notes\": \"%s\",\n", settings->ingest_notes);
     fprintf(f, "  \"enable_audio_1ch_1\": %s,\n", settings->enable_audio_1ch[0] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_2\": %s,\n", settings->enable_audio_1ch[1] ? "true" : "false");
     fprintf(f, "  \"enable_audio_1ch_3\": %s,\n", settings->enable_audio_1ch[2] ? "true" : "false");
@@ -530,6 +555,8 @@ void gui_settings_save(const gui_settings_t *settings) {
     fprintf(f, "  \"show_grid\": %s,\n", settings->show_grid ? "true" : "false");
     fprintf(f, "  \"time_scale\": %.2f,\n", settings->time_scale);
     fprintf(f, "  \"amplitude_scale\": %.2f,\n", settings->amplitude_scale);
+    fprintf(f, "  \"discover_simple_capture\": %s,\n", settings->discover_simple_capture ? "true" : "false");
+    fprintf(f, "  \"show_core_pinning_in_settings\": %s,\n", settings->show_core_pinning_in_settings ? "true" : "false");
     fprintf(f, "  \"playback_file_a\": \"%s\",\n", settings->playback_file_a);
     fprintf(f, "  \"playback_file_b\": \"%s\"\n", settings->playback_file_b);
     fprintf(f, "}\n");
@@ -918,6 +945,12 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "amplitude_scale")) != NULL) {
         settings->amplitude_scale = (float)atof(value);
     }
+    if ((value = find_value(content, "discover_simple_capture")) != NULL) {
+        settings->discover_simple_capture = (strcmp(value, "true") == 0);
+    }
+    if ((value = find_value(content, "show_core_pinning_in_settings")) != NULL) {
+        settings->show_core_pinning_in_settings = (strcmp(value, "true") == 0);
+    }
 
     if ((value = find_value(content, "reduce_8bit_a")) != NULL) {
         settings->reduce_8bit_a = (strcmp(value, "true") == 0);
@@ -1004,6 +1037,9 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "misrc_mode")) != NULL) {
         settings->misrc_mode = (strcmp(value, "true") == 0);
     }
+    if ((value = find_value(content, "misrc_v15_v25_ab_swap")) != NULL) {
+        settings->misrc_v15_v25_ab_swap = (strcmp(value, "true") == 0);
+    }
     if ((value = find_value(content, "stop_on_dropout")) != NULL) {
         settings->stop_on_dropout = (strcmp(value, "true") == 0);
     }
@@ -1017,6 +1053,42 @@ void gui_settings_load(gui_settings_t *settings) {
     if ((value = find_value(content, "level_autostop_duration_str")) != NULL) {
         strncpy(settings->level_autostop_duration_str, value, sizeof(settings->level_autostop_duration_str) - 1);
         settings->level_autostop_duration_str[sizeof(settings->level_autostop_duration_str) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_project")) != NULL) {
+        strncpy(settings->ingest_project, value, sizeof(settings->ingest_project) - 1);
+        settings->ingest_project[sizeof(settings->ingest_project) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_id")) != NULL) {
+        strncpy(settings->ingest_tape_id, value, sizeof(settings->ingest_tape_id) - 1);
+        settings->ingest_tape_id[sizeof(settings->ingest_tape_id) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_format")) != NULL) {
+        strncpy(settings->ingest_tape_format, value, sizeof(settings->ingest_tape_format) - 1);
+        settings->ingest_tape_format[sizeof(settings->ingest_tape_format) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_size")) != NULL) {
+        strncpy(settings->ingest_tape_size, value, sizeof(settings->ingest_tape_size) - 1);
+        settings->ingest_tape_size[sizeof(settings->ingest_tape_size) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_speed")) != NULL) {
+        strncpy(settings->ingest_tape_speed, value, sizeof(settings->ingest_tape_speed) - 1);
+        settings->ingest_tape_speed[sizeof(settings->ingest_tape_speed) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_tape_condition")) != NULL) {
+        strncpy(settings->ingest_tape_condition, value, sizeof(settings->ingest_tape_condition) - 1);
+        settings->ingest_tape_condition[sizeof(settings->ingest_tape_condition) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_operator")) != NULL) {
+        strncpy(settings->ingest_operator, value, sizeof(settings->ingest_operator) - 1);
+        settings->ingest_operator[sizeof(settings->ingest_operator) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_location")) != NULL) {
+        strncpy(settings->ingest_location, value, sizeof(settings->ingest_location) - 1);
+        settings->ingest_location[sizeof(settings->ingest_location) - 1] = '\0';
+    }
+    if ((value = find_value(content, "ingest_notes")) != NULL) {
+        strncpy(settings->ingest_notes, value, sizeof(settings->ingest_notes) - 1);
+        settings->ingest_notes[sizeof(settings->ingest_notes) - 1] = '\0';
     }
     if ((value = find_value(content, "enable_audio_1ch_1")) != NULL) {
         settings->enable_audio_1ch[0] = (strcmp(value, "true") == 0);

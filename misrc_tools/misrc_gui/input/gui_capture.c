@@ -26,6 +26,9 @@
 #ifdef ENABLE_FX3
 #include "gui_fx3.h"
 #endif
+#ifdef ENABLE_DDD
+#include "gui_ddd.h"
+#endif
 #include "../visualization/gui_panel.h"
 #include "../visualization/panel_interface.h"
 #include "../visualization/gui_histogram_panel.h"
@@ -452,29 +455,10 @@ static void gui_capture_apply_cxadc_profile(gui_app_t *app, int card_count)
         app->settings.rf_bits_b = 8;
         changed = true;
     }
-    if (app->settings.enable_resample_a) {
-        app->settings.enable_resample_a = false;
-        changed = true;
-    }
-    if (app->settings.enable_resample_b) {
-        app->settings.enable_resample_b = false;
-        changed = true;
-    }
-    if (fabsf(app->settings.resample_rate_a - 40000.0f) > 0.5f) {
-        app->settings.resample_rate_a = 40000.0f;
-        changed = true;
-    }
-    if (fabsf(app->settings.resample_rate_b - 40000.0f) > 0.5f) {
-        app->settings.resample_rate_b = 40000.0f;
-        changed = true;
-    }
-    if (!app->settings.capture_a) {
-        app->settings.capture_a = true;
-        changed = true;
-    }
-    bool want_capture_b = (card_count > 1);
-    if (app->settings.capture_b != want_capture_b) {
-        app->settings.capture_b = want_capture_b;
+    // Keep user-selected resample modes/rates and RF A toggle in CXADC mode.
+    // Only clamp RF-B capture when there is no second CXADC card source.
+    if (card_count < 2 && app->settings.capture_b) {
+        app->settings.capture_b = false;
         changed = true;
     }
 
@@ -852,6 +836,13 @@ void gui_app_init(gui_app_t *app) {
     atomic_store(&app->fx3_running, false);
 #endif
 
+#ifdef ENABLE_DDD
+    // Initialize DdD device state
+    app->ddd_dev = NULL;
+    app->ddd_thread = NULL;
+    atomic_store(&app->ddd_running, false);
+#endif
+
     app->vu_a.level_pos = 0;
     app->vu_a.level_neg = 0;
     app->vu_a.peak_pos = 0;
@@ -900,6 +891,7 @@ void gui_app_init(gui_app_t *app) {
     atomic_store(&app->trigger_a.display_width, DISPLAY_BUFFER_SIZE);  // Will be updated by renderer
     app->trigger_a.scope_mode = SCOPE_MODE_PHOSPHOR;  // Phosphor mode by default
     app->trigger_a.trigger_mode = TRIGGER_MODE_RISING;  // Rising edge by default
+    app->trigger_a.trigger_source = TRIGGER_SOURCE_CH1;
     app->trigger_a.phosphor_color = PHOSPHOR_COLOR_HEATMAP;  // Opacity mode by default
 
     // Initialize trigger state for channel B
@@ -910,6 +902,7 @@ void gui_app_init(gui_app_t *app) {
     atomic_store(&app->trigger_b.display_width, DISPLAY_BUFFER_SIZE);  // Will be updated by renderer
     app->trigger_b.scope_mode = SCOPE_MODE_PHOSPHOR;  // Phosphor mode by default
     app->trigger_b.trigger_mode = TRIGGER_MODE_RISING;  // Rising edge by default
+    app->trigger_b.trigger_source = TRIGGER_SOURCE_CH1;
     app->trigger_b.phosphor_color = PHOSPHOR_COLOR_HEATMAP;  // Opacity mode by default
 
     // Initialize phosphor display state
@@ -1030,10 +1023,12 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     // Use shared device enumeration (hsdaoh + simple_capture + optionally FX3)
     misrc_device_list_t devices;
     misrc_device_list_init(&devices);
-#ifdef ENABLE_FX3
-    int count = misrc_device_enumerate_fx3(&devices, true, true, true);
+#if defined(ENABLE_DDD)
+    int count = misrc_device_enumerate_ddd(&devices, true, app->settings.discover_simple_capture, true);
+#elif defined(ENABLE_FX3)
+    int count = misrc_device_enumerate_fx3(&devices, true, app->settings.discover_simple_capture, true);
 #else
-    int count = misrc_device_enumerate(&devices, true, true);
+    int count = misrc_device_enumerate(&devices, true, app->settings.discover_simple_capture);
 #endif
 
     if (count < 0) {
@@ -1060,6 +1055,14 @@ void gui_app_enumerate_devices(gui_app_t *app) {
         else if (src->type == MISRC_DEVICE_TYPE_FX3) {
             snprintf(dst->name, sizeof(dst->name), "[FX3] %s", src->name);
             dst->type = DEVICE_TYPE_FX3;
+            dst->index = src->index;
+            snprintf(dst->serial, sizeof(dst->serial), "%s", src->device_id);
+        }
+#endif
+#ifdef ENABLE_DDD
+        else if (src->type == MISRC_DEVICE_TYPE_DDD) {
+            snprintf(dst->name, sizeof(dst->name), "[DdD] %s", src->name);
+            dst->type = DEVICE_TYPE_DDD;
             dst->index = src->index;
             snprintf(dst->serial, sizeof(dst->serial), "%s", src->device_id);
         }
@@ -1469,6 +1472,28 @@ int gui_app_start_capture(gui_app_t *app) {
     }
 #endif
 
+#ifdef ENABLE_DDD
+    // Handle DdD device
+    if (dev->type == DEVICE_TYPE_DDD) {
+        proc_set_priority(PROC_PRIORITY_ABOVE);
+        thrd_set_priority(THRD_PRIORITY_CRITICAL);
+        // Open DdD device first
+        int r = gui_ddd_open(app, dev->index);
+        if (r < 0) {
+            gui_app_set_status(app, "Failed to open DdD device");
+            proc_set_priority(PROC_PRIORITY_NORMAL);
+            return -1;
+        }
+        int ddd_rc = gui_ddd_start(app);
+        if (ddd_rc == 0) {
+            gui_capture_hold_power_assertions();
+        } else {
+            proc_set_priority(PROC_PRIORITY_NORMAL);
+        }
+        return ddd_rc;
+    }
+#endif
+
     // Ensure capture buffer is initialized via buffer manager
     if (bufmgr_ensure_init(&app->buffers, BUF_CAPTURE_RF) != 0) {
         fprintf(stderr, "[GUI] Failed to initialize capture ringbuffer\n");
@@ -1725,6 +1750,13 @@ void gui_app_stop_capture(gui_app_t *app) {
 #ifdef ENABLE_FX3
     if (dev->type == DEVICE_TYPE_FX3) {
         gui_fx3_stop(app);
+        gui_app_clear_display(app);
+        return;
+    }
+#endif
+#ifdef ENABLE_DDD
+    if (dev->type == DEVICE_TYPE_DDD) {
+        gui_ddd_stop(app);
         gui_app_clear_display(app);
         return;
     }

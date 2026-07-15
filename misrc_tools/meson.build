@@ -149,6 +149,8 @@ else
           'Build third_party/hsdaoh into .deps/install (see .github/workflows/build.yml) to mirror CI.')
 endif
 deps = [ hsdaoh_dep ]
+libusb_common_dep = dependency('libusb-1.0', required : false, static: windows_static_deps)
+libusb_common_dep_added = false
 
 flac_dep =  dependency('flac', required : false, static: windows_static_deps)
 if flac_dep.found()
@@ -230,15 +232,31 @@ if host_system == 'linux'
   endif
 else
   # On non-Linux platforms, use libusb for FX3
-  libusb_dep = dependency('libusb-1.0', required : false, static: windows_static_deps)
-  if libusb_dep.found()
-    deps += [ libusb_dep ]
+  if libusb_common_dep.found()
+    if not libusb_common_dep_added
+      deps += [ libusb_common_dep ]
+      libusb_common_dep_added = true
+    endif
     cflags += ['-DENABLE_FX3=1']
     fx3_enabled = true
     message('libusb found, building with FX3 support')
   else
     message('libusb not found, building without FX3 support')
   endif
+endif
+
+# DdD (DomesdayDuplicator) support (optional, uses libusb on all platforms)
+ddd_enabled = false
+if libusb_common_dep.found()
+  if not libusb_common_dep_added
+    deps += [ libusb_common_dep ]
+    libusb_common_dep_added = true
+  endif
+  cflags += ['-DENABLE_DDD=1']
+  ddd_enabled = true
+  message('libusb-1.0 found, building with DdD support')
+else
+  message('libusb-1.0 not found, building without DdD support')
 endif
 
 
@@ -310,6 +328,7 @@ if raylib_dep.found()
     'misrc_gui/processing/gui_extract.c',
     'misrc_gui/processing/gui_display_thread.c',
     # Signal
+    'misrc_gui/signal/gui_headswitch_lock.c',
     'misrc_gui/signal/gui_trigger.c',
     'misrc_gui/signal/gui_cvbs.c',
     'misrc_gui/signal/gui_histogram.c',
@@ -349,6 +368,11 @@ if raylib_dep.found()
   # Add FX3 support to GUI if available
   if fx3_enabled
     sources_gui += 'misrc_gui/input/gui_fx3.c'
+  endif
+
+  # Add DdD support to GUI if available
+  if ddd_enabled
+    sources_gui += 'misrc_gui/input/gui_ddd.c'
   endif
 
   gui_deps = deps + [ raylib_dep, fftw3f_dep ]

@@ -15,7 +15,7 @@
 #ifdef __linux__
 #include <cyusb.h>
 #else
-#include <libusb-1.0/libusb.h>
+#include "libusb_compat.h"
 #endif
 
 // FX3 USB VID/PID
@@ -29,6 +29,14 @@
 #define FX3_VID              0x04B4
 #define FX3_PID_BOOTLOADER   0x00F3
 #define FX3_PID_MISRC        0x1234
+#endif
+
+#ifdef ENABLE_DDD
+#include "libusb_compat.h"
+
+// DdD USB VID/PID (Domesday Duplicator)
+#define DDD_VID              0x1D50
+#define DDD_PID              0x603B
 #endif
 
 
@@ -265,6 +273,86 @@ int misrc_device_enumerate_fx3(misrc_device_list_t *list, bool include_hsdaoh,
     return (int)list->count;
 }
 #endif /* ENABLE_FX3 */
+
+#ifdef ENABLE_DDD
+int misrc_device_enumerate_ddd(misrc_device_list_t *list, bool include_hsdaoh,
+                                bool include_simple_capture, bool include_ddd)
+{
+    /* First enumerate non-DdD devices. If FX3 is also enabled, use the FX3
+     * enumerator so hsdaoh + simple_capture + FX3 are all included; otherwise
+     * fall back to the base enumerator. This avoids double-enumerating
+     * hsdaoh/simple_capture when both FX3 and DdD are on. */
+#ifdef ENABLE_FX3
+    int result = misrc_device_enumerate_fx3(list, include_hsdaoh,
+                                             include_simple_capture, true);
+#else
+    int result = misrc_device_enumerate(list, include_hsdaoh, include_simple_capture);
+#endif
+    if (result < 0) {
+        return result;
+    }
+
+    if (!include_ddd) {
+        return (int)list->count;
+    }
+
+    /* Enumerate DdD devices via libusb */
+    libusb_context *ctx = NULL;
+#if LIBUSB_API_VERSION >= 0x0100010A
+    if (libusb_init_context(&ctx, NULL, 0) != 0) {
+        return (int)list->count;
+    }
+#else
+    if (libusb_init(&ctx) != 0) {
+        return (int)list->count;
+    }
+#endif
+
+    libusb_device **devlist;
+    ssize_t num_devices = libusb_get_device_list(ctx, &devlist);
+
+    int ddd_index = 0;
+    for (ssize_t i = 0; i < num_devices; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(devlist[i], &desc) == 0) {
+            if (desc.idVendor == DDD_VID && desc.idProduct == DDD_PID) {
+                misrc_device_info_t *dev = device_list_add(list);
+                if (!dev) {
+                    libusb_free_device_list(devlist, 1);
+                    libusb_exit(ctx);
+                    return -1;
+                }
+
+                dev->type = MISRC_DEVICE_TYPE_DDD;
+                dev->index = ddd_index++;
+
+                snprintf(dev->name, sizeof(dev->name), "Domesday Duplicator");
+
+                /* Try to get serial number */
+                dev->device_id[0] = '\0';
+                libusb_device_handle *tmp_handle = NULL;
+                if (libusb_open(devlist[i], &tmp_handle) == 0 && tmp_handle) {
+                    if (desc.iSerialNumber) {
+                        unsigned char serial[64];
+                        if (libusb_get_string_descriptor_ascii(tmp_handle,
+                                desc.iSerialNumber, serial, sizeof(serial)) > 0) {
+                            snprintf(dev->device_id, sizeof(dev->device_id), "%s", serial);
+                        }
+                    }
+                    libusb_close(tmp_handle);
+                }
+
+                dev->supports_1080p60 = false;  /* N/A for DdD */
+            }
+        }
+    }
+
+    libusb_free_device_list(devlist, 1);
+    libusb_exit(ctx);
+
+    return (int)list->count;
+}
+#endif /* ENABLE_DDD */
 
 const char *device_get_simple_capture_name(void)
 {
