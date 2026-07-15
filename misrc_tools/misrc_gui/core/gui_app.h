@@ -287,6 +287,8 @@ typedef struct gui_app {
     bool is_recording;
     bool user_capture_mode_misrc;      // Authoritative user-selected mode (changes only via mode toggle)
     bool capture_mode_runtime_misrc;   // Mode latched at recording start (stable for recording session)
+    bool capture_backend_upstream;     // Active backend for current capture session (true=upstream callback)
+    bool capture_has_channel_b;        // Runtime capability flag used by extraction/display mapping
 
     // Device enumeration
     device_info_t devices[MAX_DEVICES];

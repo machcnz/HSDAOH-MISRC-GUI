@@ -2073,7 +2073,8 @@ static void render_toolbar(gui_app_t *app) {
             CLAY_TEXT(app->is_capturing ? CLAY_STRING("Disconnect") : CLAY_STRING("Connect"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
-        // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B)
+        // Capture mode toggle also selects HSDAOH backend at connect time:
+        // MISRC -> raw/parser backend, HSDAOH -> upstream backend.
         bool cxadc_clockgen_mode = false;
         bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, &cxadc_clockgen_mode);
         bool mode_source_runtime = app->is_recording;
@@ -3318,9 +3319,15 @@ void gui_handle_interactions(gui_app_t *app) {
             } else {
                 gui_ui_set_capture_mode_state(app, !s_capture_mode_state_misrc);
                 gui_settings_save(&app->settings);
-                gui_app_set_status(app, s_capture_mode_state_misrc
-                    ? "Capture mode set to MISRC (A/B swapped)"
-                    : "Capture mode set to HSDAOH (A/B normal)");
+                if (app->is_capturing) {
+                    gui_app_set_status(app, s_capture_mode_state_misrc
+                        ? "Mode set to MISRC (raw/parser backend on reconnect)"
+                        : "Mode set to HSDAOH (upstream backend on reconnect)");
+                } else {
+                    gui_app_set_status(app, s_capture_mode_state_misrc
+                        ? "Mode set to MISRC (raw/parser backend)"
+                        : "Mode set to HSDAOH (upstream backend)");
+                }
             }
             gui_ui_set_click_consumed();
             return;

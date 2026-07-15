@@ -46,11 +46,9 @@
 #undef Rectangle
 #endif
 
-#ifndef HSDAOH_UPSTREAM
-// Frame-based mode only (MISRC)
+// Runtime-selectable backends need both parser and upstream paths compiled.
 #include <hsdaoh_raw.h>
 #include "../../common/frame_parser.h"
-#endif
 
 #include "../../common/extract.h"
 #include "../../common/ringbuffer.h"
@@ -85,13 +83,9 @@
 #define DEFAULT_AUDIO_SAMPLE_RATE 78125U
 
 // Note: All capture buffers now managed by buffer manager (BUF_CAPTURE_RF, BUF_CAPTURE_AUDIO)
-// Capture handler context (includes frame parser state)
-#ifndef HSDAOH_UPSTREAM
+// Capture handler context (parser/raw backend) and upstream audio gate.
 static capture_handler_ctx_t s_capture_handler;
-#else
-// Upstream mode audio enable/disable (used by gui_capture_set_audio_capture + upstream callback)
 static atomic_bool s_upstream_capture_audio = ATOMIC_VAR_INIT(true);
-#endif
 
 #if defined(__APPLE__)
 static IOPMAssertionID s_idle_sleep_assertion_id = kIOPMNullAssertionID;
@@ -139,7 +133,6 @@ static void gui_capture_release_power_assertions(void) {}
 
 // Message callback for hsdaoh
 // Enable with hsdaoh change to support callbacks
-#ifdef HSDAOH_UPSTREAM
 static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level, const char *msg)
 {
     // try-lock: never block the hsdaoh thread
@@ -154,7 +147,6 @@ static void gui_hsdaoh_cache_message(gui_app_t *app, enum hsdaoh_msg_level level
 
     atomic_flag_clear(&app->hs_msg_lock);
 }
-#endif
 
 
 static bool gui_message_is_data_damaging(enum hsdaoh_msg_level level, const char *message)
@@ -179,7 +171,6 @@ static bool gui_message_is_data_damaging(enum hsdaoh_msg_level level, const char
            strstr(message, "corrupted frames") != NULL;
 }
 
-// #ifndef HSDAOH_UPSTREAM
 static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const char *format, ...) {
     gui_app_t *app = (gui_app_t *)ctx;
     if (!app) return;
@@ -206,52 +197,37 @@ static void gui_message_callback(void *ctx, enum hsdaoh_msg_level level, const c
         gui_record_log_capture_event(app, level_str, buffer, GUI_ERROR_CLASS_SYSTEM, 1);
     }
     
-#ifdef HSDAOH_UPSTREAM
-    /*
-     * Upstream mode: do NOT push GUI updates from this callback.
-     * Just translate hsdaoh stderr-style messages into app state/counters.    
-    */
-    if (strstr(buffer, "Lost sync to HDMI input stream")) {
-        atomic_store(&app->stream_synced, false);
-    } else if (strstr(buffer, "Synchronized to HDMI input stream")) {
-        atomic_store(&app->stream_synced, true);
-    } else if (strstr(buffer, "Missed at least one frame")) {
-        /* only count missed frames once we were already synced */
-        if (atomic_load(&app->stream_synced))
-            atomic_fetch_add(&app->missed_frame_count, 1);
-    } else if (strstr(buffer, "frame errors")) {
-        if (!level_is_error) {
-            int n = 0;
-            if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
-                gui_app_count_parser_errors(app, (uint32_t)n);
-            else
-                gui_app_count_parser_errors(app, 1);
+    if (app->capture_backend_upstream) {
+        /* Upstream backend: translate messages into counters and cache for UI poll. */
+        if (strstr(buffer, "Lost sync to HDMI input stream")) {
+            atomic_store(&app->stream_synced, false);
+        } else if (strstr(buffer, "Synchronized to HDMI input stream")) {
+            atomic_store(&app->stream_synced, true);
+        } else if (strstr(buffer, "Missed at least one frame")) {
+            if (atomic_load(&app->stream_synced))
+                atomic_fetch_add(&app->missed_frame_count, 1);
+        } else if (strstr(buffer, "frame errors")) {
+            if (!level_is_error) {
+                int n = 0;
+                if (sscanf(buffer, "%d frame errors", &n) == 1 && n > 0)
+                    gui_app_count_parser_errors(app, (uint32_t)n);
+                else
+                    gui_app_count_parser_errors(app, 1);
+            }
+        } else if (strstr(buffer, "Buffer dropped due to overrun")) {
+            atomic_fetch_add(&app->rb_drop_count, 1);
         }
-    } else if (strstr(buffer, "Buffer dropped due to overrun")) {
-        atomic_fetch_add(&app->rb_drop_count, 1);
+        gui_hsdaoh_cache_message(app, level, buffer);
+    } else {
+        /* Raw/parser backend: keep status updates for severe errors only. */
+        if (level_is_error) {
+            gui_app_set_status(app, buffer);
+        }
     }
-    // 2) Cache the last message for the UI thread to apply (no GUI mutation here)
-    gui_hsdaoh_cache_message(app, level, buffer);
-   
-    // Print to console only when debug enabled, except always show ERROR/CRITICAL
-
-    if (level_is_error || misrc_debug_enabled()){
-        fprintf(stderr, "[%s] %s", level_str, buffer);
-    }
-#else
-    /*
-     * Frame mode (Stefan/MISRC): keep original behaviour.
-     * Status is only pushed to GUI for ERROR/CRITICAL.
-     */
-    if (level_is_error) {
-        gui_app_set_status(app, buffer);
-    }
-
 
     if (level_is_error || misrc_debug_enabled()) {
         fprintf(stderr, "[%s] %s", level_str, buffer);
     }
-#endif
 }
 
 // Debug counter
@@ -262,7 +238,6 @@ static uint32_t s_capture_last_logged_drop_total = 0;
 static uint32_t s_capture_missed_streak = 0;
 static bool s_capture_missed_burst_reported = false;
 static uint64_t s_capture_prev_callback_time_ms = 0;
-#ifdef HSDAOH_UPSTREAM
 static uint64_t s_diag_last_emit_ms = 0;
 static uint32_t s_diag_last_frame_count = 0;
 static uint32_t s_diag_last_error_count = 0;
@@ -271,7 +246,6 @@ static uint32_t s_diag_last_system_error_count = 0;
 static uint32_t s_diag_last_missed_count = 0;
 static uint32_t s_diag_last_wait_count = 0;
 static uint32_t s_diag_last_drop_count = 0;
-#endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #define MISRC_THREAD_LOCAL __declspec(thread)
 #else
@@ -347,7 +321,6 @@ static inline void gui_capture_promote_callback_priority_once(void)
         s_capture_callback_thread_priority_set = true;
     }
 }
-#ifdef HSDAOH_UPSTREAM
 static inline void gui_capture_reset_realtime_diag_state(void)
 {
     s_diag_last_emit_ms = 0;
@@ -436,22 +409,16 @@ static void gui_capture_emit_realtime_diag(gui_app_t *app, uint64_t now_ms)
     s_diag_last_wait_count = wait_count;
     s_diag_last_drop_count = drop_count;
 }
-#endif
 
 void gui_capture_set_audio_capture(bool enabled)
 {
-#ifdef HSDAOH_UPSTREAM 
     atomic_store(&s_upstream_capture_audio, enabled);
-
-#else   
-    // MISRC frame-based mode: audio capture is part of the capture handler 
     atomic_store(&s_capture_handler.capture_audio, enabled);
 
     if (enabled) {
         // Ensure clean audio sync ramp when enabling audio mid-capture.
         capture_handler_reset_audio_sync(&s_capture_handler);
     }
-#endif
 }
 
 static void gui_capture_apply_cxadc_profile(gui_app_t *app, int card_count)
@@ -553,7 +520,6 @@ static void gui_capture_apply_cxadc_profile(gui_app_t *app, int card_count)
 /*-----------------------------------------------------------------------------
  * GUI-Specific Capture Handler Callbacks
  *-----------------------------------------------------------------------------*/
-#ifndef HSDAOH_UPSTREAM
 static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                                const metadata_t *meta, bool was_synced)
 {
@@ -825,20 +791,17 @@ static void gui_simple_capture_callback(sc_data_info_t *sc_data_info)
 
     gui_capture_callback(&hs_data_info);
 }
-//#endif /* HSDAOH_UPSTREAM */
-#else /* HSDAOH_UPSTREAM */
+
 /*-----------------------------------------------------------------------------
  * Upstream helpers (rp2350 / upstream path)
  *-----------------------------------------------------------------------------*/
-    static inline void gui_upstream_mark_synced(gui_app_t *app)
-    {
-        bool was = atomic_exchange(&app->stream_synced, true);
-        if (!was && misrc_debug_enabled()) {
-            fprintf(stderr, "[CB] Upstream stream active\n");
-        }
+static inline void gui_upstream_mark_synced(gui_app_t *app)
+{
+    bool was = atomic_exchange(&app->stream_synced, true);
+    if (!was && misrc_debug_enabled()) {
+        fprintf(stderr, "[CB] Upstream stream active\n");
     }
-
-#endif /* HSDAOH_UPSTREAM */
+}
 
 
 // Initialize application
@@ -886,6 +849,8 @@ void gui_app_init(gui_app_t *app) {
     app->vu_b.peak_hold_time_neg = 0;
     app->user_capture_mode_misrc = app->settings.misrc_mode;
     app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+    app->capture_backend_upstream = false;
+    app->capture_has_channel_b = true;
     app->settings.misrc_mode = app->user_capture_mode_misrc;
 
     strcpy(app->status_message, "Initializing...");
@@ -967,9 +932,7 @@ void gui_app_init(gui_app_t *app) {
     // by buffer manager automatically on first use
 
     // Initialize parser/capture-handler baseline once at app init.
-#ifndef HSDAOH_UPSTREAM   // MISRC mode only
     gui_capture_configure_handler(app, true);
-#endif
 
 
     // Initialize centralized buffer manager
@@ -1137,7 +1100,7 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     }
 }
 
-#ifdef HSDAOH_UPSTREAM // Upstream mode callback - writes raw data to ringbuffer (like reference implementation)
+// Upstream mode callback - writes raw data to ringbuffer (like reference implementation)
 static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
 {
     if (!data_info || !data_info->ctx) return;
@@ -1240,7 +1203,6 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
     }
 
 }
-#endif /* HSDAOH_UPSTREAM */
 
 
 // Start capture (+60ln from orig adding upstream callbk)
@@ -1259,6 +1221,7 @@ int gui_app_start_capture(gui_app_t *app) {
     }
 
     device_info_t *dev = &app->devices[app->selected_device];
+    bool use_upstream_backend = (dev->type == DEVICE_TYPE_HSDAOH) && (!app->user_capture_mode_misrc);
     fprintf(stderr, "[GUI] Selected device: %s (type %d, index %d)\n", dev->name, dev->type, dev->index);
 
     // Handle simulated device separately
@@ -1292,6 +1255,8 @@ int gui_app_start_capture(gui_app_t *app) {
         gui_capture_apply_cxadc_profile(app, cxadc_cards);
         int cxadc_rc = gui_cxadc_start(app, cxadc_cards);
         if (cxadc_rc == 0) {
+            app->capture_backend_upstream = false;
+            app->capture_has_channel_b = (cxadc_cards > 1);
             bool prev_runtime_mode = app->capture_mode_runtime_misrc;
             app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
             TraceLog(LOG_INFO,
@@ -1404,10 +1369,6 @@ int gui_app_start_capture(gui_app_t *app) {
     app->sc_dev = NULL;
 
     if (dev->type == DEVICE_TYPE_SIMPLE_CAPTURE) {
-#ifdef HSDAOH_UPSTREAM
-        gui_app_set_status(app, "Simple-capture unavailable in HSDAOH_UPSTREAM build");
-        return -1;
-#else
         fprintf(stderr, "[GUI] Opening %s device %s...\n", sc_get_impl_name(), dev->serial);
         proc_set_priority(PROC_PRIORITY_ABOVE);
         thrd_set_priority(THRD_PRIORITY_CRITICAL);
@@ -1420,30 +1381,11 @@ int gui_app_start_capture(gui_app_t *app) {
             proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
         }
-#endif
+        app->capture_backend_upstream = false;
+        app->capture_has_channel_b = true;
     } else {
-#ifdef HSDAOH_UPSTREAM
-        fprintf(stderr, "[GUI] Opening device index %d (HSDAOH_UPSTREAM)...\n", dev->index);
-        proc_set_priority(PROC_PRIORITY_ABOVE);
-        thrd_set_priority(THRD_PRIORITY_CRITICAL);
-
-        r = hsdaoh_open(&app->hs_dev, dev->index);
-        if (r < 0 || !app->hs_dev) {
-            fprintf(stderr, "[GUI] RP-hsdaoh_open failed: %d\n", r);
-            if (r == -3) {
-                gui_app_set_status(app, "Permission denied opening MS2130 via libusb; run misrc_gui with sudo");
-                proc_set_priority(PROC_PRIORITY_NORMAL);
-                return -3;
-            } else {
-                gui_app_set_status(app, "Failed to open device");
-            }
-            app->hs_dev = NULL;
-            proc_set_priority(PROC_PRIORITY_NORMAL);
-            return -1;
-        }
-        hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
-#else
-        fprintf(stderr, "[GUI] Opening hsdaoh device...\n");
+        fprintf(stderr, "[GUI] Opening hsdaoh device (backend=%s)...\n",
+                use_upstream_backend ? "upstream" : "raw-parser");
         proc_set_priority(PROC_PRIORITY_ABOVE);
         thrd_set_priority(THRD_PRIORITY_CRITICAL);
         r = hsdaoh_open(&app->hs_dev, dev->index);
@@ -1462,16 +1404,16 @@ int gui_app_start_capture(gui_app_t *app) {
         }
 
         hsdaoh_set_msg_callback(app->hs_dev, gui_message_callback, app);
-        hsdaoh_raw_callback(app->hs_dev, true);
-#endif
+        if (!use_upstream_backend) {
+            hsdaoh_raw_callback(app->hs_dev, true);
+        }
 
         fprintf(stderr, "[GUI] Starting stream...\n");
 
-#ifdef HSDAOH_UPSTREAM
-        r = MISRC_HSDAOH_START_STREAM(app->hs_dev, gui_capture_upstream_callback, app);
-#else
-        r = MISRC_HSDAOH_START_STREAM(app->hs_dev, (hsdaoh_read_cb_t)gui_capture_callback, app);
-#endif
+        hsdaoh_read_cb_t stream_cb = use_upstream_backend
+                         ? (hsdaoh_read_cb_t)gui_capture_upstream_callback
+                         : (hsdaoh_read_cb_t)gui_capture_callback;
+        r = MISRC_HSDAOH_START_STREAM(app->hs_dev, stream_cb, app);
 
         if (r < 0) {
             fprintf(stderr, "[GUI] hsdaoh_start_stream failed: %d\n", r);
@@ -1481,13 +1423,16 @@ int gui_app_start_capture(gui_app_t *app) {
             proc_set_priority(PROC_PRIORITY_NORMAL);
             return -1;
         }
+
+        app->capture_backend_upstream = use_upstream_backend;
+        app->capture_has_channel_b = !use_upstream_backend;
     }
 
-#ifndef HSDAOH_UPSTREAM
     // Capture lifecycle boundary: keep parser setup/reset work after stream
     // startup succeeds, not on pre-open or failed-start paths.
-    gui_capture_configure_handler(app, true);
-#endif
+    if (!app->capture_backend_upstream) {
+        gui_capture_configure_handler(app, true);
+    }
 
         bool prev_runtime_mode = app->capture_mode_runtime_misrc;
         app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
@@ -1496,6 +1441,12 @@ int gui_app_start_capture(gui_app_t *app) {
                  prev_runtime_mode ? "MISRC" : "HSDAOH",
                  app->capture_mode_runtime_misrc ? "MISRC" : "HSDAOH",
                  app->user_capture_mode_misrc ? "MISRC" : "HSDAOH");
+        // Reset heartbeat baseline so the 2-second device-timeout in the main
+        // loop starts from *now* (after the potentially slow hsdaoh_open /
+        // start_stream sequence), not from the earlier stats-reset timestamp.
+        // Without this, a first-connect USB claim that takes >2 s causes an
+        // immediate false timeout -> disconnect -> reconnect cycle.
+        atomic_store(&app->last_callback_time_ms, get_time_ms());
         app->is_capturing = true;
         app->capture_start_time = GetTime();
         app->reconnect_pending = false;
@@ -1646,11 +1597,13 @@ void gui_app_stop_capture(gui_app_t *app) {
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
     s_capture_last_logged_drop_total = 0;
-#ifndef HSDAOH_UPSTREAM
     // Capture lifecycle boundary: keep parser teardown/reset work in stop
     // cleanup so reconnects begin from a clean baseline.
-    gui_capture_configure_handler(app, true);
-#endif
+    if (!app->capture_backend_upstream) {
+        gui_capture_configure_handler(app, true);
+    }
+    app->capture_backend_upstream = false;
+    app->capture_has_channel_b = true;
 
     // Print capture summary with backpressure stats
     uint32_t frames = atomic_load(&app->frame_count);
@@ -1790,9 +1743,9 @@ void gui_capture_poll_hsdaoh_status(gui_app_t *app)
     if (!app) return;
 
     uint64_t now = get_time_ms();
-#ifdef HSDAOH_UPSTREAM
-    gui_capture_emit_realtime_diag(app, now);
-#endif
+    if (app->capture_backend_upstream) {
+        gui_capture_emit_realtime_diag(app, now);
+    }
 
     // Poll rate: 2 seconds (non-realtime, as requested)
     if (app->hs_ui_last_poll_ms != 0 && (now - app->hs_ui_last_poll_ms) < 2000) {
