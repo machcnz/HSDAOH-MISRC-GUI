@@ -1844,6 +1844,9 @@ static void gui_record_open_session_log(gui_app_t *app, const char *path_a, cons
              app->settings.audio_monitor_ch34 ? "on" : "off",
              app->user_capture_mode_misrc ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);
+    snprintf(msg, sizeof(msg), "MISRC V1.5/V2.5 A/B swap override: %s",
+             app->settings.misrc_v15_v25_ab_swap ? "on" : "off");
+    gui_record_log_write_line_locked("INFO", msg);
     snprintf(msg, sizeof(msg), "Dropout handling: stop_on_dropout=%s",
              app->settings.stop_on_dropout ? "on" : "off");
     gui_record_log_write_line_locked("INFO", msg);

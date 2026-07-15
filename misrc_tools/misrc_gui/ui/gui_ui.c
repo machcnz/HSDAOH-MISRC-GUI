@@ -2410,6 +2410,19 @@ static void render_version_info_window(gui_app_t *app)
     } else {
         snprintf(vi_rate, sizeof(vi_rate), "%u Hz", sr);
     }
+    bool ab_swap_cxadc = gui_ui_selected_device_is_cxadc(app, NULL);
+#ifdef ENABLE_FX3
+    bool ab_swap_fx3 = gui_ui_selected_device_is_fx3(app);
+#else
+    bool ab_swap_fx3 = false;
+#endif
+#ifdef ENABLE_DDD
+    bool ab_swap_ddd = gui_ui_selected_device_is_ddd(app);
+#else
+    bool ab_swap_ddd = false;
+#endif
+    bool ab_swap_supported_backend = !(ab_swap_cxadc || ab_swap_fx3 || ab_swap_ddd);
+    bool ab_swap_toggle_enabled = ab_swap_supported_backend && !app->is_recording;
 
     CLAY(CLAY_ID("VersionInfoBackdrop"), {
         .layout = {
@@ -2509,6 +2522,33 @@ static void render_version_info_window(gui_app_t *app)
             }
             CLAY_TEXT(make_string(vi_rate),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT) }));
+        }
+
+        CLAY(CLAY_ID("VersionInfoMisrcAbSwapRow"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 }
+        }) {
+            CLAY(CLAY_ID("VersionInfoMisrcAbSwapLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                CLAY_TEXT(CLAY_STRING("A/B Swap:"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+            Color ab_swap_toggle_bg = app->settings.misrc_v15_v25_ab_swap ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+            if (!ab_swap_toggle_enabled) {
+                ab_swap_toggle_bg = ui_disabled_color(ab_swap_toggle_bg);
+            }
+            Color ab_swap_toggle_text = ab_swap_toggle_enabled ? COLOR_TEXT : ui_disabled_color(COLOR_TEXT);
+            CLAY(CLAY_ID("VersionInfoMisrcAbSwapToggle"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = to_clay_color(ab_swap_toggle_bg),
+                .cornerRadius = CLAY_CORNER_RADIUS(4)
+            }) {
+                CLAY_TEXT(app->settings.misrc_v15_v25_ab_swap ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(ab_swap_toggle_text) }));
+            }
+            CLAY_TEXT(CLAY_STRING("MISRC V1.5/V2.5 Swap"),
+                CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
         }
 
         // V4L2 Device List toggle (opt-in simple_capture/V4L2 device discovery).
@@ -4139,6 +4179,33 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_app_set_status(app, app->settings.discover_simple_capture
                     ? "V4L2 device discovery enabled"
                     : "V4L2 device discovery disabled");
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("VersionInfoMisrcAbSwapToggle"))) {
+                bool ab_swap_cxadc = gui_ui_selected_device_is_cxadc(app, NULL);
+#ifdef ENABLE_FX3
+                bool ab_swap_fx3 = gui_ui_selected_device_is_fx3(app);
+#else
+                bool ab_swap_fx3 = false;
+#endif
+#ifdef ENABLE_DDD
+                bool ab_swap_ddd = gui_ui_selected_device_is_ddd(app);
+#else
+                bool ab_swap_ddd = false;
+#endif
+                bool ab_swap_supported_backend = !(ab_swap_cxadc || ab_swap_fx3 || ab_swap_ddd);
+                if (!ab_swap_supported_backend) {
+                    gui_app_set_status(app, "MISRC V1.5/V2.5 A/B swap applies only to HSDAOH/Simple Capture");
+                } else if (app->is_recording) {
+                    gui_app_set_status(app, "MISRC V1.5/V2.5 A/B swap is locked while recording");
+                } else {
+                    app->settings.misrc_v15_v25_ab_swap = !app->settings.misrc_v15_v25_ab_swap;
+                    gui_settings_save(&app->settings);
+                    gui_app_set_status(app, app->settings.misrc_v15_v25_ab_swap
+                        ? "MISRC V1.5/V2.5 A/B swap override enabled"
+                        : "MISRC V1.5/V2.5 A/B swap override disabled");
+                }
                 gui_ui_set_click_consumed();
                 return;
             }

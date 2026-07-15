@@ -238,6 +238,7 @@ typedef struct {
     bool audio_monitor_playback;               // If true, play monitored audio to system output
     bool audio_monitor_ch34;                   // If true, monitor CH3/4; if false, monitor CH1/2
     bool misrc_mode;                           // If true, MISRC mode (default) with A/B channel swap
+    bool misrc_v15_v25_ab_swap;               // If true, invert MISRC A/B mapping for V1.5/V2.5 hardware swap variants
     bool stop_on_dropout;                      // If true, automatically stop capture when stream dropout is detected
 
     // Level autostop: stop capture/recording when signal level stays below a

@@ -128,6 +128,13 @@ static int extraction_thread(void *ctx) {
             swap_channels = s_extract_app->is_recording
                             ? s_extract_app->capture_mode_runtime_misrc
                             : s_extract_app->user_capture_mode_misrc;
+            // Hardware-variant override: some MISRC V1.5/V2.5 setups have the
+            // analog channels wired opposite to the default MISRC mapping.
+            // In that case, invert MISRC swap behavior so GUI/record channels
+            // match the physical A/B inputs.
+            if (swap_channels && s_extract_app->settings.misrc_v15_v25_ab_swap) {
+                swap_channels = false;
+            }
         }
         if (s_b_present && swap_channels) {
             mapped_a = s_buf_b;
