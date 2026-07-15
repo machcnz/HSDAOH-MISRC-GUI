@@ -118,6 +118,10 @@ static int extraction_thread(void *ctx) {
         }
 
         // Extract samples (always - this is the core work)
+        // Re-read capture_has_channel_b each iteration so upstream dual-ADC
+        // auto-detection (sets flag on first stream_id=1 callback) is picked
+        // up without restarting the extraction thread.
+        s_b_present = (s_extract_app && s_extract_app->capture_has_channel_b);
         s_extract_fn((uint32_t*)buf, BUFFER_READ_SIZE, clip, s_buf_aux, s_buf_a, s_buf_b, peak);
         if (!s_b_present) {
             // Prevent stale/uninitialized data from driving CH-B meters/display
@@ -453,10 +457,17 @@ int gui_extract_start(gui_app_t *app) {
     gui_extract_init();
 
     // Configure extraction path from runtime capture capability.
+    // For upstream backend, always use the AB extraction function so that
+    // dual-ADC hardware (auto-detected via stream_id=1 mid-capture) has its
+    // Channel B data unpacked correctly. When B is not present (single ADC),
+    // bits[31:20] are zero and the extraction loop memsets s_buf_b to zero,
+    // so display/recording are unaffected.
+    bool upstream = (app && app->capture_backend_upstream);
     s_b_present = (app && app->capture_has_channel_b);
-    s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, s_b_present ? (void*)1 : NULL);
+    bool use_ab_fn = s_b_present || upstream;
+    s_extract_fn = get_conv_function(0, 0, 0, 0, (void*)1, use_ab_fn ? (void*)1 : NULL);
     if (!s_b_present && misrc_debug_enabled()) {
-        fprintf(stderr, "[EXTRACT] Runtime A-only extraction enabled\n");
+        fprintf(stderr, "[EXTRACT] Runtime A-only extraction enabled (upstream=%d)\n", upstream);
     }
 
     // Store context (uses app->buffers for capture ringbuffer via buffer manager)

@@ -87,6 +87,20 @@
 static capture_handler_ctx_t s_capture_handler;
 static atomic_bool s_upstream_capture_audio = ATOMIC_VAR_INIT(true);
 
+// --- Upstream dual-ADC Channel B pairing state ---
+// hsdaoh delivers stream_id=0 (Ch A) and stream_id=1 (Ch B) as separate
+// callbacks for dual-ADC hardware (PIO_12BIT_DUAL / PIO_DUALCHAN_12BIT /
+// FPGA_12BIT_DUAL). We buffer whichever arrives first and merge when the
+// matching frame arrives, packing into the uint32_t format the extraction
+// layer expects: bits[11:0]=A, bits[31:20]=B.
+// For single-ADC hardware, stream_id=1 never arrives and this buffer stays
+// unused - the existing A-only packing path runs unchanged.
+#define UPSTREAM_CHB_MAX_SAMPLES (1920 * 1080)  // max frame payload
+static uint16_t *s_upstream_chb_buf = NULL;     // allocated on first stream_id=1
+static size_t    s_upstream_chb_count = 0;      // samples buffered
+static bool      s_upstream_chb_ready = false;  // true = buffer holds valid B frame
+static bool      s_upstream_dual_detected = false; // latched on first stream_id=1
+
 #if defined(__APPLE__)
 static IOPMAssertionID s_idle_sleep_assertion_id = kIOPMNullAssertionID;
 static IOPMAssertionID s_display_sleep_assertion_id = kIOPMNullAssertionID;
@@ -795,11 +809,15 @@ static void gui_simple_capture_callback(sc_data_info_t *sc_data_info)
 /*-----------------------------------------------------------------------------
  * Upstream helpers (rp2350 / upstream path)
  *-----------------------------------------------------------------------------*/
+static bool s_upstream_first_data_logged = false;
+
 static inline void gui_upstream_mark_synced(gui_app_t *app)
 {
-    bool was = atomic_exchange(&app->stream_synced, true);
-    if (!was && misrc_debug_enabled()) {
-        fprintf(stderr, "[CB] Upstream stream active\n");
+    atomic_store(&app->stream_synced, true);
+    if (!s_upstream_first_data_logged) {
+        s_upstream_first_data_logged = true;
+        fprintf(stderr, "[CB] Upstream stream active (%s)\n",
+                s_upstream_dual_detected ? "dual-ADC" : "single-ADC");
     }
 }
 
@@ -960,6 +978,12 @@ void gui_app_cleanup(gui_app_t *app) {
         gui_app_stop_capture(app);
     }
 
+    // Free upstream dual-ADC pairing buffer
+    if (s_upstream_chb_buf) {
+        free(s_upstream_chb_buf);
+        s_upstream_chb_buf = NULL;
+    }
+
     // Note: All buffers now managed by buffer manager (cleanup via bufmgr_cleanup)
 
     // Cleanup extraction subsystem
@@ -1101,6 +1125,8 @@ void gui_app_enumerate_devices(gui_app_t *app) {
 }
 
 // Upstream mode callback - writes raw data to ringbuffer (like reference implementation)
+// Supports both single-ADC (stream_id=0 only) and dual-ADC hardware
+// (stream_id=0 + stream_id=1 paired into packed AB format).
 static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
 {
     if (!data_info || !data_info->ctx) return;
@@ -1111,14 +1137,102 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
 
     atomic_store(&app->last_callback_time_ms, get_time_ms());
 
-    // We are receiving valid upstream data -> consider link synced
-    //atomic_store(&app->stream_synced, true);    
-     
+    // --- Stream ID 1: Channel B RF (dual-ADC hardware only) ---
+    // The format converter delivers stream_id=0 (A) THEN stream_id=1 (B) back-
+    // to-back from the same frame. So when stream_id=1 arrives, the A data from
+    // stream_id=0 is already buffered. Merge and write the packed AB frame now.
+    if (data_info->stream_id == 1) {
+        const uint16_t *samples_b = (const uint16_t *)data_info->buf;
+        size_t b_count = data_info->len / sizeof(uint16_t);
+
+        // First-time detection of dual-ADC hardware
+        if (!s_upstream_dual_detected) {
+            s_upstream_dual_detected = true;
+            app->capture_has_channel_b = true;
+            fprintf(stderr, "[CB] Dual-ADC hardware detected (stream_id=1 received)\n");
+        }
+
+        // If we have buffered A data, merge and write
+        if (s_upstream_chb_ready && s_upstream_chb_buf) {
+            size_t a_count = s_upstream_chb_count;
+            size_t sample_count = (a_count > b_count) ? a_count : b_count;
+            size_t packed_bytes = sample_count * sizeof(uint32_t);
+
+            uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, &s_capture_rf_write_policy);
+            gui_capture_update_backpressure_counters(app);
+            if (!out) {
+                uint32_t total_drops = atomic_load(&app->rb_drop_count);
+                uint32_t delta_drops = (total_drops > s_capture_last_logged_drop_total)
+                                         ? (total_drops - s_capture_last_logged_drop_total)
+                                         : 1;
+                s_capture_last_logged_drop_total = total_drops;
+                uint32_t current_frame = atomic_load(&app->frame_count);
+                char drop_msg[192];
+                snprintf(drop_msg, sizeof(drop_msg),
+                         "Capture RF backpressure drop: +%u (total=%u) frame=%u",
+                         delta_drops, total_drops, current_frame);
+                gui_record_log_capture_event(app, "ERROR", drop_msg, GUI_ERROR_CLASS_SYSTEM, delta_drops);
+                if (misrc_debug_enabled()) {
+                    fprintf(stderr, "[CB] %s\n", drop_msg);
+                }
+                if (app->settings.stop_on_dropout) {
+                    gui_capture_request_dropout_stop(app, GUI_DROPOUT_BACKPRESSURE);
+                }
+                s_upstream_chb_ready = false;
+                return;
+            }
+
+            uint32_t *packed = (uint32_t *)out;
+            // bits[11:0] = A, bits[31:20] = B (matches MISRC extract masks)
+            for (size_t i = 0; i < sample_count; i++) {
+                uint32_t a = (i < a_count) ? (uint32_t)(s_upstream_chb_buf[i] & 0x0FFF) : 0;
+                uint32_t b = (i < b_count) ? (uint32_t)(samples_b[i] & 0x0FFF) : 0;
+                packed[i] = a | (b << 20);
+            }
+
+            bufmgr_write_end(&app->buffers, BUF_CAPTURE_RF, packed_bytes);
+            bufmgr_signal_data(&app->buffers, BUF_CAPTURE_RF);
+            atomic_fetch_add(&app->frame_count, 1);
+            s_upstream_chb_ready = false;
+        }
+        // If no A buffered (shouldn't happen normally), discard this B
+        return;
+    }
+
+    // --- Stream ID 0: Channel A RF (always present) ---
     if (data_info->stream_id == 0) {
-        gui_upstream_mark_synced(app); //UPDATE 2 - hsdaoh - status from metadata only - Update 3 put it back ---delete ****
+        gui_upstream_mark_synced(app);
         const uint16_t *samples = (const uint16_t *)data_info->buf;
         size_t sample_count = data_info->len / sizeof(uint16_t);
 
+        // If dual-ADC detected, buffer A and wait for stream_id=1 (B)
+        if (s_upstream_dual_detected) {
+            if (!s_upstream_chb_buf) {
+                s_upstream_chb_buf = (uint16_t *)malloc(UPSTREAM_CHB_MAX_SAMPLES * sizeof(uint16_t));
+                if (!s_upstream_chb_buf) {
+                    fprintf(stderr, "[CB] Failed to allocate Channel A pairing buffer\n");
+                    return;
+                }
+            }
+            if (sample_count > UPSTREAM_CHB_MAX_SAMPLES) {
+                fprintf(stderr, "[CB] WARNING: A sample count %zu exceeds pairing buffer max %d, truncating\n",
+                        sample_count, UPSTREAM_CHB_MAX_SAMPLES);
+                sample_count = UPSTREAM_CHB_MAX_SAMPLES;
+            }
+            memcpy(s_upstream_chb_buf, samples, sample_count * sizeof(uint16_t));
+            s_upstream_chb_count = sample_count;
+            s_upstream_chb_ready = true;
+
+            if (data_info->srate > 0) {
+                uint32_t sample_rate_hz = gui_capture_normalize_sample_rate_hz(data_info->srate);
+                if (sample_rate_hz > 0) {
+                    atomic_store(&app->sample_rate, sample_rate_hz);
+                }
+            }
+            return;
+        }
+
+        // Single-ADC: write A-only immediately (no B expected)
         size_t packed_bytes = sample_count * sizeof(uint32_t);
         uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_RF, packed_bytes, &s_capture_rf_write_policy);
         gui_capture_update_backpressure_counters(app);
@@ -1163,6 +1277,7 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         return;
     }
 
+    // --- Stream ID 2: PCM1802 Audio #1 (always present when audio hardware exists) ---
     if (data_info->stream_id == 2) {
         if (!atomic_load(&s_upstream_capture_audio)) return;
 
@@ -1194,11 +1309,55 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
         if (data_info->srate > 0) {
             static int rate_logged = 0;
             if (!rate_logged) {
-                fprintf(stderr, "[AUDIO] Sample rate: %u Hz\n", data_info->srate);
+                fprintf(stderr, "[AUDIO] PCM1802 #1 sample rate: %u Hz\n", data_info->srate);
                 rate_logged = 1;
             }
         }
         
+        return;
+    }
+
+    // --- Stream ID 3: PCM1802 Audio #2 (dual PCM1802 hardware only) ---
+    // Same format as stream_id=2. Write to audio buffer interleaved after #1.
+    // For now, merge into the same audio ringbuffer (4-channel frame: 12 bytes
+    // from #1 already zero-padded to 12; we fill the second 6 bytes).
+    if (data_info->stream_id == 3) {
+        if (!atomic_load(&s_upstream_capture_audio)) return;
+
+        if (data_info->len < 6) return;
+
+        size_t frames = data_info->len / 6;
+        if (frames == 0) return;
+
+        if (frames > SIZE_MAX / 12) {
+            fprintf(stderr, "[AUDIO] Frame count overflow (stream 3)\n");
+            return;
+        }
+
+        size_t padded_len = frames * 12;
+
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, &s_capture_audio_write_policy);
+        if (!out) return;
+
+        memset(out, 0, padded_len);
+
+        // Place PCM1802 #2 data in the second half of each 12-byte frame
+        const uint8_t *src = data_info->buf;
+        for (size_t i = 0; i < frames; i++) {
+            memcpy(out + i*12 + 6, src + i*6, 6);
+        }
+
+        bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, padded_len);
+        bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
+
+        if (data_info->srate > 0) {
+            static int rate_logged_3 = 0;
+            if (!rate_logged_3) {
+                fprintf(stderr, "[AUDIO] PCM1802 #2 sample rate: %u Hz\n", data_info->srate);
+                rate_logged_3 = 1;
+            }
+        }
+
         return;
     }
 
@@ -1355,6 +1514,11 @@ int gui_app_start_capture(gui_app_t *app) {
     s_capture_missed_streak = 0;
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
+    // Reset upstream dual-ADC pairing state for a fresh capture session.
+    s_upstream_chb_ready = false;
+    s_upstream_chb_count = 0;
+    s_upstream_dual_detected = false;
+    s_upstream_first_data_logged = false;
 
     // Reset display buffers (per-channel)
     app->display_samples_available_a = 0;
@@ -1426,6 +1590,10 @@ int gui_app_start_capture(gui_app_t *app) {
 
         app->capture_backend_upstream = use_upstream_backend;
         app->capture_has_channel_b = !use_upstream_backend;
+        fprintf(stderr, "[GUI] Connected: %s (index=%d) backend=%s channels=%s\n",
+                dev->name, dev->index,
+                use_upstream_backend ? "upstream" : "raw-parser",
+                use_upstream_backend ? "A (B auto-detect)" : "A+B");
     }
 
     // Capture lifecycle boundary: keep parser setup/reset work after stream
@@ -1597,6 +1765,11 @@ void gui_app_stop_capture(gui_app_t *app) {
     s_capture_missed_burst_reported = false;
     s_capture_prev_callback_time_ms = 0;
     s_capture_last_logged_drop_total = 0;
+    // Reset upstream dual-ADC pairing state so reconnects start clean.
+    s_upstream_chb_ready = false;
+    s_upstream_chb_count = 0;
+    s_upstream_dual_detected = false;
+    s_upstream_first_data_logged = false;
     // Capture lifecycle boundary: keep parser teardown/reset work in stop
     // cleanup so reconnects begin from a clean baseline.
     if (!app->capture_backend_upstream) {
