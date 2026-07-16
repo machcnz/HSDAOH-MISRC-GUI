@@ -104,6 +104,60 @@ static size_t    s_upstream_chb_count = 0;      // samples buffered
 static bool      s_upstream_chb_ready = false;  // true = buffer holds valid B frame
 static bool      s_upstream_dual_detected = false; // latched on first stream_id=1
 
+#define UPSTREAM_AUDIO_QUEUE_DEPTH 8
+#define UPSTREAM_AUDIO_STEREO_MAX_BYTES ((1920 * 3) / 2)
+
+typedef struct {
+    uint8_t data[UPSTREAM_AUDIO_STEREO_MAX_BYTES];
+    size_t len;
+} upstream_audio_block_t;
+
+typedef struct {
+    upstream_audio_block_t blocks[UPSTREAM_AUDIO_QUEUE_DEPTH];
+    size_t head;
+    size_t tail;
+    size_t count;
+} upstream_audio_queue_t;
+
+static upstream_audio_queue_t s_upstream_audio1_queue;
+static upstream_audio_queue_t s_upstream_audio2_queue;
+
+static void gui_capture_reset_upstream_audio_queues(void)
+{
+    memset(&s_upstream_audio1_queue, 0, sizeof(s_upstream_audio1_queue));
+    memset(&s_upstream_audio2_queue, 0, sizeof(s_upstream_audio2_queue));
+}
+
+static bool gui_capture_queue_upstream_audio(upstream_audio_queue_t *queue,
+                                             const uint8_t *data,
+                                             size_t len)
+{
+    if (!queue || !data || len == 0 || len > UPSTREAM_AUDIO_STEREO_MAX_BYTES ||
+        queue->count >= UPSTREAM_AUDIO_QUEUE_DEPTH) {
+        return false;
+    }
+
+    upstream_audio_block_t *block = &queue->blocks[queue->head];
+    memcpy(block->data, data, len);
+    block->len = len;
+    queue->head = (queue->head + 1) % UPSTREAM_AUDIO_QUEUE_DEPTH;
+    queue->count++;
+    return true;
+}
+
+static upstream_audio_block_t *gui_capture_peek_upstream_audio(upstream_audio_queue_t *queue)
+{
+    if (!queue || queue->count == 0) return NULL;
+    return &queue->blocks[queue->tail];
+}
+
+static void gui_capture_pop_upstream_audio(upstream_audio_queue_t *queue)
+{
+    if (!queue || queue->count == 0) return;
+    queue->tail = (queue->tail + 1) % UPSTREAM_AUDIO_QUEUE_DEPTH;
+    queue->count--;
+}
+
 #if defined(__APPLE__)
 static IOPMAssertionID s_idle_sleep_assertion_id = kIOPMNullAssertionID;
 static IOPMAssertionID s_display_sleep_assertion_id = kIOPMNullAssertionID;
@@ -1127,6 +1181,38 @@ void gui_app_enumerate_devices(gui_app_t *app) {
     }
 }
 
+static void gui_capture_flush_upstream_audio_pairs(gui_app_t *app)
+{
+    while (s_upstream_audio1_queue.count > 0 && s_upstream_audio2_queue.count > 0) {
+        upstream_audio_block_t *audio1 = gui_capture_peek_upstream_audio(&s_upstream_audio1_queue);
+        upstream_audio_block_t *audio2 = gui_capture_peek_upstream_audio(&s_upstream_audio2_queue);
+        size_t frames1 = audio1->len / 6;
+        size_t frames2 = audio2->len / 6;
+
+        if (frames1 != frames2) {
+            fprintf(stderr, "[AUDIO] PCM1802 block mismatch: #1=%zu frames #2=%zu frames\n",
+                    frames1, frames2);
+            gui_capture_reset_upstream_audio_queues();
+            return;
+        }
+
+        size_t interleaved_len = frames1 * 12;
+        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, interleaved_len,
+                                          &s_capture_audio_write_policy);
+        if (out) {
+            for (size_t i = 0; i < frames1; i++) {
+                memcpy(out + i*12, audio1->data + i*6, 6);
+                memcpy(out + i*12 + 6, audio2->data + i*6, 6);
+            }
+            bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, interleaved_len);
+            bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
+        }
+
+        gui_capture_pop_upstream_audio(&s_upstream_audio1_queue);
+        gui_capture_pop_upstream_audio(&s_upstream_audio2_queue);
+    }
+}
+
 // Upstream mode callback - writes raw data to ringbuffer (like reference implementation)
 // Supports both single-ADC (stream_id=0 only) and dual-ADC hardware
 // (stream_id=0 + stream_id=1 paired into packed AB format).
@@ -1284,30 +1370,40 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
     if (data_info->stream_id == 2) {
         if (!atomic_load(&s_upstream_capture_audio)) return;
 
-        if (data_info->len < 6) return;
-        
-        size_t frames = data_info->len / 6;
-        if (frames == 0) return;
-        
-        if (frames > SIZE_MAX / 12) {
-            fprintf(stderr, "[AUDIO] Frame count overflow\n");
+        if (data_info->len < 6 || (data_info->len % 6) != 0) {
+            fprintf(stderr, "[AUDIO] Invalid PCM1802 #1 block length: %zu bytes\n", data_info->len);
             return;
         }
-        
-        size_t padded_len = frames * 12;
-        
-        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, &s_capture_audio_write_policy);
-        if (!out) return;
-        
-        memset(out, 0, padded_len);
-        
-        const uint8_t *src = data_info->buf;
-        for (size_t i = 0; i < frames; i++) {
-            memcpy(out + i*12, src + i*6, 6);
+
+        if (s_upstream_dual_detected) {
+            if (!gui_capture_queue_upstream_audio(&s_upstream_audio1_queue,
+                                                  data_info->buf, data_info->len)) {
+                fprintf(stderr, "[AUDIO] PCM1802 #1 pairing queue overflow or invalid block\n");
+                gui_capture_reset_upstream_audio_queues();
+                return;
+            }
+            gui_capture_flush_upstream_audio_pairs(app);
+        } else {
+            size_t frames = data_info->len / 6;
+            if (frames > SIZE_MAX / 12) {
+                fprintf(stderr, "[AUDIO] Frame count overflow\n");
+                return;
+            }
+
+            size_t padded_len = frames * 12;
+            uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len,
+                                              &s_capture_audio_write_policy);
+            if (!out) return;
+
+            memset(out, 0, padded_len);
+            const uint8_t *src = data_info->buf;
+            for (size_t i = 0; i < frames; i++) {
+                memcpy(out + i*12, src + i*6, 6);
+            }
+
+            bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, padded_len);
+            bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
         }
-        
-        bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, padded_len);
-        bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
         
         if (data_info->srate > 0) {
             static int rate_logged = 0;
@@ -1321,37 +1417,22 @@ static void gui_capture_upstream_callback(hsdaoh_data_info_t *data_info) //
     }
 
     // --- Stream ID 3: PCM1802 Audio #2 (dual PCM1802 hardware only) ---
-    // Same format as stream_id=2. Write to audio buffer interleaved after #1.
-    // For now, merge into the same audio ringbuffer (4-channel frame: 12 bytes
-    // from #1 already zero-padded to 12; we fill the second 6 bytes).
     if (data_info->stream_id == 3) {
         if (!atomic_load(&s_upstream_capture_audio)) return;
+        if (!s_upstream_dual_detected) return;
 
-        if (data_info->len < 6) return;
-
-        size_t frames = data_info->len / 6;
-        if (frames == 0) return;
-
-        if (frames > SIZE_MAX / 12) {
-            fprintf(stderr, "[AUDIO] Frame count overflow (stream 3)\n");
+        if (data_info->len < 6 || (data_info->len % 6) != 0) {
+            fprintf(stderr, "[AUDIO] Invalid PCM1802 #2 block length: %zu bytes\n", data_info->len);
             return;
         }
 
-        size_t padded_len = frames * 12;
-
-        uint8_t *out = bufmgr_write_begin(&app->buffers, BUF_CAPTURE_AUDIO, padded_len, &s_capture_audio_write_policy);
-        if (!out) return;
-
-        memset(out, 0, padded_len);
-
-        // Place PCM1802 #2 data in the second half of each 12-byte frame
-        const uint8_t *src = data_info->buf;
-        for (size_t i = 0; i < frames; i++) {
-            memcpy(out + i*12 + 6, src + i*6, 6);
+        if (!gui_capture_queue_upstream_audio(&s_upstream_audio2_queue,
+                                              data_info->buf, data_info->len)) {
+            fprintf(stderr, "[AUDIO] PCM1802 #2 pairing queue overflow or invalid block\n");
+            gui_capture_reset_upstream_audio_queues();
+            return;
         }
-
-        bufmgr_write_end(&app->buffers, BUF_CAPTURE_AUDIO, padded_len);
-        bufmgr_signal_data(&app->buffers, BUF_CAPTURE_AUDIO);
+        gui_capture_flush_upstream_audio_pairs(app);
 
         if (data_info->srate > 0) {
             static int rate_logged_3 = 0;
@@ -1543,6 +1624,7 @@ int gui_app_start_capture(gui_app_t *app) {
     s_upstream_chb_ready = false;
     s_upstream_chb_count = 0;
     s_upstream_dual_detected = false;
+    gui_capture_reset_upstream_audio_queues();
     s_upstream_first_data_logged = false;
 
     // Reset display buffers (per-channel)
@@ -1801,6 +1883,7 @@ void gui_app_stop_capture(gui_app_t *app) {
     s_upstream_chb_ready = false;
     s_upstream_chb_count = 0;
     s_upstream_dual_detected = false;
+    gui_capture_reset_upstream_audio_queues();
     s_upstream_first_data_logged = false;
     // Capture lifecycle boundary: keep parser teardown/reset work in stop
     // cleanup so reconnects begin from a clean baseline.
