@@ -3038,11 +3038,11 @@ static void render_toolbar(gui_app_t *app) {
             CLAY_TEXT(app->is_capturing ? CLAY_STRING("Disconnect") : CLAY_STRING("Connect"),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = { 255, 255, 255, 255 } }));
         }
-        // Capture mode toggle (MISRC default: swapped A/B; HSDAOH: normal A/B).
+        // Capture mode toggle also selects HSDAOH backend at connect time:
+        // MISRC -> raw/parser backend, HSDAOH -> upstream backend.
         // For non-hsdaoh USB backends (CXADC, FX3, DdD) the MISRC/HSDAOH A/B-swap
         // concept does not apply, so the toggle shows the backend name as the
-        // mode label and is disabled — this avoids confusion about which
-        // driver/interface is active.
+        // mode label and is disabled.
         bool cxadc_clockgen_mode = false;
         bool cxadc_mode = gui_ui_selected_device_is_cxadc(app, &cxadc_clockgen_mode);
 #ifdef ENABLE_FX3
@@ -3169,8 +3169,9 @@ static void render_toolbar(gui_app_t *app) {
                 }
             }
         }
-        // Record button
-        Color record_color = app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON;
+        // Record button - updated to support finalising code
+        bool record_finalizing = gui_record_is_finalizing();
+        Color record_color = record_finalizing ? (Color){184, 118, 20, 255} : (app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON);
         if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
         CLAY(CLAY_ID("RecordButton"), {
             .layout = {
@@ -3181,7 +3182,7 @@ static void render_toolbar(gui_app_t *app) {
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
             Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
-            CLAY_TEXT(app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record"),
+            CLAY_TEXT(record_finalizing ? CLAY_STRING("Finalize") : (app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record")),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
         }
         // Record limit button (clock icon)
@@ -4480,9 +4481,15 @@ void gui_handle_interactions(gui_app_t *app) {
             } else {
                 gui_ui_set_capture_mode_state(app, !s_capture_mode_state_misrc);
                 gui_settings_save(&app->settings);
-                gui_app_set_status(app, s_capture_mode_state_misrc
-                    ? "Capture mode set to MISRC (A/B swapped)"
-                    : "Capture mode set to HSDAOH (A/B normal)");
+                if (app->is_capturing) {
+                    gui_app_set_status(app, s_capture_mode_state_misrc
+                        ? "Mode set to MISRC (raw/parser backend on reconnect)"
+                        : "Mode set to HSDAOH (upstream backend on reconnect)");
+                } else {
+                    gui_app_set_status(app, s_capture_mode_state_misrc
+                        ? "Mode set to MISRC (raw/parser backend)"
+                        : "Mode set to HSDAOH (upstream backend)");
+                }
             }
             gui_ui_set_click_consumed();
             return;
@@ -4526,9 +4533,12 @@ void gui_handle_interactions(gui_app_t *app) {
             gui_settings_save(&app->settings);
         }
 
-        // Check record button
+        // Check record button - UI indicates record-write to disk finialization
+        // Mitigate app appearing hung
         if (Clay_PointerOver(CLAY_ID("RecordButton")) && app->is_capturing) {
-            if (app->is_recording) {
+            if (gui_record_is_finalizing()) {
+                gui_app_set_status(app, "Finalizing previous recording...");
+            } else if (app->is_recording) {
                 gui_app_stop_recording(app);
             } else {
                 gui_app_start_recording(app);

@@ -381,7 +381,11 @@ static void gui_record_build_log_timestamp(char *dst, size_t dst_len) {
 // Writer threads
 static thrd_t s_writer_thread_a;
 static thrd_t s_writer_thread_b;
+static thrd_t s_finalize_thread;
+static atomic_bool s_finalize_thread_running = ATOMIC_VAR_INIT(false);
 static bool s_writer_threads_running = false;
+static atomic_bool s_record_stop_finalizing = ATOMIC_VAR_INIT(false);
+static atomic_bool s_record_stop_finalize_done = ATOMIC_VAR_INIT(false);
 static FILE *s_file_a = NULL;
 static FILE *s_file_b = NULL;
 static char s_record_path_a[512];
@@ -454,6 +458,22 @@ static gui_app_t *s_recording_app = NULL;
 // Overwrite confirmation pending state
 static bool s_overwrite_pending = false;
 static gui_app_t *s_pending_app = NULL;
+
+typedef struct {
+    gui_app_t *app;
+    double stop_request_time;
+} gui_record_finalize_ctx_t;
+
+static bool gui_record_collect_finalize_if_done(void) {
+    if (!atomic_exchange(&s_record_stop_finalize_done, false)) {
+        return false;
+    }
+    if (atomic_load(&s_finalize_thread_running)) {
+        thrd_join(s_finalize_thread, NULL);
+        atomic_store(&s_finalize_thread_running, false);
+    }
+    return true;
+}
 
 // Record-buffer backpressure stats at recording start (to compute per-session deltas)
 static uint32_t s_start_rec_a_wait_count = 0;
@@ -1341,12 +1361,21 @@ static int raw_writer_thread(void *ctx) {
 
 // Initialize recording subsystem
 void gui_record_init(void) {
+    atomic_store(&s_record_stop_finalizing, false);
+    atomic_store(&s_record_stop_finalize_done, false);
     gui_record_reset_disk_guard_state();
     gui_record_spill_reset_all();
 }
 
 // Cleanup recording subsystem
 void gui_record_cleanup(void) {
+    while (atomic_load(&s_record_stop_finalizing)) {
+        thrd_sleep_ms(10);
+    }
+    if (atomic_load(&s_finalize_thread_running)) {
+        thrd_join(s_finalize_thread, NULL);
+        atomic_store(&s_finalize_thread_running, false);
+    }
     gui_record_reset_disk_guard_state();
     gui_record_spill_reset_all();
     gui_record_close_session_log();
@@ -2052,6 +2081,13 @@ static void gui_record_apply_auto_names(gui_app_t *app) {
 // Start recording - checks for file existence first
 int gui_record_start(gui_app_t *app) {
 
+    (void)gui_record_collect_finalize_if_done();
+
+    if (atomic_load(&s_record_stop_finalizing) || atomic_load(&s_finalize_thread_running)) {
+        gui_app_set_status(app, "Finalizing previous recording...");
+        return RECORD_ERROR;
+    }
+
     if (!app->is_capturing) {
         gui_app_set_status(app, "Start capture first");
         return RECORD_ERROR;
@@ -2114,6 +2150,10 @@ int gui_record_start(gui_app_t *app) {
 
 // Check popup result and continue recording if confirmed
 void gui_record_check_popup(gui_app_t *app) {
+    if (gui_record_collect_finalize_if_done()) {
+        gui_app_set_status(app, "Recording stopped");
+    }
+
     if (!s_overwrite_pending) {
         return;
     }
@@ -2563,40 +2603,8 @@ static int gui_record_start_confirmed(gui_app_t *app) {
     return RECORD_OK;
 }
 
-// Stop recording
-void gui_record_stop(gui_app_t *app) {
-    if (!app->is_recording) {
-        return;
-    }
-    gui_record_reset_disk_guard_state();
-    double stop_request_time = GetTime();
-
-    // Disable recording in extraction thread first
-    // This stops new data from being written to record ringbuffers
-    gui_extract_set_recording(false, false, 16, 16);
-
-    // Signal threads to stop FIRST so the audio restart cannot reopen WAVs in record mode - 070226 - MA
-    app->is_recording = false;
-
-    // Stop audio output/monitoring (file writing). --- 070226 - MA - Changed to resolve wav file corruption.
-    // Then restart audio thread in monitor-only mode if we are still capturing,
-    // so audio capture stays always-on without filling BUF_CAPTURE_AUDIO.
-    
-    //gui_audio_stop(app);
-    //if (app->is_capturing) {
-    //    (void)gui_audio_start(app, &app->buffers);
-    //}
-    gui_audio_stop(app);
-    if (app->is_capturing) {
-        (void)gui_audio_start(app, &app->buffers);
-    }
-
-    // Restore normal process priority
-    proc_set_priority(PROC_PRIORITY_NORMAL);
-
-    // Signal threads to stop
-    //app->is_recording = false;
-
+// Stop recording - heavy finalization runs in background thread to keep UI responsive
+static void gui_record_finalize_stop_sync(gui_app_t *app, double stop_request_time) {
     // Wait for writer threads to drain and exit
     if (s_writer_threads_running) {
         if (app->settings.capture_a) thrd_join(s_writer_thread_a, NULL);
@@ -2732,5 +2740,74 @@ void gui_record_stop(gui_app_t *app) {
 #endif
 
     s_recording_app = NULL;
-    gui_app_set_status(app, "Recording stopped");
+}
+
+static int gui_record_finalize_thread(void *arg) {
+    gui_record_finalize_ctx_t *ctx = (gui_record_finalize_ctx_t *)arg;
+    if (!ctx || !ctx->app) {
+        atomic_store(&s_record_stop_finalizing, false);
+        if (ctx) free(ctx);
+        return 0;
+    }
+
+    gui_record_finalize_stop_sync(ctx->app, ctx->stop_request_time);
+    atomic_store(&s_record_stop_finalize_done, true);
+    atomic_store(&s_record_stop_finalizing, false);
+    free(ctx);
+    return 0;
+}
+
+void gui_record_stop(gui_app_t *app) {
+    if (!app->is_recording) {
+        return;
+    }
+    if (atomic_load(&s_record_stop_finalizing) || atomic_load(&s_finalize_thread_running)) {
+        gui_app_set_status(app, "Finalizing previous recording...");
+        return;
+    }
+    gui_record_reset_disk_guard_state();
+    double stop_request_time = GetTime();
+
+    // Disable recording in extraction thread first.
+    gui_extract_set_recording(false, false, 16, 16);
+
+    // Signal threads to stop FIRST so the audio restart cannot reopen WAVs in record mode.
+    app->is_recording = false;
+
+    // Stop audio output/monitoring and restart monitor-only path if still capturing.
+    gui_audio_stop(app);
+    if (app->is_capturing) {
+        (void)gui_audio_start(app, &app->buffers);
+    }
+
+    // Restore normal process priority
+    proc_set_priority(PROC_PRIORITY_NORMAL);
+
+    gui_record_finalize_ctx_t *ctx = (gui_record_finalize_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        gui_record_finalize_stop_sync(app, stop_request_time);
+        gui_app_set_status(app, "Recording stopped");
+        return;
+    }
+
+    ctx->app = app;
+    ctx->stop_request_time = stop_request_time;
+
+    atomic_store(&s_record_stop_finalize_done, false);
+    atomic_store(&s_record_stop_finalizing, true);
+
+    if (thrd_create(&s_finalize_thread, gui_record_finalize_thread, ctx) != thrd_success) {
+        atomic_store(&s_record_stop_finalizing, false);
+        free(ctx);
+        gui_record_finalize_stop_sync(app, stop_request_time);
+        gui_app_set_status(app, "Recording stopped");
+        return;
+    }
+
+    atomic_store(&s_finalize_thread_running, true);
+    gui_app_set_status(app, "Finalizing recording...");
+}
+
+bool gui_record_is_finalizing(void) {
+    return atomic_load(&s_record_stop_finalizing) || atomic_load(&s_finalize_thread_running);
 }
